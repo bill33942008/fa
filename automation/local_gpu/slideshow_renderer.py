@@ -128,6 +128,30 @@ def burn_subtitles(
         print(f"[WARN] subtitle burn failed, saved sidecar: {sidecar}")
 
 
+def finalize_video(
+    ffmpeg: str,
+    merged_video: Path,
+    subtitles: Path,
+    output_file: Path,
+    hard_subtitles: bool = False,
+    font_name: str = "Microsoft YaHei",
+) -> None:
+    if hard_subtitles:
+        burn_subtitles(
+            ffmpeg,
+            merged_video,
+            subtitles,
+            output_file,
+            font_name=font_name,
+        )
+        return
+
+    shutil.copy2(merged_video, output_file)
+    sidecar = output_file.with_suffix(".srt")
+    shutil.copy2(subtitles, sidecar)
+    print(f"[INFO] hard subtitles disabled, saved sidecar: {sidecar}")
+
+
 def synthesize_tts(segment_text: str, output_audio: Path, voice: str) -> None:
     edge = shutil.which("edge-tts")
     if edge:
@@ -363,7 +387,13 @@ def render_slideshow_video(
         subtitles = temp_path / "subs.srt"
         write_srt(cues, subtitles)
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        burn_subtitles(ffmpeg, merged, subtitles, output_file)
+        finalize_video(
+            ffmpeg,
+            merged,
+            subtitles,
+            output_file,
+            hard_subtitles=bool(comfy_cfg.get("hard_subtitles", False)),
+        )
 
     print(f"[OK] slideshow video rendered -> {output_file}")
     return output_file
