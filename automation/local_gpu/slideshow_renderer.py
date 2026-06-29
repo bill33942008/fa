@@ -78,7 +78,7 @@ def write_srt(cues: list[tuple[float, float, str]], path: Path) -> None:
         lines.extend(
             [str(idx), f"{format_srt_time(start)} --> {format_srt_time(end)}", clean, ""]
         )
-    path.write_text("\n".join(lines), encoding="utf-8")
+    path.write_text("\ufeff" + "\n".join(lines), encoding="utf-8")
 
 
 def run_command(command: list[str], *, cwd: str | None = None) -> None:
@@ -86,6 +86,46 @@ def run_command(command: list[str], *, cwd: str | None = None) -> None:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "unknown error").strip()
         raise RuntimeError(f"Command failed: {' '.join(command)} | {detail[:500]}")
+
+
+def burn_subtitles(
+    ffmpeg: str,
+    merged_video: Path,
+    subtitles: Path,
+    output_file: Path,
+    *,
+    font_name: str = "Microsoft YaHei",
+) -> None:
+    workdir = str(merged_video.parent)
+    style = (
+        f"FontName={font_name},FontSize=22,PrimaryColour=&HFFFFFF&,"
+        "OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=1"
+    )
+    filter_expr = f"subtitles=subs.srt:charenc=UTF-8:force_style='{style}'"
+    try:
+        run_command(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                merged_video.name,
+                "-vf",
+                filter_expr,
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "copy",
+                str(output_file.resolve()),
+            ],
+            cwd=workdir,
+        )
+    except RuntimeError:
+        shutil.copy2(merged_video, output_file)
+        sidecar = output_file.with_suffix(".srt")
+        shutil.copy2(subtitles, sidecar)
+        print(f"[WARN] subtitle burn failed, saved sidecar: {sidecar}")
 
 
 def synthesize_tts(segment_text: str, output_audio: Path, voice: str) -> None:
@@ -323,21 +363,7 @@ def render_slideshow_video(
         subtitles = temp_path / "subs.srt"
         write_srt(cues, subtitles)
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        run_command(
-            [
-                ffmpeg,
-                "-y",
-                "-i",
-                str(merged),
-                "-vf",
-                f"subtitles={subtitles.as_posix()}",
-                "-c:v",
-                "libx264",
-                "-c:a",
-                "copy",
-                str(output_file),
-            ]
-        )
+        burn_subtitles(ffmpeg, merged, subtitles, output_file)
 
     print(f"[OK] slideshow video rendered -> {output_file}")
     return output_file
