@@ -62,6 +62,9 @@ Current target matrix:
    python3 -m http.server 8787 --directory automation/previews
    ```
 
+   Portal layout (left dates, right content):
+   - `http://YOUR_SERVER_IP:8787/index.html`
+
 7. Mark content as posted after platform upload:
 
    ```bash

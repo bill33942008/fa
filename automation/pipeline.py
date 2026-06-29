@@ -980,6 +980,88 @@ a{{color:#2563eb;text-decoration:none;}}
     return {"index_file": str(index_file), "index_url": index_url}
 
 
+def list_preview_dates() -> list[str]:
+    if not PREVIEW_DIR.exists():
+        return []
+    dates = [entry.name for entry in PREVIEW_DIR.iterdir() if entry.is_dir()]
+    return sorted(dates, reverse=True)
+
+
+def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
+    dates = list_preview_dates()
+    if not dates:
+        return {"portal_file": "", "portal_url": ""}
+
+    links: list[str] = []
+    for date in dates:
+        links.append(
+            (
+                f"<a class='date-link' href='{date}/index.html' target='date-content-frame' "
+                f"onclick=\"document.getElementById('current-date').innerText='{date}';\">{date}</a>"
+            )
+        )
+
+    default_date = dates[0]
+    portal_html = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>内容预览门户</title>
+  <style>
+    body {{
+      margin: 0; background: #f3f5f9; color: #1f2937;
+      font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+    }}
+    .layout {{
+      display: grid; grid-template-columns: 260px 1fr; min-height: 100vh;
+    }}
+    .sidebar {{
+      border-right: 1px solid #e5e7eb; background: #fff; padding: 16px; overflow: auto;
+    }}
+    .sidebar h2 {{ margin: 0 0 12px; font-size: 18px; }}
+    .sidebar .hint {{ font-size: 12px; color: #6b7280; margin-bottom: 10px; }}
+    .date-link {{
+      display: block; padding: 10px 12px; border-radius: 8px; color: #111827; text-decoration: none;
+      margin-bottom: 6px; background: #f8fafc;
+    }}
+    .date-link:hover {{ background: #e8f1ff; color: #1d4ed8; }}
+    .content {{
+      padding: 16px;
+    }}
+    .header {{
+      background: #fff; border-radius: 12px; padding: 12px 14px; margin-bottom: 12px;
+      box-shadow: 0 3px 12px rgba(0,0,0,.06);
+    }}
+    .header h1 {{ margin: 0; font-size: 18px; }}
+    iframe {{
+      width: 100%; height: calc(100vh - 120px); border: 0; border-radius: 12px; background: #fff;
+      box-shadow: 0 4px 16px rgba(0,0,0,.08);
+    }}
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h2>日期列表</h2>
+      <div class="hint">点击左侧日期，在右侧查看当天内容预览</div>
+      {''.join(links)}
+    </aside>
+    <main class="content">
+      <div class="header">
+        <h1>当前日期：<span id="current-date">{default_date}</span></h1>
+      </div>
+      <iframe name="date-content-frame" src="{default_date}/index.html"></iframe>
+    </main>
+  </div>
+</body>
+</html>"""
+    portal_file = PREVIEW_DIR / "index.html"
+    portal_file.write_text(portal_html, encoding="utf-8")
+    portal_url = build_preview_url(config, portal_file)
+    return {"portal_file": str(portal_file), "portal_url": portal_url}
+
+
 def build_queue_summary(queue: list[dict[str, Any]]) -> str:
     if not queue:
         return "Queue is empty."
@@ -1459,6 +1541,11 @@ def command_plan_day(args: argparse.Namespace) -> None:
         print(f"[OK] Preview index: {preview_index['index_file']}")
         if preview_index["index_url"]:
             print(f"[OK] Preview URL: {preview_index['index_url']}")
+    preview_portal = build_preview_portal(config)
+    if preview_portal["portal_file"]:
+        print(f"[OK] Preview portal: {preview_portal['portal_file']}")
+        if preview_portal["portal_url"]:
+            print(f"[OK] Preview portal URL: {preview_portal['portal_url']}")
 
     save_queue(queue)
     print(f"[DONE] Created {new_items} queue items.")
@@ -1658,6 +1745,12 @@ def command_preview(args: argparse.Namespace) -> None:
         print(f"[OK] preview index ({item_date}): {preview_index['index_file']}")
         if preview_index["index_url"]:
             print(f"[OK] preview url ({item_date}): {preview_index['index_url']}")
+
+    preview_portal = build_preview_portal(config)
+    if preview_portal["portal_file"]:
+        print(f"[OK] preview portal: {preview_portal['portal_file']}")
+        if preview_portal["portal_url"]:
+            print(f"[OK] preview portal url: {preview_portal['portal_url']}")
 
     save_queue(queue)
     if args.sync_feishu:

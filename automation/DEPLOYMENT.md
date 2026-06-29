@@ -188,6 +188,10 @@ python3 -m http.server 8787 --directory automation/previews
 If `preview.public_base_url` is set (for example `http://YOUR_SERVER_IP:8787`), Feishu
 records will include direct clickable links in `PreviewURL`.
 
+Portal entry (left date list, right date content):
+
+- `http://YOUR_SERVER_IP:8787/index.html`
+
 You can sync on demand:
 
 ```bash
