@@ -62,16 +62,32 @@ def run_command(command: list[str], *, check: bool = True) -> subprocess.Complet
     return result
 
 
+def resolve_workflow_dir(config: dict[str, Any], comfy_cfg: dict[str, Any]) -> Path:
+    install_root = Path(str(config.get("jobs_dir", "video_jobs"))).parent
+    raw = str(comfy_cfg.get("workflow_dir", "")).strip()
+    if not raw:
+        return install_root / "workflows"
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    candidates = [
+        install_root / raw,
+        install_root / "workflows",
+        Path(__file__).resolve().parent / "workflows",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return (install_root / raw).resolve()
+
+
 def merge_comfy_cfg(config: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
-    defaults = dict(config.get("comfyui", {}))
-    defaults.update(job.get("comfyui", {}))
-    if not defaults.get("url"):
-        defaults["url"] = config.get("comfyui_url", "http://127.0.0.1:8000")
-    workflow_dir = str(defaults.get("workflow_dir", "")).strip()
-    if not workflow_dir:
-        base = Path(config.get("jobs_dir", "video_jobs")).parent
-        defaults["workflow_dir"] = str(base / "workflows")
-    return defaults
+    # Local config wins over server-exported job paths (jobs often carry "workflows").
+    merged = {**job.get("comfyui", {}), **config.get("comfyui", {})}
+    if not merged.get("url"):
+        merged["url"] = config.get("comfyui_url", "http://127.0.0.1:8000")
+    merged["workflow_dir"] = str(resolve_workflow_dir(config, merged))
+    return merged
 
 
 def convert_to_mp4_if_needed(source: Path, target_mp4: Path) -> Path:

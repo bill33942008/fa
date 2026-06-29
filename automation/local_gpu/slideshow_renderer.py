@@ -168,9 +168,11 @@ def render_slideshow_video(
 
     base_url = str(comfy_cfg.get("url", "http://127.0.0.1:8000")).rstrip("/")
     client = ComfyUIClient(base_url)
-    workflow_dir = Path(str(comfy_cfg.get("workflow_dir", "workflows")))
-    workflow_file = str(comfy_cfg.get("workflow_file", "short_video.api.json"))
-    workflow_path = workflow_dir / workflow_file
+    workflow_path = Path(str(comfy_cfg.get("workflow_dir", "workflows"))) / str(
+        comfy_cfg.get("workflow_file", "short_video.api.json")
+    )
+    if not workflow_path.is_absolute():
+        workflow_path = workflow_path.resolve()
     if not workflow_path.exists():
         raise FileNotFoundError(f"Workflow missing: {workflow_path}")
 
