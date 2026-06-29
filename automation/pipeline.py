@@ -824,7 +824,7 @@ def split_video_segments(body_markdown: str, limit: int = 8) -> list[str]:
     return chunks[:limit]
 
 
-def build_preview_html(item: dict[str, Any], content: dict[str, str]) -> str:
+def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: dict[str, str]) -> str:
     title = html.escape(str(item.get("title", "")).strip() or "未命名草稿")
     account = html.escape(str(item.get("account_name", "")).strip())
     platform = html.escape(str(item.get("platform", "")).strip())
@@ -849,6 +849,11 @@ def build_preview_html(item: dict[str, Any], content: dict[str, str]) -> str:
         f"<a href='{source_link}' target='_blank' rel='noreferrer'>来源链接</a></div>"
     )
 
+    sample_video_url = str(item.get("sample_video_url", "")).strip()
+    sample_video_file = str(item.get("sample_video_file", "")).strip()
+    if not sample_video_url and sample_video_file:
+        sample_video_url = build_preview_url(config, Path(sample_video_file))
+
     if post_format == "short_video_script":
         segments = split_video_segments(content.get("body_markdown", ""))
         timeline_rows: list[str] = []
@@ -862,12 +867,18 @@ def build_preview_html(item: dict[str, Any], content: dict[str, str]) -> str:
                 "</li>"
             )
         timeline_html = "\n".join(timeline_rows) if timeline_rows else "<li><span class='line'>暂无分镜</span></li>"
+        video_player = (
+            f"<div class='video-player'><video controls playsinline preload='metadata' src='{html.escape(sample_video_url)}'></video></div>"
+            if sample_video_url
+            else "<div class='video-missing'>暂未生成样片视频，请先执行 render-samples。</div>"
+        )
         content_card = (
             "<div class='phone video'>"
             "<div class='video-cover'>"
             f"<div class='cover-text'>{cover_text or title}</div>"
             f"<div class='video-hook'>{hook_text}</div>"
             "</div>"
+            f"{video_player}"
             "<div class='timeline'><h3>视频分镜时间轴（预演）</h3><ol>"
             f"{timeline_html}"
             "</ol></div></div>"
@@ -912,6 +923,12 @@ def build_preview_html(item: dict[str, Any], content: dict[str, str]) -> str:
     }}
     .cover-text {{ font-size: 20px; line-height: 1.35; font-weight: 700; }}
     .video-hook {{ font-size: 13px; line-height: 1.6; opacity: .9; }}
+    .video-player {{ margin-top: 12px; }}
+    .video-player video {{ width: 100%; border-radius: 10px; background: #000; min-height: 220px; }}
+    .video-missing {{
+      margin-top: 12px; background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa;
+      border-radius: 8px; padding: 10px; font-size: 13px;
+    }}
     .timeline h3 {{ margin: 14px 0 8px; font-size: 14px; }}
     .timeline ol {{ margin: 0; padding-left: 18px; }}
     .timeline li {{ margin: 8px 0; font-size: 13px; line-height: 1.6; }}
@@ -943,7 +960,7 @@ def generate_preview_for_item(config: dict[str, Any], item: dict[str, Any]) -> N
     preview_dir = PREVIEW_DIR / item_date
     preview_dir.mkdir(parents=True, exist_ok=True)
     preview_file = preview_dir / f"{queue_id}.html"
-    preview_file.write_text(build_preview_html(item, content), encoding="utf-8")
+    preview_file.write_text(build_preview_html(config, item, content), encoding="utf-8")
     item["preview_file"] = str(preview_file)
     item["preview_url"] = build_preview_url(config, preview_file)
 
