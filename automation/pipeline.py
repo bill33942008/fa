@@ -927,7 +927,8 @@ def build_video_job_payload(config: dict[str, Any], item: dict[str, Any]) -> dic
         "remote_media_path": f"{item_date}/{queue_id}.mp4",
         "status": "pending",
         "created_at": now_local().isoformat(),
-        "pixelle_api_url": str(local_cfg.get("pixelle_api_url", "http://127.0.0.1:8501")).rstrip("/"),
+        "pixelle_web_url": str(local_cfg.get("pixelle_web_url", "http://127.0.0.1:8501")).rstrip("/"),
+        "pixelle_api_url": str(local_cfg.get("pixelle_api_url", "http://127.0.0.1:8502")).rstrip("/"),
         "comfyui_url": str(local_cfg.get("comfyui_url", "http://127.0.0.1:8000")).rstrip("/"),
         "generation": {
             "mode": str(gen_cfg.get("mode", "fixed")),

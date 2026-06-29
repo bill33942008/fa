@@ -56,11 +56,11 @@ On your Windows PC, open **PowerShell** and run:
 powershell -ExecutionPolicy Bypass -Command "Invoke-WebRequest http://118.25.178.116:8787/local-gpu-deploy/setup_windows.ps1 -OutFile $env:TEMP\setup_windows.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\setup_windows.ps1"
 ```
 
-Prerequisites on your PC before running:
-
-1. ComfyUI running at `http://127.0.0.1:8000`
-2. Pixelle-Video API at `http://127.0.0.1:8501`
-3. Python 3.10+ in PATH
+| 服务 | 端口 | 说明 |
+|------|------|------|
+| ComfyUI | **8000** | 图像/视频生成 |
+| Pixelle Web UI | **8501** | Streamlit 网页（不能给 worker 调 API） |
+| Pixelle REST API | **8502** | FastAPI，worker 必须连这个 |
 
 After setup, double-click `D:\content-ops\scripts\start_worker.bat` for daily runs.
 

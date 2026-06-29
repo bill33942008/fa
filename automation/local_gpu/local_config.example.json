@@ -1,8 +1,13 @@
 {
   "jobs_dir": "D:/content-ops/video_jobs",
   "output_dir": "D:/content-ops/rendered_videos",
-  "pixelle_api_url": "http://127.0.0.1:8501",
+  "pixelle_web_url": "http://127.0.0.1:8501",
+  "pixelle_api_url": "http://127.0.0.1:8502",
   "comfyui_url": "http://127.0.0.1:8000",
+  "pixelle_api_candidates": [
+    "http://127.0.0.1:8502",
+    "http://127.0.0.1:8888"
+  ],
   "pull_jobs_from_server": {
     "enabled": true,
     "server_host": "YOUR_SERVER_IP",

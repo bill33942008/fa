@@ -76,12 +76,22 @@ if (-not $SkipHealthCheck) {
         Write-Warn "ComfyUI not reachable. Please start ComfyUI first (port 8000)."
     }
 
-    Write-Step "Checking Pixelle-Video API at $($config.pixelle_api_url)"
+    $webUrl = $config.pixelle_web_url
+    if (-not $webUrl) { $webUrl = "http://127.0.0.1:8501" }
+    Write-Step "Checking Pixelle Web UI at $webUrl"
     try {
-        $health = Invoke-WebRequest -Uri "$($config.pixelle_api_url)/api/health" -UseBasicParsing -TimeoutSec 5
-        Write-Ok "Pixelle-Video API is reachable"
+        Invoke-WebRequest -Uri $webUrl -UseBasicParsing -TimeoutSec 5 | Out-Null
+        Write-Ok "Pixelle Web UI is reachable (Streamlit, not REST API)"
     } catch {
-        Write-Warn "Pixelle-Video API not reachable. Start with: uv run uvicorn api.app:app --host 0.0.0.0 --port 8501"
+        Write-Warn "Pixelle Web UI not reachable on $webUrl"
+    }
+
+    Write-Step "Checking Pixelle REST API at $($config.pixelle_api_url)"
+    try {
+        $health = Invoke-WebRequest -Uri "$($config.pixelle_api_url)/health" -UseBasicParsing -TimeoutSec 5
+        Write-Ok "Pixelle REST API is reachable"
+    } catch {
+        Write-Warn "Pixelle REST API not reachable on port 8502. Run start_pixelle_api.bat first (8501 is Web UI only)."
     }
 }
 
