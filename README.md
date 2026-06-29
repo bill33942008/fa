@@ -93,6 +93,8 @@ Current target matrix:
    python3 automation/pipeline.py --config automation/config.json render-cloud-videos --date 2026-07-03 --only-pending --sync-feishu
    ```
 
+   Suggested provider (Mainland-friendly): DashScope Wanx/Wan (set `DASHSCOPE_API_KEY`).
+
    Recommended runtime:
    - `ffmpeg`
    - `edge-tts` (better Chinese voice quality than local fallback)

@@ -233,22 +233,26 @@ Full guide: `automation/local_gpu/README.md`
 
 ### Cloud media rendering (fully online)
 
-Enable in `automation/config.json`:
+Enable in `automation/config.json` (DashScope / 通义万相):
 
 ```json
 "cloud_media": {
   "enabled": true,
   "image": {
     "enabled": true,
-    "provider": "replicate",
-    "api_token_env": "REPLICATE_API_TOKEN",
-    "model": "black-forest-labs/flux-schnell"
+    "provider": "dashscope",
+    "api_key_env": "DASHSCOPE_API_KEY",
+    "base_url": "https://dashscope.aliyuncs.com/api/v1",
+    "model": "wanx-v1",
+    "size": "1024*1024"
   },
   "video": {
     "enabled": true,
-    "provider": "replicate",
-    "api_token_env": "REPLICATE_API_TOKEN",
-    "model": "minimax/video-01"
+    "provider": "dashscope",
+    "api_key_env": "DASHSCOPE_API_KEY",
+    "base_url": "https://dashscope.aliyuncs.com/api/v1",
+    "model": "wan2.6-t2v",
+    "size": "720*1280"
   }
 }
 ```

@@ -160,6 +160,75 @@ def cloud_media_enabled(config: dict[str, Any]) -> bool:
     return bool(config.get("cloud_media", {}).get("enabled", False))
 
 
+def dashscope_headers(cfg: dict[str, Any], *, async_mode: bool = False) -> dict[str, str]:
+    key_env = str(cfg.get("api_key_env", "DASHSCOPE_API_KEY")).strip()
+    key = os.getenv(key_env, "")
+    if not key:
+        raise ValueError(f"Missing DashScope API key env: {key_env}")
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    if async_mode:
+        headers["X-DashScope-Async"] = "enable"
+    return headers
+
+
+def dashscope_base_url(cfg: dict[str, Any]) -> str:
+    return str(cfg.get("base_url", "https://dashscope.aliyuncs.com/api/v1")).rstrip("/")
+
+
+def dashscope_create_task(cfg: dict[str, Any], endpoint_path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    url = f"{dashscope_base_url(cfg)}{endpoint_path}"
+    try:
+        return http_post_json(
+            url,
+            payload,
+            headers=dashscope_headers(cfg, async_mode=True),
+            timeout=int(cfg.get("request_timeout_seconds", 60)),
+        )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(f"DashScope create task HTTP {exc.code}: {detail}") from exc
+
+
+def dashscope_extract_task_id(resp: dict[str, Any]) -> str:
+    output = resp.get("output", {}) if isinstance(resp, dict) else {}
+    if isinstance(output, dict):
+        for key in ("task_id", "taskId", "id"):
+            value = str(output.get(key, "")).strip()
+            if value:
+                return value
+    for key in ("task_id", "taskId", "id"):
+        value = str(resp.get(key, "")).strip() if isinstance(resp, dict) else ""
+        if value:
+            return value
+    return ""
+
+
+def dashscope_poll_task(cfg: dict[str, Any], task_id: str) -> dict[str, Any]:
+    timeout_seconds = int(cfg.get("timeout_seconds", 1200))
+    poll_interval = float(cfg.get("poll_interval_seconds", 5))
+    started = now_local().timestamp()
+    url = f"{dashscope_base_url(cfg)}/tasks/{task_id}"
+    while True:
+        try:
+            status = http_get_json(url, headers=dashscope_headers(cfg), timeout=30)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            if exc.code in {429, 503, 502}:
+                print("[WARN] DashScope busy/rate-limit, backing off.")
+                time.sleep(max(2.0, poll_interval * 2))
+                continue
+            raise RuntimeError(f"DashScope poll HTTP {exc.code}: {detail}") from exc
+        output = status.get("output", {}) if isinstance(status, dict) else {}
+        task_status = str(output.get("task_status", output.get("status", ""))).upper()
+        if task_status in {"SUCCEEDED", "SUCCESS", "COMPLETED"}:
+            return status
+        if task_status in {"FAILED", "CANCELED", "CANCELLED"}:
+            raise RuntimeError(f"DashScope task failed: {status}")
+        if now_local().timestamp() - started > timeout_seconds:
+            raise TimeoutError(f"DashScope task timeout after {timeout_seconds}s: {task_id}")
+        time.sleep(poll_interval)
+
+
 def replicate_headers(cfg: dict[str, Any]) -> dict[str, str]:
     token_env = str(cfg.get("api_token_env", "REPLICATE_API_TOKEN")).strip()
     token = os.getenv(token_env, "")
@@ -1092,7 +1161,7 @@ def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, 
     if not media_cfg.get("enabled", False) or not image_cfg.get("enabled", False):
         return {"status": "disabled"}
     provider = str(image_cfg.get("provider", "replicate")).lower().strip()
-    if provider != "replicate":
+    if provider not in {"replicate", "dashscope"}:
         raise ValueError(f"Unsupported cloud image provider: {provider}")
 
     queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
@@ -1103,24 +1172,43 @@ def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, 
     urls: list[str] = []
     files: list[str] = []
     for idx, prompt in enumerate(prompts, start=1):
-        input_candidates = [
-            {
-                "prompt": prompt,
-                "aspect_ratio": str(image_cfg.get("aspect_ratio", "9:16")),
-                "output_format": str(image_cfg.get("output_format", "jpg")),
-                "num_outputs": 1,
-            },
-            {"prompt": prompt, "num_outputs": 1},
-            {"prompt": prompt},
-        ]
-        prediction = replicate_create_prediction_candidates(image_cfg, input_candidates)
-        prediction_id = str(prediction.get("id", "")).strip()
-        if not prediction_id:
-            raise RuntimeError(f"Replicate image prediction failed: {prediction}")
-        done = replicate_poll_prediction(image_cfg, prediction_id)
-        out_urls = normalize_prediction_urls(done.get("output"))
+        if provider == "replicate":
+            input_candidates = [
+                {
+                    "prompt": prompt,
+                    "aspect_ratio": str(image_cfg.get("aspect_ratio", "9:16")),
+                    "output_format": str(image_cfg.get("output_format", "jpg")),
+                    "num_outputs": 1,
+                },
+                {"prompt": prompt, "num_outputs": 1},
+                {"prompt": prompt},
+            ]
+            prediction = replicate_create_prediction_candidates(image_cfg, input_candidates)
+            prediction_id = str(prediction.get("id", "")).strip()
+            if not prediction_id:
+                raise RuntimeError(f"Replicate image prediction failed: {prediction}")
+            done = replicate_poll_prediction(image_cfg, prediction_id)
+            out_urls = normalize_prediction_urls(done.get("output"))
+        else:
+            payload = {
+                "model": str(image_cfg.get("model", "wanx-v1")),
+                "input": {"prompt": prompt},
+                "parameters": {
+                    "size": str(image_cfg.get("size", "1024*1024")),
+                    "n": 1,
+                    "negative_prompt": str(image_cfg.get("negative_prompt", "")),
+                },
+            }
+            created = dashscope_create_task(
+                image_cfg, "/services/aigc/text2image/image-synthesis", payload
+            )
+            task_id = dashscope_extract_task_id(created)
+            if not task_id:
+                raise RuntimeError(f"DashScope image task create failed: {created}")
+            done = dashscope_poll_task(image_cfg, task_id)
+            out_urls = normalize_prediction_urls(done)
         if not out_urls:
-            raise RuntimeError(f"No image URL from prediction {prediction_id}")
+            raise RuntimeError("No image URL returned from cloud provider")
         source_url = out_urls[0]
         ext = ".jpg" if image_cfg.get("output_format", "jpg") == "jpg" else f".{image_cfg.get('output_format')}"
         local_file = media_dir / f"{queue_id}_{idx}{ext}"
@@ -1140,7 +1228,7 @@ def render_cloud_video_for_item(config: dict[str, Any], item: dict[str, Any]) ->
     if not media_cfg.get("enabled", False) or not video_cfg.get("enabled", False):
         return {"status": "disabled"}
     provider = str(video_cfg.get("provider", "replicate")).lower().strip()
-    if provider != "replicate":
+    if provider not in {"replicate", "dashscope"}:
         raise ValueError(f"Unsupported cloud video provider: {provider}")
 
     queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
@@ -1150,21 +1238,39 @@ def render_cloud_video_for_item(config: dict[str, Any], item: dict[str, Any]) ->
         f"Create a vertical short social video for this script. "
         f"Title: {item.get('title','')}. Script: {script_text[:1200]}"
     )
-    input_candidates = [
-        {
-            "prompt": prompt,
-            "aspect_ratio": str(video_cfg.get("aspect_ratio", "9:16")),
-            "duration": int(video_cfg.get("duration_seconds", 8)),
-        },
-        {"prompt": prompt, "duration": int(video_cfg.get("duration_seconds", 8))},
-        {"prompt": prompt},
-    ]
-    prediction = replicate_create_prediction_candidates(video_cfg, input_candidates)
-    prediction_id = str(prediction.get("id", "")).strip()
-    if not prediction_id:
-        raise RuntimeError(f"Replicate video prediction failed: {prediction}")
-    done = replicate_poll_prediction(video_cfg, prediction_id)
-    out_urls = normalize_prediction_urls(done.get("output"))
+    if provider == "replicate":
+        input_candidates = [
+            {
+                "prompt": prompt,
+                "aspect_ratio": str(video_cfg.get("aspect_ratio", "9:16")),
+                "duration": int(video_cfg.get("duration_seconds", 8)),
+            },
+            {"prompt": prompt, "duration": int(video_cfg.get("duration_seconds", 8))},
+            {"prompt": prompt},
+        ]
+        prediction = replicate_create_prediction_candidates(video_cfg, input_candidates)
+        prediction_id = str(prediction.get("id", "")).strip()
+        if not prediction_id:
+            raise RuntimeError(f"Replicate video prediction failed: {prediction}")
+        done = replicate_poll_prediction(video_cfg, prediction_id)
+        out_urls = normalize_prediction_urls(done.get("output"))
+    else:
+        payload = {
+            "model": str(video_cfg.get("model", "wan2.6-t2v")),
+            "input": {"prompt": prompt},
+            "parameters": {
+                "size": str(video_cfg.get("size", "720*1280")),
+                "duration": int(video_cfg.get("duration_seconds", 8)),
+            },
+        }
+        created = dashscope_create_task(
+            video_cfg, "/services/aigc/video-generation/video-synthesis", payload
+        )
+        prediction_id = dashscope_extract_task_id(created)
+        if not prediction_id:
+            raise RuntimeError(f"DashScope video task create failed: {created}")
+        done = dashscope_poll_task(video_cfg, prediction_id)
+        out_urls = normalize_prediction_urls(done)
     if not out_urls:
         raise RuntimeError(f"No video URL from prediction {prediction_id}")
     source_url = out_urls[0]
