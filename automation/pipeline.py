@@ -186,11 +186,18 @@ def resolve_replicate_version(cfg: dict[str, Any]) -> str:
         # If user already passed a version-like value, allow it.
         cfg["_resolved_version"] = model
         return model
-    meta = http_get_json(
-        f"https://api.replicate.com/v1/models/{model}",
-        headers=replicate_headers(cfg),
-        timeout=30,
-    )
+    try:
+        meta = http_get_json(
+            f"https://api.replicate.com/v1/models/{model}",
+            headers=replicate_headers(cfg),
+            timeout=30,
+        )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(
+            f"Replicate model metadata HTTP {exc.code}: {detail}. "
+            "If you see Cloudflare 1010, the current server egress IP is blocked by Replicate."
+        ) from exc
     latest = meta.get("latest_version", {}) if isinstance(meta, dict) else {}
     version = str(latest.get("id", "")).strip()
     if not version:
