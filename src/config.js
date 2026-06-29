@@ -7,6 +7,9 @@ const GAME_CONFIG = {
     danger: "#ef4444",
     textPrimary: "#f8fafc",
     textMuted: "#94a3b8",
+    card: "rgba(15, 23, 42, 0.88)",
+    cardSoft: "rgba(30, 41, 59, 0.9)",
+    buttonText: "#0f172a",
   },
   player: {
     width: 76,
@@ -16,6 +19,7 @@ const GAME_CONFIG = {
   item: {
     radius: 14,
     propRadius: 15,
+    gemRadius: 12,
     baseSpeed: 130,
     levelSpeedGain: 18,
     speedRandom: 70,
@@ -26,6 +30,8 @@ const GAME_CONFIG = {
     maxBombRate: 0.47,
     bombRateGainPerLevel: 0.032,
     propRate: 0.12,
+    gemRate: 0.08,
+    gemScore: 6,
   },
   props: {
     shield: {
@@ -52,10 +58,20 @@ const GAME_CONFIG = {
     comboWindowMs: 1250,
     maxComboMultiplier: 5,
     invincibleAfterReviveMs: 2200,
+    feverTriggerCombo: 10,
+    feverDurationMs: 6500,
+    feverScoreScale: 2,
   },
   economy: {
     dailyBonusCoins: 50,
     doubleRewardMultiplier: 2,
+    missionBonusMin: 18,
+    missionBonusMax: 45,
+  },
+  monetization: {
+    adEnabled: false,
+    allowFreeRewardInPrelaunch: true,
+    prelaunchTag: "公测冲UV模式",
   },
   retention: {
     dailyTargetMin: 30,
@@ -83,6 +99,23 @@ const GAME_CONFIG = {
       "星辰",
       "豆包",
       "南风",
+    ],
+  },
+  worldLeaderboard: {
+    endpoint: "",
+    timeoutMs: 2200,
+    maxEntries: 20,
+    fallbackNames: [
+      "SkyRider",
+      "RubyFox",
+      "PixelPro",
+      "NovaKid",
+      "LuckyMax",
+      "WaveHero",
+      "AceMint",
+      "NeoSpark",
+      "WindBee",
+      "LunaQ",
     ],
   },
 };

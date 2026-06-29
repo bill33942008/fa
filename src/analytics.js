@@ -28,6 +28,10 @@ function getDefaultAnalytics() {
       interstitial: { requested: 0, completed: 0 },
       rewarded: { requested: 0, completed: 0 },
     },
+    rewardGrant: {
+      ad: 0,
+      free: 0,
+    },
     adRevenue: 0,
   };
 }
@@ -51,6 +55,10 @@ function loadAnalytics() {
     merged.ad.rewarded = {
       ...getDefaultAnalytics().ad.rewarded,
       ...(merged.ad.rewarded || {}),
+    };
+    merged.rewardGrant = {
+      ...getDefaultAnalytics().rewardGrant,
+      ...(data.rewardGrant || {}),
     };
     return merged;
   } catch (error) {
@@ -102,6 +110,14 @@ function trackAdComplete(analytics, adType, revenue) {
   return analytics;
 }
 
+function trackRewardGrant(analytics, mode) {
+  if (!analytics.rewardGrant[mode] && analytics.rewardGrant[mode] !== 0) {
+    return analytics;
+  }
+  analytics.rewardGrant[mode] += 1;
+  return analytics;
+}
+
 function getAnalyticsSnapshot(analytics) {
   const rewardedReq = analytics.ad.rewarded.requested;
   const rewardedDone = analytics.ad.rewarded.completed;
@@ -125,6 +141,8 @@ function getAnalyticsSnapshot(analytics) {
     arpu,
     sessions: analytics.sessions,
     rounds: analytics.roundsSettled,
+    freeRewardGrant: analytics.rewardGrant.free,
+    adRewardGrant: analytics.rewardGrant.ad,
   };
 }
 
@@ -136,5 +154,6 @@ module.exports = {
   trackRoundSettled,
   trackAdRequest,
   trackAdComplete,
+  trackRewardGrant,
   getAnalyticsSnapshot,
 };
