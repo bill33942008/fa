@@ -176,12 +176,49 @@ def replicate_create_prediction(cfg: dict[str, Any], payload_input: dict[str, An
     if not model:
         raise ValueError("cloud_media.*.model is required for replicate provider")
     payload = {"model": model, "input": payload_input}
-    return http_post_json(
-        "https://api.replicate.com/v1/predictions",
-        payload,
-        headers=replicate_headers(cfg),
-        timeout=int(cfg.get("request_timeout_seconds", 60)),
-    )
+    try:
+        return http_post_json(
+            "https://api.replicate.com/v1/predictions",
+            payload,
+            headers=replicate_headers(cfg),
+            timeout=int(cfg.get("request_timeout_seconds", 60)),
+        )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(f"Replicate create prediction HTTP {exc.code}: {detail}") from exc
+
+
+def replicate_create_prediction_with_retries(
+    cfg: dict[str, Any], payload_input: dict[str, Any]
+) -> dict[str, Any]:
+    max_retries = int(cfg.get("max_retries", 4))
+    base_sleep = float(cfg.get("retry_backoff_seconds", 2))
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return replicate_create_prediction(cfg, payload_input)
+        except Exception as exc:  # pylint: disable=broad-except
+            last_error = exc
+            text = str(exc)
+            retryable = "HTTP 429" in text or "HTTP 503" in text or "HTTP 502" in text
+            if not retryable or attempt >= max_retries:
+                raise
+            sleep_seconds = base_sleep * (2**attempt)
+            print(f"[WARN] Replicate busy/rate-limit, retry in {sleep_seconds:.1f}s")
+            time.sleep(sleep_seconds)
+    raise RuntimeError(f"Replicate create prediction failed: {last_error}")
+
+
+def replicate_create_prediction_candidates(
+    cfg: dict[str, Any], input_candidates: list[dict[str, Any]]
+) -> dict[str, Any]:
+    errors: list[str] = []
+    for idx, payload_input in enumerate(input_candidates, start=1):
+        try:
+            return replicate_create_prediction_with_retries(cfg, payload_input)
+        except Exception as exc:  # pylint: disable=broad-except
+            errors.append(f"candidate#{idx}: {exc}")
+    raise RuntimeError("All Replicate input candidates failed: " + " | ".join(errors[:3]))
 
 
 def replicate_poll_prediction(cfg: dict[str, Any], prediction_id: str) -> dict[str, Any]:
@@ -190,11 +227,19 @@ def replicate_poll_prediction(cfg: dict[str, Any], prediction_id: str) -> dict[s
     poll_interval = float(cfg.get("poll_interval_seconds", 3))
     started = now_local().timestamp()
     while True:
-        status = http_get_json(
-            f"https://api.replicate.com/v1/predictions/{prediction_id}",
-            headers=headers,
-            timeout=30,
-        )
+        try:
+            status = http_get_json(
+                f"https://api.replicate.com/v1/predictions/{prediction_id}",
+                headers=headers,
+                timeout=30,
+            )
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            if exc.code == 429:
+                print("[WARN] Replicate poll hit 429, backing off.")
+                time.sleep(max(2.0, poll_interval * 2))
+                continue
+            raise RuntimeError(f"Replicate poll HTTP {exc.code}: {detail}") from exc
         state = str(status.get("status", "")).lower()
         if state == "succeeded":
             return status
@@ -1025,13 +1070,17 @@ def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, 
     urls: list[str] = []
     files: list[str] = []
     for idx, prompt in enumerate(prompts, start=1):
-        payload_input = {
-            "prompt": prompt,
-            "aspect_ratio": str(image_cfg.get("aspect_ratio", "9:16")),
-            "output_format": str(image_cfg.get("output_format", "jpg")),
-            "num_outputs": 1,
-        }
-        prediction = replicate_create_prediction(image_cfg, payload_input)
+        input_candidates = [
+            {
+                "prompt": prompt,
+                "aspect_ratio": str(image_cfg.get("aspect_ratio", "9:16")),
+                "output_format": str(image_cfg.get("output_format", "jpg")),
+                "num_outputs": 1,
+            },
+            {"prompt": prompt, "num_outputs": 1},
+            {"prompt": prompt},
+        ]
+        prediction = replicate_create_prediction_candidates(image_cfg, input_candidates)
         prediction_id = str(prediction.get("id", "")).strip()
         if not prediction_id:
             raise RuntimeError(f"Replicate image prediction failed: {prediction}")
@@ -1068,12 +1117,16 @@ def render_cloud_video_for_item(config: dict[str, Any], item: dict[str, Any]) ->
         f"Create a vertical short social video for this script. "
         f"Title: {item.get('title','')}. Script: {script_text[:1200]}"
     )
-    payload_input = {
-        "prompt": prompt,
-        "aspect_ratio": str(video_cfg.get("aspect_ratio", "9:16")),
-        "duration": int(video_cfg.get("duration_seconds", 8)),
-    }
-    prediction = replicate_create_prediction(video_cfg, payload_input)
+    input_candidates = [
+        {
+            "prompt": prompt,
+            "aspect_ratio": str(video_cfg.get("aspect_ratio", "9:16")),
+            "duration": int(video_cfg.get("duration_seconds", 8)),
+        },
+        {"prompt": prompt, "duration": int(video_cfg.get("duration_seconds", 8))},
+        {"prompt": prompt},
+    ]
+    prediction = replicate_create_prediction_candidates(video_cfg, input_candidates)
     prediction_id = str(prediction.get("id", "")).strip()
     if not prediction_id:
         raise RuntimeError(f"Replicate video prediction failed: {prediction}")
@@ -1105,6 +1158,8 @@ def render_cloud_illustrations_for_items(
     config: dict[str, Any], items: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    image_cfg = config.get("cloud_media", {}).get("image", {})
+    item_delay = float(image_cfg.get("item_delay_seconds", 1.5))
     for item in items:
         if item.get("post_format") not in {"long_article", "graphic_post"}:
             continue
@@ -1117,6 +1172,8 @@ def render_cloud_illustrations_for_items(
             item["notes"] = (str(item.get("notes", "")).strip() + f" | 云插图失败: {exc}").strip(" |")
             item["updated_at"] = now_local().isoformat()
             print(f"[WARN] cloud illustrations failed {item.get('id')}: {exc}")
+        if item_delay > 0:
+            time.sleep(item_delay)
     return results
 
 
@@ -1124,6 +1181,8 @@ def render_cloud_videos_for_items(
     config: dict[str, Any], items: list[dict[str, Any]], *, include_blocked: bool = False
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    video_cfg = config.get("cloud_media", {}).get("video", {})
+    item_delay = float(video_cfg.get("item_delay_seconds", 2.5))
     for item in items:
         if item.get("post_format") != "short_video_script":
             continue
@@ -1140,6 +1199,8 @@ def render_cloud_videos_for_items(
             item["notes"] = (str(item.get("notes", "")).strip() + f" | 云视频失败: {exc}").strip(" |")
             item["updated_at"] = now_local().isoformat()
             print(f"[WARN] cloud video failed {item.get('id')}: {exc}")
+        if item_delay > 0:
+            time.sleep(item_delay)
     return results
 
 

@@ -51,6 +51,9 @@
       "aspect_ratio": "9:16",
       "output_format": "jpg",
       "auto_render_on_plan_day": false,
+      "max_retries": 4,
+      "retry_backoff_seconds": 2,
+      "item_delay_seconds": 1.5,
       "poll_interval_seconds": 3,
       "timeout_seconds": 600
     },
@@ -63,6 +66,9 @@
       "aspect_ratio": "9:16",
       "include_blocked": false,
       "auto_render_on_plan_day": false,
+      "max_retries": 4,
+      "retry_backoff_seconds": 2,
+      "item_delay_seconds": 2.5,
       "poll_interval_seconds": 5,
       "timeout_seconds": 1200
     }
