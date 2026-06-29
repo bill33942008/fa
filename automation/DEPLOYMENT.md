@@ -231,6 +231,35 @@ python3 automation/pipeline.py --config automation/config.json import-local-vide
 
 Full guide: `automation/local_gpu/README.md`
 
+### Cloud media rendering (fully online)
+
+Enable in `automation/config.json`:
+
+```json
+"cloud_media": {
+  "enabled": true,
+  "image": {
+    "enabled": true,
+    "provider": "replicate",
+    "api_token_env": "REPLICATE_API_TOKEN",
+    "model": "black-forest-labs/flux-schnell"
+  },
+  "video": {
+    "enabled": true,
+    "provider": "replicate",
+    "api_token_env": "REPLICATE_API_TOKEN",
+    "model": "minimax/video-01"
+  }
+}
+```
+
+Then run:
+
+```bash
+python3 automation/pipeline.py --config automation/config.json render-illustrations --only-pending --sync-feishu
+python3 automation/pipeline.py --config automation/config.json render-cloud-videos --only-pending --sync-feishu
+```
+
 Voice quality notes:
 
 - Preferred: `sample_video.tts_engine=edge-tts` with `tts_voice=zh-CN-XiaoxiaoNeural`

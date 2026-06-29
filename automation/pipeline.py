@@ -27,6 +27,7 @@ import ssl
 import subprocess
 import tempfile
 import textwrap
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -64,6 +65,10 @@ FEISHU_FIELD_DEFINITIONS: dict[str, dict[str, Any]] = {
     "SampleVideoFile": {"type": 1},
     "SampleVideoURL": {"type": 1},
     "SampleAudioFile": {"type": 1},
+    "IllustrationFiles": {"type": 1},
+    "IllustrationURLs": {"type": 1},
+    "CloudVideoProvider": {"type": 1},
+    "CloudVideoPredictionID": {"type": 1},
     "HookText": {"type": 1},
     "BodyPreview": {"type": 1},
     "ContentMarkdown": {"type": 1},
@@ -143,6 +148,74 @@ def http_get_json(
     request = urllib.request.Request(url, headers=headers or {}, method="GET")
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def http_get_bytes(url: str, headers: dict[str, str] | None = None, timeout: int = 60) -> bytes:
+    request = urllib.request.Request(url, headers=headers or {}, method="GET")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def cloud_media_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("cloud_media", {}).get("enabled", False))
+
+
+def replicate_headers(cfg: dict[str, Any]) -> dict[str, str]:
+    token_env = str(cfg.get("api_token_env", "REPLICATE_API_TOKEN")).strip()
+    token = os.getenv(token_env, "")
+    if not token:
+        raise ValueError(f"Missing Replicate token env: {token_env}")
+    return {
+        "Authorization": f"Token {token}",
+        "Content-Type": "application/json",
+    }
+
+
+def replicate_create_prediction(cfg: dict[str, Any], payload_input: dict[str, Any]) -> dict[str, Any]:
+    model = str(cfg.get("model", "")).strip()
+    if not model:
+        raise ValueError("cloud_media.*.model is required for replicate provider")
+    payload = {"model": model, "input": payload_input}
+    return http_post_json(
+        "https://api.replicate.com/v1/predictions",
+        payload,
+        headers=replicate_headers(cfg),
+        timeout=int(cfg.get("request_timeout_seconds", 60)),
+    )
+
+
+def replicate_poll_prediction(cfg: dict[str, Any], prediction_id: str) -> dict[str, Any]:
+    headers = replicate_headers(cfg)
+    timeout_seconds = int(cfg.get("timeout_seconds", 900))
+    poll_interval = float(cfg.get("poll_interval_seconds", 3))
+    started = now_local().timestamp()
+    while True:
+        status = http_get_json(
+            f"https://api.replicate.com/v1/predictions/{prediction_id}",
+            headers=headers,
+            timeout=30,
+        )
+        state = str(status.get("status", "")).lower()
+        if state == "succeeded":
+            return status
+        if state in {"failed", "canceled"}:
+            raise RuntimeError(f"Replicate prediction failed: {status.get('error', status)}")
+        if now_local().timestamp() - started > timeout_seconds:
+            raise TimeoutError(f"Replicate prediction timeout after {timeout_seconds}s: {prediction_id}")
+        time.sleep(poll_interval)
+
+
+def normalize_prediction_urls(output: Any) -> list[str]:
+    if isinstance(output, str) and output.startswith("http"):
+        return [output]
+    if isinstance(output, list):
+        return [str(x) for x in output if isinstance(x, str) and x.startswith("http")]
+    if isinstance(output, dict):
+        urls: list[str] = []
+        for value in output.values():
+            urls.extend(normalize_prediction_urls(value))
+        return urls
+    return []
 
 
 def fetch_rss(url: str) -> list[dict[str, Any]]:
@@ -906,6 +979,170 @@ def build_video_script_text(item: dict[str, Any]) -> str:
     return hook or body or str(item.get("title", "")).strip()
 
 
+def build_cloud_image_prompts(item: dict[str, Any], count: int = 3) -> list[str]:
+    content = extract_content_payload(item)
+    segments = split_video_segments(content.get("body_markdown", ""), limit=max(3, count + 1))
+    title = str(item.get("title", "")).strip()
+    track = str(item.get("track", "")).strip()
+    style_map = {
+        "football": "sports editorial illustration, tactical board, dramatic stadium lighting",
+        "child_education": "warm parenting education scene, lifestyle photography style",
+        "travel": "travel guide editorial illustration, cinematic destination view",
+        "ai_funny": "comic digital illustration, vivid expressive characters",
+    }
+    style = style_map.get(track, "editorial illustration, clean visual storytelling")
+    prompts: list[str] = []
+    for idx in range(count):
+        seed_text = segments[idx] if idx < len(segments) else title
+        prompts.append(
+            f"Chinese social media article illustration, no text overlay, {style}. "
+            f"Topic: {title}. Scene: {seed_text[:160]}"
+        )
+    return prompts
+
+
+def write_cloud_asset_from_url(url: str, target: Path) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    blob = http_get_bytes(url, timeout=120)
+    target.write_bytes(blob)
+    return target
+
+
+def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    media_cfg = config.get("cloud_media", {})
+    image_cfg = media_cfg.get("image", {})
+    if not media_cfg.get("enabled", False) or not image_cfg.get("enabled", False):
+        return {"status": "disabled"}
+    provider = str(image_cfg.get("provider", "replicate")).lower().strip()
+    if provider != "replicate":
+        raise ValueError(f"Unsupported cloud image provider: {provider}")
+
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    count = max(1, int(image_cfg.get("images_per_item", 3)))
+    prompts = build_cloud_image_prompts(item, count=count)
+    media_dir = PREVIEW_DIR / "media" / item_date / "illustrations"
+    urls: list[str] = []
+    files: list[str] = []
+    for idx, prompt in enumerate(prompts, start=1):
+        payload_input = {
+            "prompt": prompt,
+            "aspect_ratio": str(image_cfg.get("aspect_ratio", "9:16")),
+            "output_format": str(image_cfg.get("output_format", "jpg")),
+            "num_outputs": 1,
+        }
+        prediction = replicate_create_prediction(image_cfg, payload_input)
+        prediction_id = str(prediction.get("id", "")).strip()
+        if not prediction_id:
+            raise RuntimeError(f"Replicate image prediction failed: {prediction}")
+        done = replicate_poll_prediction(image_cfg, prediction_id)
+        out_urls = normalize_prediction_urls(done.get("output"))
+        if not out_urls:
+            raise RuntimeError(f"No image URL from prediction {prediction_id}")
+        source_url = out_urls[0]
+        ext = ".jpg" if image_cfg.get("output_format", "jpg") == "jpg" else f".{image_cfg.get('output_format')}"
+        local_file = media_dir / f"{queue_id}_{idx}{ext}"
+        write_cloud_asset_from_url(source_url, local_file)
+        files.append(str(local_file))
+        urls.append(build_preview_url(config, local_file))
+
+    item["illustration_files"] = files
+    item["illustration_urls"] = urls
+    item["updated_at"] = now_local().isoformat()
+    return {"status": "ok", "count": len(files), "urls": urls}
+
+
+def render_cloud_video_for_item(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    media_cfg = config.get("cloud_media", {})
+    video_cfg = media_cfg.get("video", {})
+    if not media_cfg.get("enabled", False) or not video_cfg.get("enabled", False):
+        return {"status": "disabled"}
+    provider = str(video_cfg.get("provider", "replicate")).lower().strip()
+    if provider != "replicate":
+        raise ValueError(f"Unsupported cloud video provider: {provider}")
+
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    script_text = build_video_script_text(item)
+    prompt = (
+        f"Create a vertical short social video for this script. "
+        f"Title: {item.get('title','')}. Script: {script_text[:1200]}"
+    )
+    payload_input = {
+        "prompt": prompt,
+        "aspect_ratio": str(video_cfg.get("aspect_ratio", "9:16")),
+        "duration": int(video_cfg.get("duration_seconds", 8)),
+    }
+    prediction = replicate_create_prediction(video_cfg, payload_input)
+    prediction_id = str(prediction.get("id", "")).strip()
+    if not prediction_id:
+        raise RuntimeError(f"Replicate video prediction failed: {prediction}")
+    done = replicate_poll_prediction(video_cfg, prediction_id)
+    out_urls = normalize_prediction_urls(done.get("output"))
+    if not out_urls:
+        raise RuntimeError(f"No video URL from prediction {prediction_id}")
+    source_url = out_urls[0]
+    media_dir = PREVIEW_DIR / "media" / item_date
+    media_dir.mkdir(parents=True, exist_ok=True)
+    out_video = media_dir / f"{queue_id}.mp4"
+    write_cloud_asset_from_url(source_url, out_video)
+
+    item["sample_video_file"] = str(out_video)
+    item["sample_video_url"] = build_preview_url(config, out_video)
+    item["cloud_video_provider"] = "replicate"
+    item["cloud_video_prediction_id"] = prediction_id
+    item["updated_at"] = now_local().isoformat()
+    return {
+        "status": "ok",
+        "id": queue_id,
+        "video_file": str(out_video),
+        "video_url": item["sample_video_url"],
+        "prediction_id": prediction_id,
+    }
+
+
+def render_cloud_illustrations_for_items(
+    config: dict[str, Any], items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for item in items:
+        if item.get("post_format") not in {"long_article", "graphic_post"}:
+            continue
+        try:
+            result = render_cloud_illustrations_for_item(config, item)
+            results.append({"id": item.get("id"), **result})
+            if result.get("status") == "ok":
+                print(f"[OK] illustrations rendered {item.get('id')} -> {result.get('count', 0)} image(s)")
+        except Exception as exc:  # pylint: disable=broad-except
+            item["notes"] = (str(item.get("notes", "")).strip() + f" | 云插图失败: {exc}").strip(" |")
+            item["updated_at"] = now_local().isoformat()
+            print(f"[WARN] cloud illustrations failed {item.get('id')}: {exc}")
+    return results
+
+
+def render_cloud_videos_for_items(
+    config: dict[str, Any], items: list[dict[str, Any]], *, include_blocked: bool = False
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for item in items:
+        if item.get("post_format") != "short_video_script":
+            continue
+        if not include_blocked and (
+            item.get("status") == "auto_blocked" or item.get("publish_advice") == "禁发"
+        ):
+            continue
+        try:
+            result = render_cloud_video_for_item(config, item)
+            results.append({"id": item.get("id"), **result})
+            if result.get("status") == "ok":
+                print(f"[OK] cloud video rendered {item.get('id')} -> {result.get('video_file','')}")
+        except Exception as exc:  # pylint: disable=broad-except
+            item["notes"] = (str(item.get("notes", "")).strip() + f" | 云视频失败: {exc}").strip(" |")
+            item["updated_at"] = now_local().isoformat()
+            print(f"[WARN] cloud video failed {item.get('id')}: {exc}")
+    return results
+
+
 def build_video_job_payload(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
     local_cfg = config.get("local_gpu", {})
     comfy_cfg = local_cfg.get("comfyui", {})
@@ -1086,6 +1323,26 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     sample_video_file = str(item.get("sample_video_file", "")).strip()
     if not sample_video_url and sample_video_file:
         sample_video_url = build_preview_url(config, Path(sample_video_file))
+    illustration_urls = item.get("illustration_urls", [])
+    if not illustration_urls:
+        files = item.get("illustration_files", [])
+        if isinstance(files, list):
+            illustration_urls = [
+                build_preview_url(config, Path(path))
+                for path in files
+                if str(path).strip()
+            ]
+    if not isinstance(illustration_urls, list):
+        illustration_urls = []
+    gallery_html = ""
+    if illustration_urls:
+        cards = "".join(
+            [
+                f"<div class='ill-card'><img src='{html.escape(str(url))}' loading='lazy' /></div>"
+                for url in illustration_urls
+            ]
+        )
+        gallery_html = f"<div class='ill-gallery'><h3>文案自动插图</h3><div class='ill-grid'>{cards}</div></div>"
 
     if post_format == "short_video_script":
         segments = split_video_segments(content.get("body_markdown", ""))
@@ -1126,6 +1383,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
             "<div class='phone article'>"
             f"<h1>{title}</h1>"
             f"<div class='hook'>{hook_text}</div>"
+            f"{gallery_html}"
             f"<div class='body'>{body_html}</div>"
             f"<div class='cover'>封面文案：{cover_text}</div>"
             "</div>"
@@ -1172,6 +1430,10 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .timeline li {{ margin: 8px 0; font-size: 13px; line-height: 1.6; }}
     .time {{ display: inline-block; width: 70px; color: #2563eb; font-weight: 600; }}
     .line {{ color: #1f2937; }}
+    .ill-gallery {{ margin: 10px 0 12px; }}
+    .ill-gallery h3 {{ margin: 0 0 8px; font-size: 14px; color: #374151; }}
+    .ill-grid {{ display: grid; gap: 8px; grid-template-columns: 1fr; }}
+    .ill-card img {{ width: 100%; border-radius: 10px; border: 1px solid #e5e7eb; }}
   </style>
 </head>
 <body>
@@ -1785,6 +2047,14 @@ def to_feishu_fields(item: dict[str, Any]) -> dict[str, Any]:
         "SampleVideoFile": item.get("sample_video_file", ""),
         "SampleVideoURL": item.get("sample_video_url", ""),
         "SampleAudioFile": item.get("sample_audio_file", ""),
+        "IllustrationFiles": "\n".join(item.get("illustration_files", []))
+        if isinstance(item.get("illustration_files"), list)
+        else str(item.get("illustration_files", "")),
+        "IllustrationURLs": "\n".join(item.get("illustration_urls", []))
+        if isinstance(item.get("illustration_urls"), list)
+        else str(item.get("illustration_urls", "")),
+        "CloudVideoProvider": item.get("cloud_video_provider", ""),
+        "CloudVideoPredictionID": item.get("cloud_video_prediction_id", ""),
         "HookText": content["hook_text"][:2000],
         "BodyPreview": content["body_preview"][:1200],
         "ContentMarkdown": content["content_markdown"][:8000],
@@ -2096,6 +2366,7 @@ def command_plan_day(args: argparse.Namespace) -> None:
 
     sample_cfg = config.get("sample_video", {})
     local_cfg = config.get("local_gpu", {})
+    cloud_cfg = config.get("cloud_media", {})
     sample_results: list[dict[str, str]] = []
     if local_cfg.get("enabled", False) and local_cfg.get("auto_export_on_plan_day", True):
         sample_results = export_video_jobs_for_items(config, newly_created_items)
@@ -2109,6 +2380,24 @@ def command_plan_day(args: argparse.Namespace) -> None:
         )
         if sample_results:
             print(f"[OK] Sample videos rendered: {len(sample_results)}")
+
+    if cloud_cfg.get("enabled", False):
+        image_cfg = cloud_cfg.get("image", {})
+        video_cfg = cloud_cfg.get("video", {})
+        if image_cfg.get("enabled", False) and image_cfg.get("auto_render_on_plan_day", False):
+            image_results = render_cloud_illustrations_for_items(config, newly_created_items)
+            ok_count = len([x for x in image_results if x.get("status") == "ok"])
+            if ok_count:
+                print(f"[OK] Cloud illustrations rendered: {ok_count}")
+        if video_cfg.get("enabled", False) and video_cfg.get("auto_render_on_plan_day", False):
+            video_results = render_cloud_videos_for_items(
+                config,
+                newly_created_items,
+                include_blocked=bool(video_cfg.get("include_blocked", False)),
+            )
+            ok_count = len([x for x in video_results if x.get("status") == "ok"])
+            if ok_count:
+                print(f"[OK] Cloud videos rendered: {ok_count}")
 
     save_queue(queue)
     print(f"[DONE] Created {new_items} queue items.")
@@ -2349,6 +2638,71 @@ def command_render_samples(args: argparse.Namespace) -> None:
         sync_queue_to_feishu_bitable(config, queue)
 
 
+def command_render_illustrations(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    if not cloud_media_enabled(config):
+        print("[WARN] cloud_media.enabled is false. Enable it to render illustrations.")
+        return
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+    selected = filter_queue_items(
+        queue,
+        item_id=str(args.id or "").strip(),
+        date=str(args.date or "").strip(),
+        limit=int(args.limit),
+        only_pending=bool(args.only_pending),
+        include_blocked=bool(args.include_blocked),
+    )
+    if not selected:
+        print("No queue items matched render-illustrations filters.")
+        return
+    results = render_cloud_illustrations_for_items(config, selected)
+    for item in selected:
+        generate_preview_for_item(config, item)
+    save_queue(queue)
+    ok_count = len([x for x in results if x.get("status") == "ok"])
+    print(f"[DONE] Cloud illustration render complete. success={ok_count}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_render_cloud_videos(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    if not cloud_media_enabled(config):
+        print("[WARN] cloud_media.enabled is false. Enable it to render cloud videos.")
+        return
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+    selected = filter_queue_items(
+        queue,
+        item_id=str(args.id or "").strip(),
+        date=str(args.date or "").strip(),
+        limit=int(args.limit),
+        only_pending=bool(args.only_pending),
+        include_blocked=bool(args.include_blocked),
+        post_format="short_video_script",
+    )
+    if not selected:
+        print("No queue items matched render-cloud-videos filters.")
+        return
+    results = render_cloud_videos_for_items(
+        config, selected, include_blocked=bool(args.include_blocked)
+    )
+    for item in selected:
+        generate_preview_for_item(config, item)
+    save_queue(queue)
+    ok_count = len([x for x in results if x.get("status") == "ok"])
+    print(f"[DONE] Cloud video render complete. success={ok_count}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
 def command_export_video_jobs(args: argparse.Namespace) -> None:
     ensure_dirs()
     config = load_config(Path(args.config))
@@ -2526,6 +2880,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--sync-feishu", action="store_true", help="Sync sample video fields to Feishu Bitable"
     )
     p_sample.set_defaults(func=command_render_samples)
+
+    p_ill = sub.add_parser(
+        "render-illustrations",
+        help="Render cloud illustrations for article/graphic posts",
+    )
+    p_ill.add_argument("--id", default="", help="Queue item ID")
+    p_ill.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_ill.add_argument("--limit", type=int, default=10, help="How many recent items")
+    p_ill.add_argument(
+        "--only-pending", action="store_true", help="Only process pending/approved items"
+    )
+    p_ill.add_argument(
+        "--include-blocked", action="store_true", help="Include auto-blocked items"
+    )
+    p_ill.add_argument(
+        "--sync-feishu", action="store_true", help="Sync illustration fields to Feishu Bitable"
+    )
+    p_ill.set_defaults(func=command_render_illustrations)
+
+    p_cloud_video = sub.add_parser(
+        "render-cloud-videos",
+        help="Render short videos via cloud provider",
+    )
+    p_cloud_video.add_argument("--id", default="", help="Queue item ID")
+    p_cloud_video.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_cloud_video.add_argument("--limit", type=int, default=10, help="How many recent items")
+    p_cloud_video.add_argument(
+        "--only-pending", action="store_true", help="Only process pending/approved items"
+    )
+    p_cloud_video.add_argument(
+        "--include-blocked", action="store_true", help="Include auto-blocked items"
+    )
+    p_cloud_video.add_argument(
+        "--sync-feishu", action="store_true", help="Sync cloud video fields to Feishu Bitable"
+    )
+    p_cloud_video.set_defaults(func=command_render_cloud_videos)
 
     p_export = sub.add_parser(
         "export-video-jobs",

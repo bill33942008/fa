@@ -83,6 +83,16 @@ Current target matrix:
 
    See `automation/local_gpu/README.md` for full setup.
 
+   Cloud rendering (recommended for fully-online workflow):
+
+   ```bash
+   # 文案自动配图（公众号/小红书）
+   python3 automation/pipeline.py --config automation/config.json render-illustrations --date 2026-07-03 --only-pending --sync-feishu
+
+   # 短视频脚本 -> 云端生成视频
+   python3 automation/pipeline.py --config automation/config.json render-cloud-videos --date 2026-07-03 --only-pending --sync-feishu
+   ```
+
    Recommended runtime:
    - `ffmpeg`
    - `edge-tts` (better Chinese voice quality than local fallback)
