@@ -124,14 +124,19 @@ def pull_jobs_from_server(config: dict[str, Any], jobs_dir: Path) -> int:
 
 def generate_with_comfyui(job: dict[str, Any], config: dict[str, Any]) -> Path:
     comfy_cfg = merge_comfy_cfg(config, job)
-    base_url = str(comfy_cfg.get("url", "http://127.0.0.1:8000")).rstrip("/")
-    client = ComfyUIClient(base_url)
-
     output_dir = Path(config.get("output_dir", "rendered_videos"))
     output_dir.mkdir(parents=True, exist_ok=True)
     target_mp4 = output_dir / str(job.get("output_filename", f"{job.get('job_id', 'video')}.mp4"))
-    temp_output = target_mp4.with_suffix(".download")
 
+    render_mode = str(comfy_cfg.get("render_mode", "slideshow")).strip().lower()
+    if render_mode == "slideshow":
+        from slideshow_renderer import render_slideshow_video
+
+        return render_slideshow_video(job, comfy_cfg, target_mp4)
+
+    base_url = str(comfy_cfg.get("url", "http://127.0.0.1:8000")).rstrip("/")
+    client = ComfyUIClient(base_url)
+    temp_output = target_mp4.with_suffix(".download")
     rendered = client.render_job(job, comfy_cfg, temp_output)
     final = convert_to_mp4_if_needed(rendered, target_mp4)
     if temp_output.exists() and temp_output != final:
@@ -223,8 +228,17 @@ def probe_services(config: dict[str, Any]) -> int:
         print(f"[OK] Workflow file found: {workflow_file}")
     else:
         print(f"[WARN] Workflow file missing: {workflow_file}")
-        print("       Export API workflow from ComfyUI and save to workflows/short_video.api.json")
         return 1
+
+    render_mode = str(comfy_cfg.get("render_mode", "slideshow"))
+    print(f"[OK] render_mode={render_mode}")
+    if render_mode == "slideshow":
+        for binary, install_hint in (
+            ("ffmpeg", "Install ffmpeg and add to PATH"),
+            ("edge-tts", "pip install edge-tts"),
+        ):
+            if not shutil.which(binary):
+                print(f"[WARN] Missing {binary}. {install_hint}")
     return 0
 
 

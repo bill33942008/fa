@@ -1,53 +1,39 @@
-# ComfyUI Workflow Setup
+# 内置短视频工作流（已随安装包提供）
 
-Worker 只调用 **ComfyUI API**，不再依赖 Pixelle-Video。
+无需自己搭建工作流。默认模式 `slideshow` 会：
 
-## 一次性配置（3 步）
+1. 把脚本拆成 6 段以内
+2. **ComfyUI** 为每段生成竖屏配图（720×1280）
+3. **edge-tts** 生成中文配音
+4. **ffmpeg** 合成带字幕 MP4
 
-### 1. 在 ComfyUI 里打开你常用的短视频工作流
+## 文件
 
-确保能手动跑通（含 TTS、字幕、出片等）。
+| 文件 | 说明 |
+|------|------|
+| `short_video.api.json` | 内置 SD 竖屏配图工作流（仅 ComfyUI 核心节点） |
 
-### 2. 导出 API 格式工作流
+## 你需要准备
 
-ComfyUI 菜单：**Save (API Format)** 或 **开发模式 → 保存 API 格式**
+1. ComfyUI 运行在 `http://127.0.0.1:8000`
+2. **至少一个 SD 模型** 放到 `ComfyUI/models/checkpoints/`
+   - 推荐：`dreamshaper_8.safetensors` 或任意已下载的 checkpoint
+3. 本机安装：
+   ```powershell
+   pip install edge-tts
+   ```
+   ffmpeg 加入 PATH（若还没有）
 
-保存为：
+## 指定模型（可选）
 
-```
-D:\content-ops\workflows\short_video.api.json
-```
-
-### 3. 运行 worker 探测
-
-```powershell
-python D:\content-ops\scripts\worker.py --config D:\content-ops\local_config.json --probe
-```
-
-## 脚本注入规则
-
-默认会自动把任务文案写入工作流里的文本节点（如 `CLIPTextEncode`）：
-
-| 顺序 | 注入内容 |
-|------|----------|
-| 第 1 个文本节点 | 标题 `title` |
-| 第 2 个 | 开头 hook |
-| 第 3 个及以后 | 完整脚本 `script_text` |
-
-如需精确控制，在 `local_config.json` 里配置：
+如果自动检测失败，在 `local_config.json` 填写：
 
 ```json
 "comfyui": {
-  "injections": [
-    {"node_id": "6", "input": "text", "from": "script_text"},
-    {"node_id": "12", "input": "text", "from": "title"}
-  ],
-  "auto_inject_text": false
+  "checkpoint_name": "你的模型文件名.safetensors"
 }
 ```
 
-`from` 可选：`script_text` / `title` / `hook_text` / `cover_text`
+## 高级模式
 
-## 节点 ID 怎么查
-
-打开 `short_video.api.json`，顶层 key 就是 node_id，例如 `"6": {"class_type": "CLIPTextEncode", ...}`
+`render_mode: "workflow"` 时，可把 ComfyUI 导出的完整 API 工作流放到此目录，由 worker 直接调用（需自行导出）。

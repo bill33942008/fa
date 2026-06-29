@@ -59,6 +59,15 @@ class ComfyUIClient:
             http_get_json(f"{self.base_url}/queue", timeout=8)
             return {"status": "ok"}
 
+    def list_checkpoints(self) -> list[str]:
+        try:
+            data = http_get_json(f"{self.base_url}/models/checkpoints", timeout=15)
+            if isinstance(data, list):
+                return [str(name) for name in data if str(name).strip()]
+        except Exception:  # pylint: disable=broad-except
+            return []
+        return []
+
     def load_workflow_file(self, workflow_path: Path) -> dict[str, Any]:
         raw = json.loads(workflow_path.read_text(encoding="utf-8"))
         if "prompt" in raw and isinstance(raw["prompt"], dict):

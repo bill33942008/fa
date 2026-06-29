@@ -35,15 +35,21 @@ $bundleFiles = @(
     "local_config.json",
     "worker.py",
     "comfyui_client.py",
+    "slideshow_renderer.py",
     "start_worker.bat",
+    "install_render_deps.bat",
+    "short_video.api.json",
     "worker_key",
     "workflows_README.txt"
 )
 foreach ($name in $bundleFiles) {
     $out = Join-Path $BaseDir $name
     if ($name -eq "worker_key") { $out = Join-Path "$BaseDir\ssh" "worker_key" }
-    if ($name -in @("worker.py", "comfyui_client.py", "start_worker.bat")) { $out = Join-Path "$BaseDir\scripts" $name }
+    if ($name -in @("worker.py", "comfyui_client.py", "slideshow_renderer.py", "start_worker.bat", "install_render_deps.bat")) {
+        $out = Join-Path "$BaseDir\scripts" $name
+    }
     if ($name -eq "local_config.json") { $out = Join-Path $BaseDir "local_config.json" }
+    if ($name -eq "short_video.api.json") { $out = Join-Path "$BaseDir\workflows" "short_video.api.json" }
     if ($name -eq "workflows_README.txt") { $out = Join-Path "$BaseDir\workflows" "README.txt" }
     Invoke-WebRequest -Uri "$DeployUrl/$name" -OutFile $out -UseBasicParsing
     Write-Ok "Downloaded $name"
@@ -74,9 +80,9 @@ if (-not $SkipHealthCheck) {
 
     $workflow = Join-Path "$BaseDir\workflows" "short_video.api.json"
     if (Test-Path $workflow) {
-        Write-Ok "Workflow found: $workflow"
+        Write-Ok "Built-in workflow ready: $workflow"
     } else {
-        Write-Warn "Missing $workflow - export API workflow from ComfyUI (see workflows\README.txt)"
+        Write-Warn "Missing built-in workflow file"
     }
 }
 

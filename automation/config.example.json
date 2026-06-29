@@ -47,12 +47,23 @@
     "comfyui_url": "http://127.0.0.1:8000",
     "comfyui": {
       "url": "http://127.0.0.1:8000",
+      "render_mode": "slideshow",
       "workflow_file": "short_video.api.json",
       "workflow_dir": "workflows",
-      "auto_inject_text": true,
+      "checkpoint_name": "",
+      "checkpoint_candidates": [
+        "dreamshaper_8.safetensors",
+        "majicmixRealistic_v7.safetensors",
+        "v1-5-pruned-emaonly.safetensors",
+        "sd_xl_base_1.0.safetensors"
+      ],
+      "width": 720,
+      "height": 1280,
+      "max_segments": 6,
+      "tts_voice": "zh-CN-XiaoxiaoNeural",
+      "base_seed": 42,
       "poll_interval_seconds": 3,
-      "timeout_seconds": 3600,
-      "injections": []
+      "timeout_seconds": 3600
     },
     "upload": {
       "enabled": true,
