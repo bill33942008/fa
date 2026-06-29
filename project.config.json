@@ -1,0 +1,12 @@
+{
+  "miniprogramRoot": "./",
+  "compileType": "game",
+  "projectname": "coin-rush-mini-game",
+  "appid": "touristappid",
+  "setting": {
+    "es6": true,
+    "enhance": true,
+    "minified": true,
+    "urlCheck": false
+  }
+}
