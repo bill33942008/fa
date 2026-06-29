@@ -168,12 +168,23 @@ def upload_video_to_server(job: dict[str, Any], local_video: Path, config: dict[
 
     remote_media_dir = str(upload_cfg.get("remote_media_dir", "")).rstrip("/")
     remote_path = f"{remote_media_dir}/{job.get('remote_media_path', local_video.name)}"
+    remote_dir = str(Path(remote_path).parent).replace("\\", "/")
+    run_command(ssh_base_args(upload_cfg) + [f"mkdir -p '{remote_dir}'"])
     scp_command = scp_base_args(upload_cfg) + [
         str(local_video),
         f"{upload_cfg.get('server_user', 'root')}@{upload_cfg.get('server_host', '')}:{remote_path}",
     ]
     run_command(scp_command)
     print(f"[OK] uploaded video -> {remote_path}")
+
+    local_srt = local_video.with_suffix(".srt")
+    if local_srt.exists():
+        remote_srt = str(Path(remote_path).with_suffix(".srt")).replace("\\", "/")
+        run_command(
+            scp_base_args(upload_cfg)
+            + [str(local_srt), f"{upload_cfg.get('server_user', 'root')}@{upload_cfg.get('server_host', '')}:{remote_srt}"]
+        )
+        print(f"[OK] uploaded subtitles -> {remote_srt}")
 
     if upload_cfg.get("run_remote_import", True):
         remote_python = str(upload_cfg.get("remote_python", "python3"))
