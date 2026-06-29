@@ -2,6 +2,8 @@ automation/outbox/
 automation/data/
 automation/state/
 automation/previews/
+automation/local_gpu/deploy/worker_key
+automation/local_gpu/deploy/worker_key.pub
 automation/__pycache__/
 *.pyc
 *.pyo

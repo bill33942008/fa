@@ -43,7 +43,27 @@ python3 automation/pipeline.py --config automation/config.json list-video-jobs
 
 When `local_gpu.enabled=true`, `render-samples` will **not** use server ffmpeg TTS. It exports jobs instead.
 
-## Windows PC setup
+## Windows one-click setup (recommended)
+
+Server deploy bundle is served at:
+
+`http://118.25.178.116:8787/local-gpu-deploy/`
+
+On your Windows PC, open **PowerShell** and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "Invoke-WebRequest http://118.25.178.116:8787/local-gpu-deploy/setup_windows.ps1 -OutFile $env:TEMP\setup_windows.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\setup_windows.ps1"
+```
+
+Prerequisites on your PC before running:
+
+1. ComfyUI running at `http://127.0.0.1:8188`
+2. Pixelle-Video API at `http://127.0.0.1:8000`
+3. Python 3.10+ in PATH
+
+After setup, double-click `D:\content-ops\scripts\start_worker.bat` for daily runs.
+
+## Manual Windows setup
 
 ### Prerequisites
 

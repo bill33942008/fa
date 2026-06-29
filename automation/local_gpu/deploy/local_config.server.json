@@ -1,0 +1,42 @@
+{
+  "jobs_dir": "D:/content-ops/video_jobs",
+  "output_dir": "D:/content-ops/rendered_videos",
+  "pixelle_api_url": "http://127.0.0.1:8000",
+  "comfyui_url": "http://127.0.0.1:8188",
+  "pull_jobs_from_server": {
+    "enabled": true,
+    "server_host": "118.25.178.116",
+    "server_user": "root",
+    "server_port": 22,
+    "remote_jobs_dir": "/opt/fa/automation/state/video_jobs/pending",
+    "ssh_identity_file": "D:/content-ops/ssh/worker_key"
+  },
+  "upload": {
+    "enabled": true,
+    "method": "scp",
+    "server_host": "118.25.178.116",
+    "server_user": "root",
+    "server_port": 22,
+    "remote_media_dir": "/opt/fa/automation/previews/media",
+    "remote_pipeline_dir": "/opt/fa",
+    "remote_python": "/opt/fa/.venv/bin/python",
+    "remote_config": "/opt/fa/automation/config.json",
+    "ssh_identity_file": "D:/content-ops/ssh/worker_key",
+    "run_remote_import": true
+  },
+  "generation_defaults": {
+    "mode": "fixed",
+    "n_scenes": 5,
+    "frame_template": "1080x1920/image_default.html",
+    "tts_workflow": "tts_edge.json",
+    "media_workflow": "image_flux.json",
+    "prompt_prefix": "",
+    "bgm_volume": 0.25,
+    "poll_interval_seconds": 5,
+    "timeout_seconds": 1800,
+    "use_async_api": true
+  },
+  "keep_local_copy": true,
+  "poll_once": false,
+  "poll_interval_seconds": 60
+}
