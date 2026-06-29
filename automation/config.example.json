@@ -1,0 +1,137 @@
+{
+  "llm": {
+    "enabled": true,
+    "provider": "openai-compatible",
+    "api_key_env": "OPENAI_API_KEY",
+    "base_url": "https://api.openai.com/v1/chat/completions",
+    "model": "gpt-4.1-mini",
+    "temperature": 0.7,
+    "max_tokens": 1400
+  },
+  "notification": {
+    "email": {
+      "enabled": false,
+      "smtp_host": "smtp.example.com",
+      "smtp_port": 465,
+      "sender": "bot@example.com",
+      "password_env": "SMTP_PASSWORD",
+      "receivers": [
+        "you@example.com"
+      ]
+    }
+  },
+  "generation": {
+    "topics_per_track": 6,
+    "default_timezone": "Asia/Shanghai"
+  },
+  "tracks": {
+    "football": {
+      "description": "football tactical analysis with data interpretation for竞彩关注人群",
+      "keywords": [
+        "竞彩",
+        "足球",
+        "战术",
+        "伤停",
+        "盘口",
+        "xG",
+        "欧赔",
+        "联赛"
+      ],
+      "rss_sources": [
+        "https://news.google.com/rss/search?q=%E7%AB%9E%E5%BD%A9+%E8%B6%B3%E7%90%83&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E8%8B%B1%E8%B6%85+%E8%B5%9B%E5%89%8D+%E5%88%86%E6%9E%90&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      ],
+      "system_prompt": "你是专业足球数据分析编辑，必须输出理性分析，不得承诺收益，不得诱导下注。"
+    },
+    "child_education": {
+      "description": "practical parenting and child education short-form content",
+      "keywords": [
+        "儿童教育",
+        "育儿",
+        "专注力",
+        "学习习惯",
+        "亲子",
+        "家长"
+      ],
+      "rss_sources": [
+        "https://news.google.com/rss/search?q=%E5%84%BF%E7%AB%A5+%E6%95%99%E8%82%B2+%E5%AE%B6%E9%95%BF&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E5%B0%8F%E5%AD%A6+%E5%AD%A6%E4%B9%A0%E4%B9%A0%E6%83%AF&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      ],
+      "system_prompt": "你是儿童教育内容策划，风格温和、可执行，避免夸大承诺。"
+    },
+    "travel": {
+      "description": "travel guides with routes, budget, tips and pitfalls",
+      "keywords": [
+        "旅游",
+        "周末",
+        "攻略",
+        "避坑",
+        "预算",
+        "拍照"
+      ],
+      "rss_sources": [
+        "https://news.google.com/rss/search?q=%E5%91%A8%E6%9C%AB+%E6%97%85%E6%B8%B8+%E6%94%BB%E7%95%A5&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E6%97%85%E8%A1%8C+%E9%81%BF%E5%9D%91&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      ],
+      "system_prompt": "你是旅行攻略编辑，强调真实体验、预算清晰、信息实用。"
+    },
+    "ai_funny": {
+      "description": "AI generated comedy script with strong punchlines",
+      "keywords": [
+        "搞笑",
+        "段子",
+        "AI",
+        "短视频",
+        "热梗",
+        "反转"
+      ],
+      "rss_sources": [
+        "https://news.google.com/rss/search?q=AI+%E6%90%9E%E7%AC%91+%E7%9F%AD%E8%A7%86%E9%A2%91&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E7%83%AD%E6%A2%97+%E7%9F%AD%E8%A7%86%E9%A2%91&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      ],
+      "system_prompt": "你是短视频喜剧编剧，要求前3秒有钩子，15-25秒内有反转。"
+    }
+  },
+  "platforms": [
+    {
+      "platform": "wechat_official",
+      "account_name": "涛哥儿聊个球",
+      "track": "football",
+      "publish_time": "12:20",
+      "auto_publish": false,
+      "post_format": "long_article"
+    },
+    {
+      "platform": "douyin",
+      "account_name": "育见成长研究所",
+      "track": "child_education",
+      "publish_time": "18:40",
+      "auto_publish": false,
+      "post_format": "short_video_script"
+    },
+    {
+      "platform": "wechat_channels",
+      "account_name": "育见成长研究所视频号",
+      "track": "child_education",
+      "publish_time": "19:20",
+      "auto_publish": false,
+      "post_format": "short_video_script"
+    },
+    {
+      "platform": "xiaohongshu",
+      "account_name": "周末出走研究所",
+      "track": "travel",
+      "publish_time": "21:00",
+      "auto_publish": false,
+      "post_format": "graphic_post"
+    },
+    {
+      "platform": "kuaishou",
+      "account_name": "AI笑点工厂",
+      "track": "ai_funny",
+      "publish_time": "20:30",
+      "auto_publish": false,
+      "post_format": "short_video_script"
+    }
+  ]
+}
