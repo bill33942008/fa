@@ -33,6 +33,13 @@ Required:
 export OPENAI_API_KEY="your_api_key"
 ```
 
+Install runtime tools for auto sample videos:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ffmpeg espeak-ng
+```
+
 Optional (email digest):
 
 ```bash
@@ -123,6 +130,9 @@ Create the following fields in your table:
 - ContentFile
 - PreviewFile
 - PreviewURL
+- SampleVideoFile
+- SampleVideoURL
+- SampleAudioFile
 - HookText
 - BodyPreview
 - ContentMarkdown
@@ -148,6 +158,7 @@ Recommended field types:
 - QualityReason: Long text
 - HookText / BodyPreview / ContentMarkdown: Long text
 - PreviewFile / PreviewURL: Single line text
+- SampleVideoFile / SampleVideoURL / SampleAudioFile: Single line text
 
 Recommended coloring rules in Bitable view:
 
@@ -178,6 +189,18 @@ Generate previews manually:
 ```bash
 python3 automation/pipeline.py --config automation/config.json preview --date 2026-07-03 --sync-feishu
 ```
+
+Render sample videos (subtitle + TTS):
+
+```bash
+python3 automation/pipeline.py --config automation/config.json render-samples --date 2026-07-03 --only-pending --sync-feishu
+```
+
+Feishu fields for sample outputs:
+
+- SampleVideoFile
+- SampleVideoURL
+- SampleAudioFile
 
 Serve previews via HTTP:
 

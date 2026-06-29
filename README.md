@@ -65,6 +65,14 @@ Current target matrix:
    Portal layout (left dates, right content):
    - `http://YOUR_SERVER_IP:8787/index.html`
 
+   Render voiced video samples (subtitle + TTS):
+
+   ```bash
+   python3 automation/pipeline.py --config automation/config.json render-samples --date 2026-07-03 --only-pending --sync-feishu
+   ```
+
+   Feishu will receive `SampleVideoURL` for clickable sample playback links.
+
 7. Mark content as posted after platform upload:
 
    ```bash

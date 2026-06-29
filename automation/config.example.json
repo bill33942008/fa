@@ -40,6 +40,23 @@
     "enabled": true,
     "public_base_url": "http://YOUR_SERVER_IP:8787"
   },
+  "sample_video": {
+    "enabled": true,
+    "auto_render_on_plan_day": false,
+    "include_blocked": false,
+    "public_base_url": "http://YOUR_SERVER_IP:8787",
+    "tts_binary": "espeak-ng",
+    "tts_voice": "zh",
+    "tts_speed": 165,
+    "segment_gap_seconds": 0.25,
+    "lead_in_seconds": 0.4,
+    "min_duration_seconds": 8,
+    "max_segments": 8,
+    "width": 720,
+    "height": 1280,
+    "fps": 25,
+    "background_color": "#111827"
+  },
   "quality_scoring": {
     "enabled": true,
     "llm_review_enabled": true,

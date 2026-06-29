@@ -21,8 +21,11 @@ import html
 import json
 import os
 import re
+import shutil
 import smtplib
 import ssl
+import subprocess
+import tempfile
 import textwrap
 import urllib.error
 import urllib.parse
@@ -57,6 +60,9 @@ FEISHU_FIELD_DEFINITIONS: dict[str, dict[str, Any]] = {
     "ContentFile": {"type": 1},
     "PreviewFile": {"type": 1},
     "PreviewURL": {"type": 1},
+    "SampleVideoFile": {"type": 1},
+    "SampleVideoURL": {"type": 1},
+    "SampleAudioFile": {"type": 1},
     "HookText": {"type": 1},
     "BodyPreview": {"type": 1},
     "ContentMarkdown": {"type": 1},
@@ -798,6 +804,10 @@ def build_preview_url(config: dict[str, Any], preview_file: Path) -> str:
     preview_cfg = config.get("preview", {})
     public_base_url = str(preview_cfg.get("public_base_url", "")).strip()
     if not public_base_url:
+        public_base_url = str(
+            config.get("sample_video", {}).get("public_base_url", "")
+        ).strip()
+    if not public_base_url:
         return ""
     try:
         relative_path = preview_file.relative_to(PREVIEW_DIR)
@@ -1062,6 +1072,248 @@ def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
     return {"portal_file": str(portal_file), "portal_url": portal_url}
 
 
+def ensure_binary(binary_name: str) -> str:
+    path = shutil.which(binary_name)
+    if not path:
+        raise ValueError(
+            f"Required binary not found: {binary_name}. "
+            f"Install it on server first."
+        )
+    return path
+
+
+def run_command(command: list[str], cwd: str | None = None) -> None:
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        detail = stderr or stdout or "unknown error"
+        raise RuntimeError(f"Command failed: {' '.join(command)} | {detail[:500]}")
+
+
+def ffprobe_duration_seconds(audio_file: Path) -> float:
+    ensure_binary("ffprobe")
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(audio_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return 0.0
+    try:
+        return max(0.0, float((result.stdout or "0").strip()))
+    except ValueError:
+        return 0.0
+
+
+def format_srt_time(seconds: float) -> str:
+    millis = max(0, int(round(seconds * 1000)))
+    hours = millis // 3600000
+    minutes = (millis % 3600000) // 60000
+    secs = (millis % 60000) // 1000
+    ms = millis % 1000
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
+
+
+def write_srt(cues: list[tuple[float, float, str]], path: Path) -> None:
+    lines: list[str] = []
+    for idx, (start, end, text) in enumerate(cues, start=1):
+        clean_text = text.replace("\n", " ").strip()
+        lines.extend(
+            [
+                str(idx),
+                f"{format_srt_time(start)} --> {format_srt_time(end)}",
+                clean_text,
+                "",
+            ]
+        )
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def render_sample_video_for_item(config: dict[str, Any], item: dict[str, Any]) -> dict[str, str]:
+    sample_cfg = config.get("sample_video", {})
+    if not sample_cfg.get("enabled", True):
+        return {"status": "disabled", "message": "sample_video disabled"}
+
+    ensure_binary("ffmpeg")
+    tts_binary = ensure_binary(sample_cfg.get("tts_binary", "espeak-ng"))
+    ensure_binary("ffprobe")
+
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    content = extract_content_payload(item)
+    segments = split_video_segments(
+        content.get("body_markdown", "") or content.get("body_preview", ""),
+        limit=int(sample_cfg.get("max_segments", 8)),
+    )
+    if not segments:
+        raise ValueError("No script segments available for sample rendering.")
+
+    media_dir = PREVIEW_DIR / "media" / item_date
+    media_dir.mkdir(parents=True, exist_ok=True)
+    out_video = media_dir / f"{queue_id}.mp4"
+    out_audio = media_dir / f"{queue_id}.wav"
+
+    voice = str(sample_cfg.get("tts_voice", "zh"))
+    speed = int(sample_cfg.get("tts_speed", 165))
+    segment_gap = float(sample_cfg.get("segment_gap_seconds", 0.25))
+    lead_in = float(sample_cfg.get("lead_in_seconds", 0.4))
+    min_duration = float(sample_cfg.get("min_duration_seconds", 8.0))
+    width = int(sample_cfg.get("width", 720))
+    height = int(sample_cfg.get("height", 1280))
+    fps = int(sample_cfg.get("fps", 25))
+    bg_color = str(sample_cfg.get("background_color", "#111827"))
+
+    with tempfile.TemporaryDirectory(prefix=f"sample-{queue_id}-") as temp_dir:
+        temp_path = Path(temp_dir)
+        audio_segments: list[Path] = []
+        cues: list[tuple[float, float, str]] = []
+        current = lead_in
+        for idx, segment in enumerate(segments):
+            segment_text = segment.strip()[:120]
+            if not segment_text:
+                continue
+            segment_audio = temp_path / f"segment_{idx:02d}.wav"
+            run_command(
+                [
+                    tts_binary,
+                    "-v",
+                    voice,
+                    "-s",
+                    str(speed),
+                    "-w",
+                    str(segment_audio),
+                    segment_text,
+                ]
+            )
+            duration = ffprobe_duration_seconds(segment_audio)
+            if duration < 0.1:
+                continue
+            audio_segments.append(segment_audio)
+            cues.append((current, current + duration, segment_text))
+            current += duration + segment_gap
+
+        if not audio_segments:
+            raise ValueError("TTS generated no usable audio segments.")
+
+        title_text = str(item.get("title", "")).strip()
+        if title_text:
+            title_dur = min(3.0, max(1.5, len(title_text) / 22.0))
+            cues.insert(0, (0.2, 0.2 + title_dur, title_text[:80]))
+
+        concat_file = temp_path / "audio_concat.txt"
+        concat_file.write_text(
+            "\n".join([f"file '{segment.as_posix()}'" for segment in audio_segments]),
+            encoding="utf-8",
+        )
+        narration_audio = temp_path / "narration.wav"
+        run_command(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-c:a",
+                "pcm_s16le",
+                str(narration_audio),
+            ]
+        )
+
+        total_duration = max(min_duration, current + 0.8)
+        subtitles_file = temp_path / "subtitles.srt"
+        write_srt(cues, subtitles_file)
+
+        rendered_video = temp_path / "preview.mp4"
+        subtitle_filter = "subtitles=subtitles.srt"
+        run_command(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c={bg_color}:s={width}x{height}:r={fps}:d={total_duration:.2f}",
+                "-i",
+                str(narration_audio),
+                "-vf",
+                subtitle_filter,
+                "-shortest",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "24",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                str(rendered_video),
+            ],
+            cwd=temp_dir,
+        )
+        shutil.move(str(rendered_video), str(out_video))
+        shutil.move(str(narration_audio), str(out_audio))
+
+    item["sample_video_file"] = str(out_video)
+    item["sample_video_url"] = build_preview_url(config, out_video)
+    item["sample_audio_file"] = str(out_audio)
+    item["updated_at"] = now_local().isoformat()
+    return {
+        "status": "ok",
+        "video_file": str(out_video),
+        "video_url": item["sample_video_url"],
+    }
+
+
+def render_samples_for_items(
+    config: dict[str, Any], items: list[dict[str, Any]], *, include_blocked: bool = False
+) -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    for item in items:
+        if item.get("post_format") != "short_video_script":
+            continue
+        if not include_blocked and (
+            item.get("status") == "auto_blocked" or item.get("publish_advice") == "禁发"
+        ):
+            continue
+        try:
+            result = render_sample_video_for_item(config, item)
+            result["id"] = str(item.get("id", ""))
+            result["platform"] = str(item.get("platform", ""))
+            results.append(result)
+            print(
+                f"[OK] sample video rendered {item.get('id')} -> {result.get('video_file','')}"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            item["notes"] = (str(item.get("notes", "")).strip() + f" | 样片生成失败: {exc}").strip(" |")
+            item["updated_at"] = now_local().isoformat()
+            print(f"[WARN] sample video failed {item.get('id')}: {exc}")
+    return results
+
+
 def build_queue_summary(queue: list[dict[str, Any]]) -> str:
     if not queue:
         return "Queue is empty."
@@ -1241,6 +1493,9 @@ def to_feishu_fields(item: dict[str, Any]) -> dict[str, Any]:
         "ContentFile": item.get("content_file", ""),
         "PreviewFile": item.get("preview_file", ""),
         "PreviewURL": item.get("preview_url", ""),
+        "SampleVideoFile": item.get("sample_video_file", ""),
+        "SampleVideoURL": item.get("sample_video_url", ""),
+        "SampleAudioFile": item.get("sample_audio_file", ""),
         "HookText": content["hook_text"][:2000],
         "BodyPreview": content["body_preview"][:1200],
         "ContentMarkdown": content["content_markdown"][:8000],
@@ -1503,6 +1758,9 @@ def command_plan_day(args: argparse.Namespace) -> None:
             "content_markdown": render_markdown(
                 queue_id, platform_cfg, topic, draft, quality=quality
             )[:8000],
+            "sample_video_file": "",
+            "sample_video_url": "",
+            "sample_audio_file": "",
             "created_at": now_local().isoformat(),
             "updated_at": now_local().isoformat(),
             "post_url": None,
@@ -1546,6 +1804,17 @@ def command_plan_day(args: argparse.Namespace) -> None:
         print(f"[OK] Preview portal: {preview_portal['portal_file']}")
         if preview_portal["portal_url"]:
             print(f"[OK] Preview portal URL: {preview_portal['portal_url']}")
+
+    sample_cfg = config.get("sample_video", {})
+    sample_results: list[dict[str, str]] = []
+    if sample_cfg.get("auto_render_on_plan_day", False):
+        sample_results = render_samples_for_items(
+            config,
+            newly_created_items,
+            include_blocked=bool(sample_cfg.get("include_blocked", False)),
+        )
+        if sample_results:
+            print(f"[OK] Sample videos rendered: {len(sample_results)}")
 
     save_queue(queue)
     print(f"[DONE] Created {new_items} queue items.")
@@ -1757,6 +2026,44 @@ def command_preview(args: argparse.Namespace) -> None:
         sync_queue_to_feishu_bitable(config, queue)
 
 
+def command_render_samples(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+
+    selected: list[dict[str, Any]]
+    if args.id:
+        selected = [item for item in queue if item.get("id") == args.id]
+    else:
+        filtered = queue
+        if args.date:
+            filtered = [item for item in filtered if item.get("date") == args.date]
+        if args.only_pending:
+            filtered = [
+                item
+                for item in filtered
+                if item.get("status") in {"pending_review", "approved", "ready_to_post"}
+            ]
+        selected = filtered[-int(args.limit):] if args.limit > 0 else filtered
+
+    if not selected:
+        print("No queue items matched render-samples filters.")
+        return
+
+    results = render_samples_for_items(
+        config,
+        selected,
+        include_blocked=bool(args.include_blocked),
+    )
+    save_queue(queue)
+    print(f"[DONE] Sample render complete. success={len(results)}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Multi-platform content automation")
     parser.add_argument(
@@ -1826,6 +2133,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--sync-feishu", action="store_true", help="Sync preview fields to Feishu Bitable"
     )
     p_preview.set_defaults(func=command_preview)
+
+    p_sample = sub.add_parser("render-samples", help="Render auto samples with subtitles and TTS")
+    p_sample.add_argument("--id", default="", help="Queue item ID")
+    p_sample.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_sample.add_argument("--limit", type=int, default=10, help="How many recent items")
+    p_sample.add_argument(
+        "--only-pending", action="store_true", help="Only process pending/approved items"
+    )
+    p_sample.add_argument(
+        "--include-blocked", action="store_true", help="Include auto-blocked items"
+    )
+    p_sample.add_argument(
+        "--sync-feishu", action="store_true", help="Sync sample video fields to Feishu Bitable"
+    )
+    p_sample.set_defaults(func=command_render_samples)
 
     return parser
 
