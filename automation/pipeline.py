@@ -38,6 +38,7 @@ BASE_DIR = Path(__file__).resolve().parent
 STATE_DIR = BASE_DIR / "state"
 DATA_DIR = BASE_DIR / "data"
 OUTBOX_DIR = BASE_DIR / "outbox"
+PREVIEW_DIR = BASE_DIR / "previews"
 QUEUE_FILE = STATE_DIR / "publish_queue.json"
 FEISHU_MAPPING_FILE = STATE_DIR / "feishu_record_mapping.json"
 
@@ -54,6 +55,8 @@ FEISHU_FIELD_DEFINITIONS: dict[str, dict[str, Any]] = {
     "SourceTopic": {"type": 1},
     "SourceLink": {"type": 1},
     "ContentFile": {"type": 1},
+    "PreviewFile": {"type": 1},
+    "PreviewURL": {"type": 1},
     "HookText": {"type": 1},
     "BodyPreview": {"type": 1},
     "ContentMarkdown": {"type": 1},
@@ -78,6 +81,7 @@ def ensure_dirs() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -790,6 +794,192 @@ def markdown_to_simple_html(markdown_text: str) -> str:
     return "\n".join(html_lines)
 
 
+def build_preview_url(config: dict[str, Any], preview_file: Path) -> str:
+    preview_cfg = config.get("preview", {})
+    public_base_url = str(preview_cfg.get("public_base_url", "")).strip()
+    if not public_base_url:
+        return ""
+    try:
+        relative_path = preview_file.relative_to(PREVIEW_DIR)
+    except ValueError:
+        relative_path = Path(preview_file.name)
+    return f"{public_base_url.rstrip('/')}/{relative_path.as_posix()}"
+
+
+def split_video_segments(body_markdown: str, limit: int = 8) -> list[str]:
+    plain = strip_markdown(body_markdown)
+    chunks = [segment.strip() for segment in re.split(r"[。！？!?;\n]+", plain) if segment.strip()]
+    if not chunks and plain:
+        chunks = [plain]
+    return chunks[:limit]
+
+
+def build_preview_html(item: dict[str, Any], content: dict[str, str]) -> str:
+    title = html.escape(str(item.get("title", "")).strip() or "未命名草稿")
+    account = html.escape(str(item.get("account_name", "")).strip())
+    platform = html.escape(str(item.get("platform", "")).strip())
+    publish_time = html.escape(str(item.get("publish_time", "")).strip())
+    source_topic = html.escape(str(item.get("source_topic", "")).strip())
+    source_link = html.escape(str(item.get("source_link", "")).strip())
+    hook_text = html.escape(content.get("hook_text", "").strip())
+    cover_text = html.escape(content.get("cover_text", "").strip())
+    badge = html.escape(str(item.get("quality_badge", "⚪")))
+    score = safe_int(item.get("total_score", 0), default=0)
+    advice = html.escape(str(item.get("publish_advice", "需改")))
+    reason = html.escape(str(item.get("quality_reason", "")).strip())
+    status = html.escape(str(item.get("status", "")).strip())
+    body_html = markdown_to_simple_html(content.get("body_markdown", ""))
+    post_format = str(item.get("post_format", ""))
+
+    metadata_html = (
+        f"<div class='meta'><span>{badge} {score}/100 · {advice}</span>"
+        f"<span>Status: {status}</span><span>发布时间: {publish_time}</span></div>"
+        f"<div class='meta'><span>账号: {account}</span><span>平台: {platform}</span></div>"
+        f"<div class='meta'><span>选题: {source_topic}</span>"
+        f"<a href='{source_link}' target='_blank' rel='noreferrer'>来源链接</a></div>"
+    )
+
+    if post_format == "short_video_script":
+        segments = split_video_segments(content.get("body_markdown", ""))
+        timeline_rows: list[str] = []
+        for idx, segment in enumerate(segments):
+            start = idx * 4
+            end = start + 4
+            timeline_rows.append(
+                "<li>"
+                f"<span class='time'>{start:02d}s-{end:02d}s</span>"
+                f"<span class='line'>{html.escape(segment)}</span>"
+                "</li>"
+            )
+        timeline_html = "\n".join(timeline_rows) if timeline_rows else "<li><span class='line'>暂无分镜</span></li>"
+        content_card = (
+            "<div class='phone video'>"
+            "<div class='video-cover'>"
+            f"<div class='cover-text'>{cover_text or title}</div>"
+            f"<div class='video-hook'>{hook_text}</div>"
+            "</div>"
+            "<div class='timeline'><h3>视频分镜时间轴（预演）</h3><ol>"
+            f"{timeline_html}"
+            "</ol></div></div>"
+        )
+    else:
+        content_card = (
+            "<div class='phone article'>"
+            f"<h1>{title}</h1>"
+            f"<div class='hook'>{hook_text}</div>"
+            f"<div class='body'>{body_html}</div>"
+            f"<div class='cover'>封面文案：{cover_text}</div>"
+            "</div>"
+        )
+
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{title} - 发布预览</title>
+  <style>
+    body {{
+      margin: 0; padding: 24px; background: #f5f7fb; color: #1f2937;
+      font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
+    }}
+    .container {{ max-width: 860px; margin: 0 auto; }}
+    .panel {{ background: #fff; border-radius: 14px; padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(0,0,0,.06); }}
+    .meta {{ display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: #4b5563; margin-top: 8px; }}
+    .meta a {{ color: #2563eb; text-decoration: none; }}
+    .phone {{
+      width: min(430px, 100%); margin: 0 auto; border: 1px solid #e5e7eb;
+      border-radius: 18px; background: #fff; padding: 16px; box-shadow: inset 0 0 0 1px #f3f4f6;
+    }}
+    .article h1 {{ font-size: 21px; line-height: 1.4; margin: 0 0 12px; }}
+    .hook {{ background: #eff6ff; border-left: 3px solid #3b82f6; padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }}
+    .body p, .body li {{ font-size: 14px; line-height: 1.75; }}
+    .cover {{ margin-top: 14px; font-size: 13px; color: #6b7280; }}
+    .video-cover {{
+      background: linear-gradient(140deg,#111827,#1f2937 65%,#374151);
+      color: #fff; border-radius: 12px; min-height: 220px;
+      display: flex; flex-direction: column; justify-content: space-between; padding: 14px;
+    }}
+    .cover-text {{ font-size: 20px; line-height: 1.35; font-weight: 700; }}
+    .video-hook {{ font-size: 13px; line-height: 1.6; opacity: .9; }}
+    .timeline h3 {{ margin: 14px 0 8px; font-size: 14px; }}
+    .timeline ol {{ margin: 0; padding-left: 18px; }}
+    .timeline li {{ margin: 8px 0; font-size: 13px; line-height: 1.6; }}
+    .time {{ display: inline-block; width: 70px; color: #2563eb; font-weight: 600; }}
+    .line {{ color: #1f2937; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="panel">
+      <h2 style="margin:0;font-size:20px;">发布预览</h2>
+      {metadata_html}
+      <div class="meta"><span>质量说明：{reason or "无"}</span></div>
+    </div>
+    <div class="panel">{content_card}</div>
+  </div>
+</body>
+</html>
+"""
+
+
+def generate_preview_for_item(config: dict[str, Any], item: dict[str, Any]) -> None:
+    preview_cfg = config.get("preview", {})
+    if not preview_cfg.get("enabled", True):
+        return
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    content = extract_content_payload(item)
+    preview_dir = PREVIEW_DIR / item_date
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    preview_file = preview_dir / f"{queue_id}.html"
+    preview_file.write_text(build_preview_html(item, content), encoding="utf-8")
+    item["preview_file"] = str(preview_file)
+    item["preview_url"] = build_preview_url(config, preview_file)
+
+
+def build_preview_index(config: dict[str, Any], items: list[dict[str, Any]], date: str) -> dict[str, str]:
+    if not items:
+        return {"index_file": "", "index_url": ""}
+    preview_dir = PREVIEW_DIR / date
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[str] = []
+    for item in items:
+        title = html.escape(str(item.get("title", "")).strip()[:70] or "未命名草稿")
+        advice = html.escape(str(item.get("publish_advice", "需改")))
+        badge = html.escape(str(item.get("quality_badge", "⚪")))
+        score = safe_int(item.get("total_score", 0), default=0)
+        platform = html.escape(str(item.get("platform", "")))
+        preview_url = html.escape(str(item.get("preview_url", "")))
+        preview_file = Path(str(item.get("preview_file", "")).strip() or "#")
+        local_link = html.escape(preview_file.name) if preview_file != Path("#") else "#"
+        target_href = preview_url or local_link
+        rows.append(
+            "<tr>"
+            f"<td>{item.get('id','')}</td><td>{platform}</td>"
+            f"<td>{badge}{score}</td><td>{advice}</td>"
+            f"<td><a href='{target_href}' target='_blank' rel='noreferrer'>{title}</a></td>"
+            "</tr>"
+        )
+    index_html = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><title>发布预览索引 {date}</title>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;background:#f6f8fb;padding:20px;}}
+.card{{background:#fff;border-radius:12px;padding:16px;max-width:980px;margin:0 auto;box-shadow:0 4px 16px rgba(0,0,0,.06);}}
+table{{width:100%;border-collapse:collapse;font-size:14px;}}
+th,td{{border-bottom:1px solid #eef2f7;padding:10px;text-align:left;vertical-align:top;}}
+th{{background:#f8fafc;}}
+a{{color:#2563eb;text-decoration:none;}}
+</style></head><body><div class="card">
+<h2 style="margin-top:0;">发布预览索引（{date}）</h2>
+<table><thead><tr><th>QueueID</th><th>平台</th><th>评分</th><th>建议</th><th>预览链接</th></tr></thead>
+<tbody>{''.join(rows)}</tbody></table></div></body></html>"""
+    index_file = preview_dir / "index.html"
+    index_file.write_text(index_html, encoding="utf-8")
+    index_url = build_preview_url(config, index_file)
+    return {"index_file": str(index_file), "index_url": index_url}
+
+
 def build_queue_summary(queue: list[dict[str, Any]]) -> str:
     if not queue:
         return "Queue is empty."
@@ -967,6 +1157,8 @@ def to_feishu_fields(item: dict[str, Any]) -> dict[str, Any]:
         "SourceTopic": item.get("source_topic", ""),
         "SourceLink": item.get("source_link", ""),
         "ContentFile": item.get("content_file", ""),
+        "PreviewFile": item.get("preview_file", ""),
+        "PreviewURL": item.get("preview_url", ""),
         "HookText": content["hook_text"][:2000],
         "BodyPreview": content["body_preview"][:1200],
         "ContentMarkdown": content["content_markdown"][:8000],
@@ -1184,6 +1376,7 @@ def command_plan_day(args: argparse.Namespace) -> None:
     selection_index: dict[str, int] = {}
     queue = load_queue()
     new_items = 0
+    newly_created_items: list[dict[str, Any]] = []
 
     for platform_cfg in platforms:
         track_name = platform_cfg["track"]
@@ -1243,7 +1436,9 @@ def command_plan_day(args: argparse.Namespace) -> None:
             "publish_advice": quality["publish_advice"],
             "quality_reason": quality["reason"],
         }
+        generate_preview_for_item(config, queue_item)
         queue.append(queue_item)
+        newly_created_items.append(queue_item)
         new_items += 1
         print(
             (
@@ -1258,6 +1453,12 @@ def command_plan_day(args: argparse.Namespace) -> None:
         print(
             f"[INFO] Quality guard auto-blocked {len(guard_result['blocked_items'])} item(s)."
         )
+
+    preview_index = build_preview_index(config, newly_created_items, date)
+    if preview_index["index_file"]:
+        print(f"[OK] Preview index: {preview_index['index_file']}")
+        if preview_index["index_url"]:
+            print(f"[OK] Preview URL: {preview_index['index_url']}")
 
     save_queue(queue)
     print(f"[DONE] Created {new_items} queue items.")
@@ -1425,6 +1626,44 @@ def command_notify(args: argparse.Namespace) -> None:
     run_notify(config, queue)
 
 
+def command_preview(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+
+    selected: list[dict[str, Any]] = []
+    if args.id:
+        selected = [item for item in queue if item.get("id") == args.id]
+    else:
+        filtered = queue
+        if args.date:
+            filtered = [item for item in filtered if item.get("date") == args.date]
+        selected = filtered[-int(args.limit):] if args.limit > 0 else filtered
+
+    if not selected:
+        print("No queue items matched preview filters.")
+        return
+
+    grouped_by_date: dict[str, list[dict[str, Any]]] = {}
+    for item in selected:
+        generate_preview_for_item(config, item)
+        item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+        grouped_by_date.setdefault(item_date, []).append(item)
+
+    for item_date, items in grouped_by_date.items():
+        preview_index = build_preview_index(config, items, item_date)
+        print(f"[OK] preview index ({item_date}): {preview_index['index_file']}")
+        if preview_index["index_url"]:
+            print(f"[OK] preview url ({item_date}): {preview_index['index_url']}")
+
+    save_queue(queue)
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Multi-platform content automation")
     parser.add_argument(
@@ -1485,6 +1724,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_notify = sub.add_parser("notify", help="Send queue summary to notification channels")
     p_notify.set_defaults(func=command_notify)
+
+    p_preview = sub.add_parser("preview", help="Generate visual preview HTML pages")
+    p_preview.add_argument("--id", default="", help="Queue item ID")
+    p_preview.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_preview.add_argument("--limit", type=int, default=10, help="How many recent items")
+    p_preview.add_argument(
+        "--sync-feishu", action="store_true", help="Sync preview fields to Feishu Bitable"
+    )
+    p_preview.set_defaults(func=command_preview)
 
     return parser
 

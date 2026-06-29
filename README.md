@@ -50,7 +50,19 @@ Current target matrix:
    python3 automation/pipeline.py --config automation/config.json publish --sync-feishu
    ```
 
-6. Mark content as posted after platform upload:
+6. Generate visual previews (article-style / video storyboard):
+
+   ```bash
+   python3 automation/pipeline.py --config automation/config.json preview --date 2026-07-03 --sync-feishu
+   ```
+
+   Serve preview pages:
+
+   ```bash
+   python3 -m http.server 8787 --directory automation/previews
+   ```
+
+7. Mark content as posted after platform upload:
 
    ```bash
    python3 automation/pipeline.py --config automation/config.json mark-posted --id <queue_item_id> --url <post_url> --sync-feishu
@@ -62,7 +74,7 @@ Current target matrix:
    python3 automation/pipeline.py --config automation/config.json notify
    ```
 
-8. Sync detailed content to Feishu dashboard:
+9. Sync detailed content to Feishu dashboard:
 
    ```bash
    python3 automation/pipeline.py --config automation/config.json sync-feishu

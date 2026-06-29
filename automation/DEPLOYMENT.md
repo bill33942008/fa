@@ -21,6 +21,7 @@ Then adjust `automation/config.json`:
 - LLM model + endpoint
 - quality scoring thresholds (`quality_scoring`)
 - quality guard rules (`quality_guard`) for auto-blocking low-score or empty drafts
+- preview config (`preview.public_base_url`) for clickable browser preview links
 - notification and Feishu Bitable config
 - adapter config for WeChat Official auto-publish
 
@@ -66,6 +67,9 @@ This creates:
 - queue: `automation/state/publish_queue.json`
 - quality score per item (0-100) + publish advice (`可发/需改/禁发`)
 - low quality / empty drafts can be auto-marked as `auto_blocked` by quality guard
+- HTML previews in `automation/previews/<date>/`:
+  - article mobile-style preview page
+  - short-video storyboard preview page
 
 ## 4) Review and approve
 
@@ -117,6 +121,8 @@ Create the following fields in your table:
 - SourceTopic
 - SourceLink
 - ContentFile
+- PreviewFile
+- PreviewURL
 - HookText
 - BodyPreview
 - ContentMarkdown
@@ -141,6 +147,7 @@ Recommended field types:
 - PublishAdvice / QualityLevel / QualityBadge: Single line text (or Single select)
 - QualityReason: Long text
 - HookText / BodyPreview / ContentMarkdown: Long text
+- PreviewFile / PreviewURL: Single line text
 
 Recommended coloring rules in Bitable view:
 
@@ -163,6 +170,23 @@ With the cron jobs in this guide:
 - any manual action (`approve`, `publish`, `mark-posted`, `sync-feishu`) can update immediately
 
 So the table is not static; it keeps updating daily + incremental updates during the day.
+
+## 6.2) Visual preview access
+
+Generate previews manually:
+
+```bash
+python3 automation/pipeline.py --config automation/config.json preview --date 2026-07-03 --sync-feishu
+```
+
+Serve previews via HTTP:
+
+```bash
+python3 -m http.server 8787 --directory automation/previews
+```
+
+If `preview.public_base_url` is set (for example `http://YOUR_SERVER_IP:8787`), Feishu
+records will include direct clickable links in `PreviewURL`.
 
 You can sync on demand:
 

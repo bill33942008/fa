@@ -36,6 +36,10 @@
     "topics_per_track": 6,
     "default_timezone": "Asia/Shanghai"
   },
+  "preview": {
+    "enabled": true,
+    "public_base_url": "http://YOUR_SERVER_IP:8787"
+  },
   "quality_scoring": {
     "enabled": true,
     "llm_review_enabled": true,
