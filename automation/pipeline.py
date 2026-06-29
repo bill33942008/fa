@@ -816,12 +816,58 @@ def build_preview_url(config: dict[str, Any], preview_file: Path) -> str:
     return f"{public_base_url.rstrip('/')}/{relative_path.as_posix()}"
 
 
+def cache_bust_token(item: dict[str, Any]) -> str:
+    raw = str(item.get("updated_at", "")).strip() or str(item.get("created_at", "")).strip()
+    token = re.sub(r"\D", "", raw)[:14]
+    return token or str(safe_int(item.get("total_score", 0), default=0))
+
+
 def split_video_segments(body_markdown: str, limit: int = 8) -> list[str]:
     plain = strip_markdown(body_markdown)
     chunks = [segment.strip() for segment in re.split(r"[。！？!?;\n]+", plain) if segment.strip()]
     if not chunks and plain:
         chunks = [plain]
     return chunks[:limit]
+
+
+def synthesize_tts_segment(
+    segment_text: str,
+    segment_audio: Path,
+    sample_cfg: dict[str, Any],
+    tts_binary: str | None,
+) -> None:
+    engine = str(sample_cfg.get("tts_engine", "espeak-ng")).strip().lower()
+    voice = str(sample_cfg.get("tts_voice", "zh-CN-XiaoxiaoNeural"))
+    speed = int(sample_cfg.get("tts_speed", 165))
+
+    if engine == "edge-tts":
+        binary = tts_binary or ensure_binary("edge-tts")
+        run_command(
+            [
+                binary,
+                "--voice",
+                voice,
+                "--text",
+                segment_text,
+                "--write-media",
+                str(segment_audio),
+            ]
+        )
+        return
+
+    binary = tts_binary or ensure_binary("espeak-ng")
+    run_command(
+        [
+            binary,
+            "-v",
+            voice,
+            "-s",
+            str(speed),
+            "-w",
+            str(segment_audio),
+            segment_text,
+        ]
+    )
 
 
 def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: dict[str, str]) -> str:
@@ -981,11 +1027,22 @@ def build_preview_index(config: dict[str, Any], items: list[dict[str, Any]], dat
         preview_file = Path(str(item.get("preview_file", "")).strip() or "#")
         local_link = html.escape(preview_file.name) if preview_file != Path("#") else "#"
         target_href = preview_url or local_link
+        bust = cache_bust_token(item)
+        if bust:
+            sep = "&" if "?" in target_href else "?"
+            target_href = f"{target_href}{sep}v={bust}"
+        sample_video_url = html.escape(str(item.get("sample_video_url", "")).strip())
+        sample_video_link = (
+            f"<a href='{sample_video_url}' target='_blank' rel='noreferrer'>播放样片</a>"
+            if sample_video_url
+            else "-"
+        )
         rows.append(
             "<tr>"
             f"<td>{item.get('id','')}</td><td>{platform}</td>"
             f"<td>{badge}{score}</td><td>{advice}</td>"
             f"<td><a href='{target_href}' target='_blank' rel='noreferrer'>{title}</a></td>"
+            f"<td>{sample_video_link}</td>"
             "</tr>"
         )
     index_html = f"""<!doctype html>
@@ -999,7 +1056,7 @@ th{{background:#f8fafc;}}
 a{{color:#2563eb;text-decoration:none;}}
 </style></head><body><div class="card">
 <h2 style="margin-top:0;">发布预览索引（{date}）</h2>
-<table><thead><tr><th>QueueID</th><th>平台</th><th>评分</th><th>建议</th><th>预览链接</th></tr></thead>
+<table><thead><tr><th>QueueID</th><th>平台</th><th>评分</th><th>建议</th><th>预览链接</th><th>样片</th></tr></thead>
 <tbody>{''.join(rows)}</tbody></table></div></body></html>"""
     index_file = preview_dir / "index.html"
     index_file.write_text(index_html, encoding="utf-8")
@@ -1030,14 +1087,18 @@ def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
 
     links: list[str] = []
     for date in dates:
+        date_index = PREVIEW_DIR / date / "index.html"
+        version = str(int(date_index.stat().st_mtime)) if date_index.exists() else "0"
         links.append(
             (
-                f"<a class='date-link' href='{date}/index.html' target='date-content-frame' "
+                f"<a class='date-link' href='{date}/index.html?v={version}' target='date-content-frame' "
                 f"onclick=\"document.getElementById('current-date').innerText='{date}';\">{date}</a>"
             )
         )
 
     default_date = dates[0]
+    default_index = PREVIEW_DIR / default_date / "index.html"
+    default_version = str(int(default_index.stat().st_mtime)) if default_index.exists() else "0"
     portal_html = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1087,7 +1148,7 @@ def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
       <div class="header">
         <h1>当前日期：<span id="current-date">{default_date}</span></h1>
       </div>
-      <iframe name="date-content-frame" src="{default_date}/index.html"></iframe>
+      <iframe name="date-content-frame" src="{default_date}/index.html?v={default_version}"></iframe>
     </main>
   </div>
 </body>
@@ -1178,8 +1239,14 @@ def render_sample_video_for_item(config: dict[str, Any], item: dict[str, Any]) -
         return {"status": "disabled", "message": "sample_video disabled"}
 
     ensure_binary("ffmpeg")
-    tts_binary = ensure_binary(sample_cfg.get("tts_binary", "espeak-ng"))
     ensure_binary("ffprobe")
+    tts_engine = str(sample_cfg.get("tts_engine", "edge-tts")).strip().lower()
+    tts_binary = (
+        ensure_binary(sample_cfg.get("tts_binary", "edge-tts"))
+        if tts_engine == "edge-tts"
+        else ensure_binary(sample_cfg.get("tts_binary", "espeak-ng"))
+    )
+    segment_ext = ".mp3" if tts_engine == "edge-tts" else ".wav"
 
     queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
     item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
@@ -1196,15 +1263,13 @@ def render_sample_video_for_item(config: dict[str, Any], item: dict[str, Any]) -
     out_video = media_dir / f"{queue_id}.mp4"
     out_audio = media_dir / f"{queue_id}.wav"
 
-    voice = str(sample_cfg.get("tts_voice", "zh"))
-    speed = int(sample_cfg.get("tts_speed", 165))
     segment_gap = float(sample_cfg.get("segment_gap_seconds", 0.25))
     lead_in = float(sample_cfg.get("lead_in_seconds", 0.4))
     min_duration = float(sample_cfg.get("min_duration_seconds", 8.0))
     width = int(sample_cfg.get("width", 720))
     height = int(sample_cfg.get("height", 1280))
     fps = int(sample_cfg.get("fps", 25))
-    bg_color = str(sample_cfg.get("background_color", "#111827"))
+    bg_color = str(sample_cfg.get("background_color", "#1e3a8a"))
 
     with tempfile.TemporaryDirectory(prefix=f"sample-{queue_id}-") as temp_dir:
         temp_path = Path(temp_dir)
@@ -1215,19 +1280,8 @@ def render_sample_video_for_item(config: dict[str, Any], item: dict[str, Any]) -
             segment_text = segment.strip()[:120]
             if not segment_text:
                 continue
-            segment_audio = temp_path / f"segment_{idx:02d}.wav"
-            run_command(
-                [
-                    tts_binary,
-                    "-v",
-                    voice,
-                    "-s",
-                    str(speed),
-                    "-w",
-                    str(segment_audio),
-                    segment_text,
-                ]
-            )
+            segment_audio = temp_path / f"segment_{idx:02d}{segment_ext}"
+            synthesize_tts_segment(segment_text, segment_audio, sample_cfg, tts_binary)
             duration = ffprobe_duration_seconds(segment_audio)
             if duration < 0.1:
                 continue
@@ -1281,8 +1335,15 @@ def render_sample_video_for_item(config: dict[str, Any], item: dict[str, Any]) -
                 f"color=c={bg_color}:s={width}x{height}:r={fps}:d={total_duration:.2f}",
                 "-i",
                 str(narration_audio),
-                "-vf",
-                subtitle_filter,
+                "-filter_complex",
+                (
+                    f"[1:a]showwaves=s={width}x220:mode=line:rate={fps}:colors=0x93c5fd[sw];"
+                    f"[0:v][sw]overlay=0:H-h-70,{subtitle_filter}[v]"
+                ),
+                "-map",
+                "[v]",
+                "-map",
+                "1:a",
                 "-shortest",
                 "-c:v",
                 "libx264",

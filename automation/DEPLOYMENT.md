@@ -38,6 +38,7 @@ Install runtime tools for auto sample videos:
 ```bash
 sudo apt-get update
 sudo apt-get install -y ffmpeg espeak-ng
+cd /opt/fa && . .venv/bin/activate && pip install edge-tts
 ```
 
 Optional (email digest):
@@ -195,6 +196,11 @@ Render sample videos (subtitle + TTS):
 ```bash
 python3 automation/pipeline.py --config automation/config.json render-samples --date 2026-07-03 --only-pending --sync-feishu
 ```
+
+Voice quality notes:
+
+- Preferred: `sample_video.tts_engine=edge-tts` with `tts_voice=zh-CN-XiaoxiaoNeural`
+- Fallback: `espeak-ng` (robotic and may produce pronunciation artifacts)
 
 Feishu fields for sample outputs:
 

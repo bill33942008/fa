@@ -71,6 +71,10 @@ Current target matrix:
    python3 automation/pipeline.py --config automation/config.json render-samples --date 2026-07-03 --only-pending --sync-feishu
    ```
 
+   Recommended runtime:
+   - `ffmpeg`
+   - `edge-tts` (better Chinese voice quality than local fallback)
+
    Feishu will receive `SampleVideoURL` for clickable sample playback links.
 
 7. Mark content as posted after platform upload:
