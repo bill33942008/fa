@@ -61,9 +61,13 @@ class AdManager {
   }
 
   showBanner() {
-    if (this.bannerAd) {
-      this.bannerAd.show().catch(() => {});
+    if (!this.bannerAd) {
+      return Promise.resolve(false);
     }
+    return this.bannerAd
+      .show()
+      .then(() => true)
+      .catch(() => false);
   }
 
   hideBanner() {
@@ -74,12 +78,15 @@ class AdManager {
 
   showInterstitial() {
     if (!this.interstitialAd) {
-      return;
+      return Promise.resolve(false);
     }
-    this.interstitialAd.show().catch(() => {});
+    return this.interstitialAd
+      .show()
+      .then(() => true)
+      .catch(() => false);
   }
 
-  showReviveRewarded() {
+  showRewardedVideo() {
     if (!this.rewardedVideoAd) {
       return Promise.resolve(false);
     }
@@ -116,6 +123,10 @@ class AdManager {
             })
         );
     });
+  }
+
+  showReviveRewarded() {
+    return this.showRewardedVideo();
   }
 }
 

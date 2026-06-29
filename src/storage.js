@@ -75,7 +75,7 @@ function refreshDaily(profile, retentionConfig) {
   return profile;
 }
 
-function updateProfileAfterRound(profile, score, retentionConfig) {
+function updateProfileAfterRound(profile, score, retentionConfig, economyConfig) {
   const today = getTodayKey();
   refreshDaily(profile, retentionConfig);
 
@@ -90,15 +90,27 @@ function updateProfileAfterRound(profile, score, retentionConfig) {
   profile.lastPlayDate = today;
 
   profile.totalRounds += 1;
+  const coinsBeforeRound = profile.totalCoins;
   profile.totalCoins += score;
   profile.bestScore = Math.max(profile.bestScore, score);
   profile.dailyProgress += score;
 
+  let dailyBonus = 0;
   if (!profile.dailyCompleted && profile.dailyProgress >= profile.dailyTarget) {
     profile.dailyCompleted = true;
-    profile.totalCoins += 50;
+    dailyBonus = economyConfig.dailyBonusCoins;
+    profile.totalCoins += dailyBonus;
   }
 
+  return {
+    profile,
+    dailyBonus,
+    roundCoinGain: profile.totalCoins - coinsBeforeRound,
+  };
+}
+
+function addCoins(profile, coins) {
+  profile.totalCoins += coins;
   return profile;
 }
 
@@ -107,4 +119,5 @@ module.exports = {
   saveProfile,
   refreshDaily,
   updateProfileAfterRound,
+  addCoins,
 };
