@@ -171,11 +171,37 @@ def replicate_headers(cfg: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def replicate_create_prediction(cfg: dict[str, Any], payload_input: dict[str, Any]) -> dict[str, Any]:
+def resolve_replicate_version(cfg: dict[str, Any]) -> str:
+    cached = str(cfg.get("_resolved_version", "")).strip()
+    if cached:
+        return cached
+    explicit_version = str(cfg.get("version", "")).strip()
+    if explicit_version:
+        cfg["_resolved_version"] = explicit_version
+        return explicit_version
     model = str(cfg.get("model", "")).strip()
     if not model:
-        raise ValueError("cloud_media.*.model is required for replicate provider")
-    payload = {"model": model, "input": payload_input}
+        raise ValueError("cloud_media.*.model or cloud_media.*.version is required")
+    if "/" not in model:
+        # If user already passed a version-like value, allow it.
+        cfg["_resolved_version"] = model
+        return model
+    meta = http_get_json(
+        f"https://api.replicate.com/v1/models/{model}",
+        headers=replicate_headers(cfg),
+        timeout=30,
+    )
+    latest = meta.get("latest_version", {}) if isinstance(meta, dict) else {}
+    version = str(latest.get("id", "")).strip()
+    if not version:
+        raise ValueError(f"Cannot resolve latest Replicate version for model: {model}")
+    cfg["_resolved_version"] = version
+    return version
+
+
+def replicate_create_prediction(cfg: dict[str, Any], payload_input: dict[str, Any]) -> dict[str, Any]:
+    version = resolve_replicate_version(cfg)
+    payload = {"version": version, "input": payload_input}
     try:
         return http_post_json(
             "https://api.replicate.com/v1/predictions",
