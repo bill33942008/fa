@@ -40,6 +40,37 @@
     "enabled": true,
     "public_base_url": "http://YOUR_SERVER_IP:8787"
   },
+  "local_gpu": {
+    "enabled": false,
+    "auto_export_on_plan_day": true,
+    "jobs_dir": "state/video_jobs",
+    "pixelle_api_url": "http://127.0.0.1:8000",
+    "comfyui_url": "http://127.0.0.1:8188",
+    "generation": {
+      "mode": "fixed",
+      "n_scenes": 5,
+      "frame_template": "1080x1920/image_default.html",
+      "tts_workflow": "tts_edge.json",
+      "media_workflow": "image_flux.json",
+      "prompt_prefix": "",
+      "bgm_volume": 0.25,
+      "poll_interval_seconds": 5,
+      "timeout_seconds": 1800,
+      "use_async_api": true
+    },
+    "upload": {
+      "enabled": true,
+      "method": "scp",
+      "server_host": "YOUR_SERVER_IP",
+      "server_user": "root",
+      "server_port": 22,
+      "remote_media_dir": "/opt/fa/automation/previews/media",
+      "remote_pipeline_dir": "/opt/fa",
+      "remote_python": "/opt/fa/.venv/bin/python",
+      "remote_config": "/opt/fa/automation/config.json",
+      "ssh_identity_file": ""
+    }
+  },
   "sample_video": {
     "enabled": true,
     "auto_render_on_plan_day": false,

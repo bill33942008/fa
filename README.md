@@ -71,6 +71,18 @@ Current target matrix:
    python3 automation/pipeline.py --config automation/config.json render-samples --date 2026-07-03 --only-pending --sync-feishu
    ```
 
+   **Recommended for production video quality:** use local GPU rendering with ComfyUI + Pixelle-Video on your PC:
+
+   ```bash
+   # On server: export jobs
+   python3 automation/pipeline.py --config automation/config.json export-video-jobs --date 2026-07-03 --only-pending
+
+   # On Windows PC with RTX GPU
+   python automation/local_gpu/worker.py --config automation/local_gpu/local_config.json --once
+   ```
+
+   See `automation/local_gpu/README.md` for full setup.
+
    Recommended runtime:
    - `ffmpeg`
    - `edge-tts` (better Chinese voice quality than local fallback)

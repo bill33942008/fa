@@ -44,6 +44,7 @@ OUTBOX_DIR = BASE_DIR / "outbox"
 PREVIEW_DIR = BASE_DIR / "previews"
 QUEUE_FILE = STATE_DIR / "publish_queue.json"
 FEISHU_MAPPING_FILE = STATE_DIR / "feishu_record_mapping.json"
+VIDEO_JOBS_DIR = STATE_DIR / "video_jobs"
 
 FEISHU_FIELD_DEFINITIONS: dict[str, dict[str, Any]] = {
     "QueueID": {"type": 1},
@@ -830,6 +831,198 @@ def split_video_segments(body_markdown: str, limit: int = 8) -> list[str]:
     return chunks[:limit]
 
 
+def local_gpu_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("local_gpu", {}).get("enabled", False))
+
+
+def video_jobs_root(config: dict[str, Any]) -> Path:
+    jobs_dir = str(config.get("local_gpu", {}).get("jobs_dir", "state/video_jobs")).strip()
+    if jobs_dir.startswith("/"):
+        return Path(jobs_dir)
+    return BASE_DIR / jobs_dir
+
+
+def video_jobs_pending_dir(config: dict[str, Any]) -> Path:
+    return video_jobs_root(config) / "pending"
+
+
+def video_jobs_completed_dir(config: dict[str, Any]) -> Path:
+    return video_jobs_root(config) / "completed"
+
+
+def video_jobs_failed_dir(config: dict[str, Any]) -> Path:
+    return video_jobs_root(config) / "failed"
+
+
+def ensure_video_job_dirs(config: dict[str, Any]) -> None:
+    for path in (
+        video_jobs_pending_dir(config),
+        video_jobs_completed_dir(config),
+        video_jobs_failed_dir(config),
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def filter_queue_items(
+    queue: list[dict[str, Any]],
+    *,
+    item_id: str = "",
+    date: str = "",
+    limit: int = 0,
+    only_pending: bool = False,
+    include_blocked: bool = False,
+    post_format: str = "",
+) -> list[dict[str, Any]]:
+    filtered = queue
+    if item_id:
+        return [item for item in filtered if item.get("id") == item_id]
+    if date:
+        filtered = [item for item in filtered if item.get("date") == date]
+    if only_pending:
+        filtered = [
+            item
+            for item in filtered
+            if item.get("status") in {"pending_review", "approved", "ready_to_post"}
+        ]
+    if not include_blocked:
+        filtered = [
+            item
+            for item in filtered
+            if item.get("status") != "auto_blocked" and item.get("publish_advice") != "禁发"
+        ]
+    if post_format:
+        filtered = [item for item in filtered if item.get("post_format") == post_format]
+    if limit > 0:
+        return filtered[-limit:]
+    return filtered
+
+
+def build_video_script_text(item: dict[str, Any]) -> str:
+    content = extract_content_payload(item)
+    hook = content.get("hook_text", "").strip()
+    body = strip_markdown(content.get("body_markdown", "")).strip()
+    if hook and body:
+        return f"{hook}\n\n{body}"
+    return hook or body or str(item.get("title", "")).strip()
+
+
+def build_video_job_payload(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    local_cfg = config.get("local_gpu", {})
+    gen_cfg = local_cfg.get("generation", {})
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    content = extract_content_payload(item)
+    script_text = build_video_script_text(item)
+    return {
+        "job_id": queue_id,
+        "date": item_date,
+        "platform": str(item.get("platform", "")),
+        "account_name": str(item.get("account_name", "")),
+        "track": str(item.get("track", "")),
+        "title": str(item.get("title", "")).strip(),
+        "hook_text": content.get("hook_text", "").strip(),
+        "cover_text": content.get("cover_text", "").strip(),
+        "script_text": script_text,
+        "output_filename": f"{queue_id}.mp4",
+        "remote_media_path": f"{item_date}/{queue_id}.mp4",
+        "status": "pending",
+        "created_at": now_local().isoformat(),
+        "pixelle_api_url": str(local_cfg.get("pixelle_api_url", "http://127.0.0.1:8000")).rstrip("/"),
+        "comfyui_url": str(local_cfg.get("comfyui_url", "http://127.0.0.1:8188")).rstrip("/"),
+        "generation": {
+            "mode": str(gen_cfg.get("mode", "fixed")),
+            "n_scenes": int(gen_cfg.get("n_scenes", 5)),
+            "frame_template": str(gen_cfg.get("frame_template", "1080x1920/image_default.html")),
+            "tts_workflow": str(gen_cfg.get("tts_workflow", "tts_edge.json")),
+            "media_workflow": str(gen_cfg.get("media_workflow", "image_flux.json")),
+            "prompt_prefix": str(gen_cfg.get("prompt_prefix", "")),
+            "bgm_volume": float(gen_cfg.get("bgm_volume", 0.25)),
+            "poll_interval_seconds": int(gen_cfg.get("poll_interval_seconds", 5)),
+            "timeout_seconds": int(gen_cfg.get("timeout_seconds", 1800)),
+            "use_async_api": bool(gen_cfg.get("use_async_api", True)),
+        },
+        "upload": local_cfg.get("upload", {}),
+    }
+
+
+def export_video_jobs_for_items(
+    config: dict[str, Any], items: list[dict[str, Any]]
+) -> list[dict[str, str]]:
+    if not local_gpu_enabled(config):
+        return []
+    ensure_video_job_dirs(config)
+    pending_dir = video_jobs_pending_dir(config)
+    results: list[dict[str, str]] = []
+    for item in items:
+        if item.get("post_format") != "short_video_script":
+            continue
+        queue_id = str(item.get("id", "")).strip()
+        if not queue_id:
+            continue
+        payload = build_video_job_payload(config, item)
+        job_file = pending_dir / f"{queue_id}.json"
+        save_json(job_file, payload)
+        item["video_job_status"] = "exported"
+        item["video_job_file"] = str(job_file)
+        item["updated_at"] = now_local().isoformat()
+        results.append(
+            {
+                "id": queue_id,
+                "status": "exported",
+                "job_file": str(job_file),
+            }
+        )
+        print(f"[OK] video job exported {queue_id} -> {job_file}")
+    return results
+
+
+def import_local_video_for_item(
+    config: dict[str, Any],
+    queue: list[dict[str, Any]],
+    job_id: str,
+    video_path: Path | None = None,
+    *,
+    regenerate_preview: bool = True,
+) -> dict[str, str]:
+    item = next((entry for entry in queue if entry.get("id") == job_id), None)
+    if item is None:
+        raise ValueError(f"Queue item not found: {job_id}")
+
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    media_dir = PREVIEW_DIR / "media" / item_date
+    media_dir.mkdir(parents=True, exist_ok=True)
+    target_video = media_dir / f"{job_id}.mp4"
+
+    source = video_path
+    if source is None:
+        completed_job = video_jobs_completed_dir(config) / f"{job_id}.json"
+        if completed_job.exists():
+            job_meta = load_json(completed_job, {})
+            candidate = str(job_meta.get("local_video_file", "")).strip()
+            if candidate:
+                source = Path(candidate)
+        if source is None and target_video.exists():
+            source = target_video
+    if source is None or not source.exists():
+        raise FileNotFoundError(f"Video file not found for job {job_id}")
+
+    if source.resolve() != target_video.resolve():
+        shutil.copy2(source, target_video)
+
+    item["sample_video_file"] = str(target_video)
+    item["sample_video_url"] = build_preview_url(config, target_video)
+    item["video_job_status"] = "completed"
+    item["updated_at"] = now_local().isoformat()
+    if regenerate_preview:
+        generate_preview_for_item(config, item)
+    return {
+        "status": "ok",
+        "id": job_id,
+        "video_file": str(target_video),
+        "video_url": item.get("sample_video_url", ""),
+    }
+
+
 def synthesize_tts_segment(
     segment_text: str,
     segment_audio: Path,
@@ -916,7 +1109,12 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         video_player = (
             f"<div class='video-player'><video controls playsinline preload='metadata' src='{html.escape(sample_video_url)}'></video></div>"
             if sample_video_url
-            else "<div class='video-missing'>暂未生成样片视频，请先执行 render-samples。</div>"
+            else (
+                "<div class='video-missing'>暂未生成样片视频。本地 GPU 模式请执行 export-video-jobs，"
+                "在电脑上跑 Pixelle-Video 后回传；服务器模式请执行 render-samples。</div>"
+                if local_gpu_enabled(config)
+                else "<div class='video-missing'>暂未生成样片视频，请先执行 render-samples。</div>"
+            )
         )
         content_card = (
             "<div class='phone video'>"
@@ -1378,6 +1576,16 @@ def render_sample_video_for_item(config: dict[str, Any], item: dict[str, Any]) -
 def render_samples_for_items(
     config: dict[str, Any], items: list[dict[str, Any]], *, include_blocked: bool = False
 ) -> list[dict[str, str]]:
+    if local_gpu_enabled(config):
+        print("[INFO] local_gpu.enabled=true, skipping server render-samples.")
+        return export_video_jobs_for_items(
+            config,
+            filter_queue_items(
+                items,
+                include_blocked=include_blocked,
+                post_format="short_video_script",
+            ),
+        )
     results: list[dict[str, str]] = []
     for item in items:
         if item.get("post_format") != "short_video_script":
@@ -1893,8 +2101,13 @@ def command_plan_day(args: argparse.Namespace) -> None:
             print(f"[OK] Preview portal URL: {preview_portal['portal_url']}")
 
     sample_cfg = config.get("sample_video", {})
+    local_cfg = config.get("local_gpu", {})
     sample_results: list[dict[str, str]] = []
-    if sample_cfg.get("auto_render_on_plan_day", False):
+    if local_cfg.get("enabled", False) and local_cfg.get("auto_export_on_plan_day", True):
+        sample_results = export_video_jobs_for_items(config, newly_created_items)
+        if sample_results:
+            print(f"[OK] Video jobs exported for local GPU: {len(sample_results)}")
+    elif sample_cfg.get("auto_render_on_plan_day", False):
         sample_results = render_samples_for_items(
             config,
             newly_created_items,
@@ -2077,15 +2290,12 @@ def command_preview(args: argparse.Namespace) -> None:
         print("Queue is empty.")
         return
 
-    selected: list[dict[str, Any]] = []
-    if args.id:
-        selected = [item for item in queue if item.get("id") == args.id]
-    else:
-        filtered = queue
-        if args.date:
-            filtered = [item for item in filtered if item.get("date") == args.date]
-        selected = filtered[-int(args.limit):] if args.limit > 0 else filtered
-
+    selected = filter_queue_items(
+        queue,
+        item_id=str(args.id or "").strip(),
+        date=str(args.date or "").strip(),
+        limit=int(args.limit),
+    )
     if not selected:
         print("No queue items matched preview filters.")
         return
@@ -2121,21 +2331,15 @@ def command_render_samples(args: argparse.Namespace) -> None:
         print("Queue is empty.")
         return
 
-    selected: list[dict[str, Any]]
-    if args.id:
-        selected = [item for item in queue if item.get("id") == args.id]
-    else:
-        filtered = queue
-        if args.date:
-            filtered = [item for item in filtered if item.get("date") == args.date]
-        if args.only_pending:
-            filtered = [
-                item
-                for item in filtered
-                if item.get("status") in {"pending_review", "approved", "ready_to_post"}
-            ]
-        selected = filtered[-int(args.limit):] if args.limit > 0 else filtered
-
+    selected = filter_queue_items(
+        queue,
+        item_id=str(args.id or "").strip(),
+        date=str(args.date or "").strip(),
+        limit=int(args.limit),
+        only_pending=bool(args.only_pending),
+        include_blocked=bool(args.include_blocked),
+        post_format="short_video_script",
+    )
     if not selected:
         print("No queue items matched render-samples filters.")
         return
@@ -2149,6 +2353,99 @@ def command_render_samples(args: argparse.Namespace) -> None:
     print(f"[DONE] Sample render complete. success={len(results)}")
     if args.sync_feishu:
         sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_export_video_jobs(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    if not local_gpu_enabled(config):
+        print("[WARN] local_gpu.enabled is false. Enable it in config to use export-video-jobs.")
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+
+    selected = filter_queue_items(
+        queue,
+        item_id=str(args.id or "").strip(),
+        date=str(args.date or "").strip(),
+        limit=int(args.limit),
+        only_pending=bool(args.only_pending),
+        include_blocked=bool(args.include_blocked),
+        post_format="short_video_script",
+    )
+    if not selected:
+        print("No queue items matched export-video-jobs filters.")
+        return
+
+    results = export_video_jobs_for_items(config, selected)
+    save_queue(queue)
+    print(f"[DONE] Video job export complete. exported={len(results)}")
+    pending_dir = video_jobs_pending_dir(config)
+    print(f"[INFO] Pending jobs directory: {pending_dir}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_import_local_video(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+
+    job_id = str(args.id or "").strip()
+    if not job_id:
+        print("--id is required.")
+        return
+
+    video_path = Path(args.video_path).expanduser() if args.video_path else None
+    result = import_local_video_for_item(config, queue, job_id, video_path)
+    save_queue(queue)
+    print(f"[OK] Imported local video {job_id} -> {result.get('video_file', '')}")
+    if result.get("video_url"):
+        print(f"[OK] Sample video URL: {result['video_url']}")
+
+    preview_portal = build_preview_portal(config)
+    if preview_portal.get("portal_url"):
+        print(f"[OK] Preview portal url: {preview_portal['portal_url']}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_list_video_jobs(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    ensure_video_job_dirs(config)
+    status = str(args.status or "all").strip().lower()
+    dirs: list[tuple[str, Path]] = []
+    if status in {"all", "pending"}:
+        dirs.append(("pending", video_jobs_pending_dir(config)))
+    if status in {"all", "completed"}:
+        dirs.append(("completed", video_jobs_completed_dir(config)))
+    if status in {"all", "failed"}:
+        dirs.append(("failed", video_jobs_failed_dir(config)))
+
+    total = 0
+    for label, directory in dirs:
+        jobs = sorted(directory.glob("*.json"))
+        if not jobs:
+            print(f"[{label}] (empty)")
+            continue
+        print(f"[{label}] {len(jobs)} job(s)")
+        for job_file in jobs:
+            payload = load_json(job_file, {})
+            total += 1
+            print(
+                f"  - {payload.get('job_id', job_file.stem)} | "
+                f"{payload.get('date', '')} | "
+                f"{payload.get('platform', '')} | "
+                f"{payload.get('status', label)} | "
+                f"{payload.get('title', '')[:42]}"
+            )
+    if total == 0:
+        print("No video jobs found.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2235,6 +2532,48 @@ def build_parser() -> argparse.ArgumentParser:
         "--sync-feishu", action="store_true", help="Sync sample video fields to Feishu Bitable"
     )
     p_sample.set_defaults(func=command_render_samples)
+
+    p_export = sub.add_parser(
+        "export-video-jobs",
+        help="Export short-video jobs for local ComfyUI / Pixelle-Video rendering",
+    )
+    p_export.add_argument("--id", default="", help="Queue item ID")
+    p_export.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_export.add_argument("--limit", type=int, default=10, help="How many recent items")
+    p_export.add_argument(
+        "--only-pending", action="store_true", help="Only process pending/approved items"
+    )
+    p_export.add_argument(
+        "--include-blocked", action="store_true", help="Include auto-blocked items"
+    )
+    p_export.add_argument(
+        "--sync-feishu", action="store_true", help="Sync queue fields to Feishu Bitable"
+    )
+    p_export.set_defaults(func=command_export_video_jobs)
+
+    p_import = sub.add_parser(
+        "import-local-video",
+        help="Import a locally rendered MP4 into preview media and queue",
+    )
+    p_import.add_argument("--id", required=True, help="Queue item ID")
+    p_import.add_argument(
+        "--video-path",
+        default="",
+        help="Local MP4 path. If omitted, uses completed job metadata or existing media file.",
+    )
+    p_import.add_argument(
+        "--sync-feishu", action="store_true", help="Sync sample video fields to Feishu Bitable"
+    )
+    p_import.set_defaults(func=command_import_local_video)
+
+    p_jobs = sub.add_parser("list-video-jobs", help="List exported local GPU video jobs")
+    p_jobs.add_argument(
+        "--status",
+        default="all",
+        choices=["all", "pending", "completed", "failed"],
+        help="Filter by job status directory",
+    )
+    p_jobs.set_defaults(func=command_list_video_jobs)
 
     return parser
 

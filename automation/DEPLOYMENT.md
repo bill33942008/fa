@@ -197,6 +197,40 @@ Render sample videos (subtitle + TTS):
 python3 automation/pipeline.py --config automation/config.json render-samples --date 2026-07-03 --only-pending --sync-feishu
 ```
 
+### Local GPU rendering (ComfyUI + Pixelle-Video)
+
+For higher quality Chinese voice/subtitles and AI visuals, render on your local Windows GPU machine and upload to server.
+
+1. Enable in `automation/config.json`:
+
+```json
+"local_gpu": {
+  "enabled": true,
+  "auto_export_on_plan_day": true
+}
+```
+
+2. Export jobs on server:
+
+```bash
+python3 automation/pipeline.py --config automation/config.json export-video-jobs --date 2026-07-03 --only-pending --sync-feishu
+python3 automation/pipeline.py --config automation/config.json list-video-jobs
+```
+
+3. On local PC (ComfyUI + Pixelle-Video running):
+
+```bash
+python automation/local_gpu/worker.py --config automation/local_gpu/local_config.json --once
+```
+
+4. Manual import if needed:
+
+```bash
+python3 automation/pipeline.py --config automation/config.json import-local-video --id <queue_id> --sync-feishu
+```
+
+Full guide: `automation/local_gpu/README.md`
+
 Voice quality notes:
 
 - Preferred: `sample_video.tts_engine=edge-tts` with `tts_voice=zh-CN-XiaoxiaoNeural`
