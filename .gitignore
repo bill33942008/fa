@@ -1,6 +1,7 @@
 automation/outbox/
 automation/data/
 automation/state/
+automation/previews/
 automation/__pycache__/
 *.pyc
 *.pyo
