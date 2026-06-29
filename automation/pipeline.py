@@ -68,6 +68,8 @@ FEISHU_FIELD_DEFINITIONS: dict[str, dict[str, Any]] = {
     "IllustrationFiles": {"type": 1},
     "IllustrationURLs": {"type": 1},
     "CloudVideoProvider": {"type": 1},
+    "CloudImageModel": {"type": 1},
+    "CloudVideoModel": {"type": 1},
     "CloudVideoPredictionID": {"type": 1},
     "HookText": {"type": 1},
     "BodyPreview": {"type": 1},
@@ -187,6 +189,31 @@ def dashscope_create_task(cfg: dict[str, Any], endpoint_path: str, payload: dict
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1200]
         raise RuntimeError(f"DashScope create task HTTP {exc.code}: {detail}") from exc
+
+
+def dashscope_model_candidates(cfg: dict[str, Any], defaults: list[str]) -> list[str]:
+    first = str(cfg.get("model", "")).strip()
+    user_candidates = cfg.get("model_candidates", [])
+    candidates: list[str] = []
+    if first:
+        candidates.append(first)
+    if isinstance(user_candidates, list):
+        for model in user_candidates:
+            m = str(model).strip()
+            if m:
+                candidates.append(m)
+    for model in defaults:
+        m = str(model).strip()
+        if m:
+            candidates.append(m)
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for model in candidates:
+        if model in seen:
+            continue
+        seen.add(model)
+        uniq.append(model)
+    return uniq
 
 
 def dashscope_extract_task_id(resp: dict[str, Any]) -> str:
@@ -1171,6 +1198,11 @@ def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, 
     media_dir = PREVIEW_DIR / "media" / item_date / "illustrations"
     urls: list[str] = []
     files: list[str] = []
+    used_model = ""
+    image_models = dashscope_model_candidates(
+        image_cfg,
+        defaults=["wanx-v1", "wan2.5-t2i-preview", "wan2.2-t2i-flash", "wan2.2-t2i-plus"],
+    )
     for idx, prompt in enumerate(prompts, start=1):
         if provider == "replicate":
             input_candidates = [
@@ -1190,18 +1222,31 @@ def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, 
             done = replicate_poll_prediction(image_cfg, prediction_id)
             out_urls = normalize_prediction_urls(done.get("output"))
         else:
-            payload = {
-                "model": str(image_cfg.get("model", "wanx-v1")),
-                "input": {"prompt": prompt},
-                "parameters": {
-                    "size": str(image_cfg.get("size", "1024*1024")),
-                    "n": 1,
-                    "negative_prompt": str(image_cfg.get("negative_prompt", "")),
-                },
-            }
-            created = dashscope_create_task(
-                image_cfg, "/services/aigc/text2image/image-synthesis", payload
-            )
+            last_error: Exception | None = None
+            created: dict[str, Any] | None = None
+            for candidate_model in image_models:
+                payload = {
+                    "model": candidate_model,
+                    "input": {"prompt": prompt},
+                    "parameters": {
+                        "size": str(image_cfg.get("size", "1024*1024")),
+                        "n": 1,
+                        "negative_prompt": str(image_cfg.get("negative_prompt", "")),
+                    },
+                }
+                try:
+                    created = dashscope_create_task(
+                        image_cfg, "/services/aigc/text2image/image-synthesis", payload
+                    )
+                    used_model = candidate_model
+                    break
+                except Exception as exc:  # pylint: disable=broad-except
+                    last_error = exc
+                    if "Model.AccessDenied" in str(exc):
+                        continue
+                    raise
+            if created is None:
+                raise RuntimeError(f"DashScope image models unavailable: {last_error}")
             task_id = dashscope_extract_task_id(created)
             if not task_id:
                 raise RuntimeError(f"DashScope image task create failed: {created}")
@@ -1218,6 +1263,8 @@ def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, 
 
     item["illustration_files"] = files
     item["illustration_urls"] = urls
+    if used_model:
+        item["cloud_image_model"] = used_model
     item["updated_at"] = now_local().isoformat()
     return {"status": "ok", "count": len(files), "urls": urls}
 
@@ -1238,6 +1285,11 @@ def render_cloud_video_for_item(config: dict[str, Any], item: dict[str, Any]) ->
         f"Create a vertical short social video for this script. "
         f"Title: {item.get('title','')}. Script: {script_text[:1200]}"
     )
+    used_model = ""
+    video_models = dashscope_model_candidates(
+        video_cfg,
+        defaults=["wan2.6-t2v", "wan2.7-t2v-2026-04", "wanx2.1-t2v-turbo"],
+    )
     if provider == "replicate":
         input_candidates = [
             {
@@ -1255,17 +1307,30 @@ def render_cloud_video_for_item(config: dict[str, Any], item: dict[str, Any]) ->
         done = replicate_poll_prediction(video_cfg, prediction_id)
         out_urls = normalize_prediction_urls(done.get("output"))
     else:
-        payload = {
-            "model": str(video_cfg.get("model", "wan2.6-t2v")),
-            "input": {"prompt": prompt},
-            "parameters": {
-                "size": str(video_cfg.get("size", "720*1280")),
-                "duration": int(video_cfg.get("duration_seconds", 8)),
-            },
-        }
-        created = dashscope_create_task(
-            video_cfg, "/services/aigc/video-generation/video-synthesis", payload
-        )
+        last_error: Exception | None = None
+        created: dict[str, Any] | None = None
+        for candidate_model in video_models:
+            payload = {
+                "model": candidate_model,
+                "input": {"prompt": prompt},
+                "parameters": {
+                    "size": str(video_cfg.get("size", "720*1280")),
+                    "duration": int(video_cfg.get("duration_seconds", 8)),
+                },
+            }
+            try:
+                created = dashscope_create_task(
+                    video_cfg, "/services/aigc/video-generation/video-synthesis", payload
+                )
+                used_model = candidate_model
+                break
+            except Exception as exc:  # pylint: disable=broad-except
+                last_error = exc
+                if "Model.AccessDenied" in str(exc):
+                    continue
+                raise
+        if created is None:
+            raise RuntimeError(f"DashScope video models unavailable: {last_error}")
         prediction_id = dashscope_extract_task_id(created)
         if not prediction_id:
             raise RuntimeError(f"DashScope video task create failed: {created}")
@@ -1281,7 +1346,9 @@ def render_cloud_video_for_item(config: dict[str, Any], item: dict[str, Any]) ->
 
     item["sample_video_file"] = str(out_video)
     item["sample_video_url"] = build_preview_url(config, out_video)
-    item["cloud_video_provider"] = "replicate"
+    item["cloud_video_provider"] = provider
+    if used_model:
+        item["cloud_video_model"] = used_model
     item["cloud_video_prediction_id"] = prediction_id
     item["updated_at"] = now_local().isoformat()
     return {
@@ -2254,6 +2321,8 @@ def to_feishu_fields(item: dict[str, Any]) -> dict[str, Any]:
         if isinstance(item.get("illustration_urls"), list)
         else str(item.get("illustration_urls", "")),
         "CloudVideoProvider": item.get("cloud_video_provider", ""),
+        "CloudImageModel": item.get("cloud_image_model", ""),
+        "CloudVideoModel": item.get("cloud_video_model", ""),
         "CloudVideoPredictionID": item.get("cloud_video_prediction_id", ""),
         "HookText": content["hook_text"][:2000],
         "BodyPreview": content["body_preview"][:1200],

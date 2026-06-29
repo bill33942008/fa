@@ -48,6 +48,12 @@
       "api_key_env": "DASHSCOPE_API_KEY",
       "base_url": "https://dashscope.aliyuncs.com/api/v1",
       "model": "wanx-v1",
+      "model_candidates": [
+        "wanx-v1",
+        "wan2.5-t2i-preview",
+        "wan2.2-t2i-flash",
+        "wan2.2-t2i-plus"
+      ],
       "images_per_item": 3,
       "size": "1024*1024",
       "negative_prompt": "低质量，模糊，文字水印，畸形",
@@ -65,6 +71,11 @@
       "api_key_env": "DASHSCOPE_API_KEY",
       "base_url": "https://dashscope.aliyuncs.com/api/v1",
       "model": "wan2.6-t2v",
+      "model_candidates": [
+        "wan2.6-t2v",
+        "wan2.7-t2v-2026-04",
+        "wanx2.1-t2v-turbo"
+      ],
       "duration_seconds": 8,
       "size": "720*1280",
       "include_blocked": false,
