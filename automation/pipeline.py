@@ -993,7 +993,16 @@ a{{color:#2563eb;text-decoration:none;}}
 def list_preview_dates() -> list[str]:
     if not PREVIEW_DIR.exists():
         return []
-    dates = [entry.name for entry in PREVIEW_DIR.iterdir() if entry.is_dir()]
+    dates: list[str] = []
+    for entry in PREVIEW_DIR.iterdir():
+        if not entry.is_dir():
+            continue
+        # Keep only day folders like 2026-07-04.
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry.name):
+            continue
+        if not (entry / "index.html").exists():
+            continue
+        dates.append(entry.name)
     return sorted(dates, reverse=True)
 
 
