@@ -28,26 +28,32 @@ Current target matrix:
 3. Generate daily drafts for all platforms:
 
    ```bash
-   python3 automation/pipeline.py plan-day --config automation/config.json
+   python3 automation/pipeline.py --config automation/config.json plan-day --sync-feishu --notify
    ```
 
 4. Review queue and approve drafts:
 
    ```bash
-   python3 automation/pipeline.py list --config automation/config.json
-   python3 automation/pipeline.py approve --id <queue_item_id> --config automation/config.json
+   python3 automation/pipeline.py --config automation/config.json list
+   python3 automation/pipeline.py --config automation/config.json approve --id <queue_item_id> --sync-feishu
    ```
 
 5. Prepare publishing actions:
 
    ```bash
-   python3 automation/pipeline.py publish --config automation/config.json
+   python3 automation/pipeline.py --config automation/config.json publish --sync-feishu
    ```
 
 6. Mark content as posted after platform upload:
 
    ```bash
-   python3 automation/pipeline.py mark-posted --id <queue_item_id> --url <post_url> --config automation/config.json
+   python3 automation/pipeline.py --config automation/config.json mark-posted --id <queue_item_id> --url <post_url> --sync-feishu
+   ```
+
+7. Send reminders manually if needed:
+
+   ```bash
+   python3 automation/pipeline.py --config automation/config.json notify
    ```
 
 See full deployment guide in `automation/DEPLOYMENT.md`.

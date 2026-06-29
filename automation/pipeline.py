@@ -7,6 +7,9 @@ Capabilities:
 - Generate platform-specific drafts with an LLM (or deterministic fallback)
 - Create and maintain a review/publishing queue
 - Support semi-automated publishing workflow
+- Sync queue status to Feishu Bitable
+- Push daily reminders to Feishu webhook / email
+- Auto-submit WeChat Official Account drafts (official API path)
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import email.utils
+import html
 import json
 import os
 import re
@@ -21,6 +25,7 @@ import smtplib
 import ssl
 import textwrap
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import xml.etree.ElementTree as et
@@ -34,6 +39,7 @@ STATE_DIR = BASE_DIR / "state"
 DATA_DIR = BASE_DIR / "data"
 OUTBOX_DIR = BASE_DIR / "outbox"
 QUEUE_FILE = STATE_DIR / "publish_queue.json"
+FEISHU_MAPPING_FILE = STATE_DIR / "feishu_record_mapping.json"
 
 
 def ensure_dirs() -> None:
@@ -74,6 +80,26 @@ def parse_datetime(raw: str | None) -> dt.datetime | None:
         return email.utils.parsedate_to_datetime(raw)
     except (TypeError, ValueError):
         return None
+
+
+def http_post_json(
+    url: str, payload: dict[str, Any], headers: dict[str, str] | None = None, timeout: int = 30
+) -> dict[str, Any]:
+    merged_headers = {"Content-Type": "application/json"}
+    if headers:
+        merged_headers.update(headers)
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers=merged_headers, method="POST")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def http_get_json(
+    url: str, headers: dict[str, str] | None = None, timeout: int = 30
+) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers=headers or {}, method="GET")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 def fetch_rss(url: str) -> list[dict[str, Any]]:
@@ -196,17 +222,15 @@ def llm_generate(
             {"role": "user", "content": user_prompt},
         ],
     }
-    body = json.dumps(payload).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
-    request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
 
     try:
-        with urllib.request.urlopen(request, timeout=35) as response:
-            raw = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        raw = http_post_json(
+            endpoint,
+            payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=35,
+        )
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
         print(f"[WARN] LLM request failed, fallback mode enabled: {exc}")
         return None
 
@@ -334,6 +358,347 @@ def save_queue(items: list[dict[str, Any]]) -> None:
     save_json(QUEUE_FILE, items)
 
 
+def update_item_status(
+    queue: list[dict[str, Any]], item_id: str, new_status: str, notes: str = ""
+) -> bool:
+    for item in queue:
+        if item["id"] == item_id:
+            item["status"] = new_status
+            item["updated_at"] = now_local().isoformat()
+            if notes:
+                item["notes"] = notes
+            return True
+    return False
+
+
+def strip_markdown(text: str) -> str:
+    no_links = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", text)
+    no_marks = re.sub(r"[#>*`_~\-]", " ", no_links)
+    return re.sub(r"\s+", " ", no_marks).strip()
+
+
+def markdown_to_simple_html(markdown_text: str) -> str:
+    lines = markdown_text.splitlines()
+    html_lines: list[str] = []
+    in_ul = False
+    for raw in lines:
+        line = raw.rstrip()
+        if not line.strip():
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            continue
+        if line.startswith("### "):
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<h3>{html.escape(line[4:])}</h3>")
+        elif line.startswith("## "):
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<h2>{html.escape(line[3:])}</h2>")
+        elif line.startswith("# "):
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<h1>{html.escape(line[2:])}</h1>")
+        elif line.lstrip().startswith("- "):
+            if not in_ul:
+                html_lines.append("<ul>")
+                in_ul = True
+            item = line.lstrip()[2:]
+            html_lines.append(f"<li>{html.escape(item)}</li>")
+        else:
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<p>{html.escape(line)}</p>")
+    if in_ul:
+        html_lines.append("</ul>")
+    return "\n".join(html_lines)
+
+
+def build_queue_summary(queue: list[dict[str, Any]]) -> str:
+    if not queue:
+        return "Queue is empty."
+    grouped: dict[str, int] = {}
+    for item in queue:
+        grouped[item["status"]] = grouped.get(item["status"], 0) + 1
+    lines = [
+        f"Queue summary ({now_local().strftime('%Y-%m-%d %H:%M')}):",
+        "",
+    ]
+    for status, count in sorted(grouped.items()):
+        lines.append(f"- {status}: {count}")
+    lines.append("")
+    lines.append("Top pending items:")
+    pending = [item for item in queue if item["status"] in {"pending_review", "approved"}][:8]
+    if not pending:
+        lines.append("- none")
+    else:
+        for item in pending:
+            lines.append(
+                f"- {item['id']} | {item['platform']} | {item.get('publish_time', '--')} | {item.get('title', '')[:36]}"
+            )
+    return "\n".join(lines)
+
+
+def send_email_digest(config: dict[str, Any], body: str) -> bool:
+    email_cfg = config.get("notification", {}).get("email", {})
+    if not email_cfg.get("enabled", False):
+        print("[INFO] Email digest disabled.")
+        return False
+
+    password = os.getenv(email_cfg.get("password_env", "SMTP_PASSWORD"), "")
+    if not password:
+        raise ValueError("SMTP password env var is missing.")
+
+    msg = MIMEText(body, _subtype="plain", _charset="utf-8")
+    msg["Subject"] = f"[ContentOps] Queue Digest {now_local().strftime('%Y-%m-%d')}"
+    msg["From"] = email_cfg["sender"]
+    msg["To"] = ", ".join(email_cfg.get("receivers", []))
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL(
+        email_cfg["smtp_host"], int(email_cfg.get("smtp_port", 465)), context=context
+    ) as smtp:
+        smtp.login(email_cfg["sender"], password)
+        smtp.sendmail(email_cfg["sender"], email_cfg.get("receivers", []), msg.as_string())
+    print("[OK] digest email sent")
+    return True
+
+
+def send_feishu_webhook(config: dict[str, Any], body: str) -> bool:
+    feishu_cfg = config.get("notification", {}).get("feishu", {})
+    if not feishu_cfg.get("enabled", False):
+        print("[INFO] Feishu webhook disabled.")
+        return False
+    webhook = feishu_cfg.get("webhook_url", "").strip()
+    if not webhook:
+        raise ValueError("Feishu webhook is enabled but webhook_url is missing.")
+
+    payload = {"msg_type": "text", "content": {"text": body}}
+    response = http_post_json(webhook, payload, timeout=20)
+    if response.get("StatusCode") not in (0, None):
+        raise ValueError(f"Feishu webhook failed: {response}")
+    print("[OK] feishu notification sent")
+    return True
+
+
+def get_feishu_tenant_access_token(bitable_cfg: dict[str, Any]) -> str:
+    app_id = os.getenv(bitable_cfg.get("app_id_env", "FEISHU_APP_ID"), "")
+    app_secret = os.getenv(bitable_cfg.get("app_secret_env", "FEISHU_APP_SECRET"), "")
+    if not app_id or not app_secret:
+        raise ValueError("Feishu Bitable app credentials env vars are missing.")
+
+    payload = {"app_id": app_id, "app_secret": app_secret}
+    response = http_post_json(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        payload,
+        timeout=20,
+    )
+    if response.get("code", 0) != 0:
+        raise ValueError(f"Feishu auth failed: {response}")
+    token = response.get("tenant_access_token", "")
+    if not token:
+        raise ValueError("Feishu auth succeeded but tenant_access_token is empty.")
+    return token
+
+
+def to_feishu_fields(item: dict[str, Any]) -> dict[str, Any]:
+    hashtags = item.get("hashtags", [])
+    hashtags_text = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
+    return {
+        "QueueID": item.get("id", ""),
+        "Date": item.get("date", ""),
+        "Platform": item.get("platform", ""),
+        "Account": item.get("account_name", ""),
+        "Track": item.get("track", ""),
+        "Status": item.get("status", ""),
+        "PublishTime": item.get("publish_time", ""),
+        "Title": item.get("title", ""),
+        "Hashtags": hashtags_text,
+        "SourceTopic": item.get("source_topic", ""),
+        "SourceLink": item.get("source_link", ""),
+        "ContentFile": item.get("content_file", ""),
+        "PostURL": item.get("post_url") or "",
+        "UpdatedAt": item.get("updated_at", ""),
+        "Notes": item.get("notes", ""),
+    }
+
+
+def sync_queue_to_feishu_bitable(config: dict[str, Any], queue: list[dict[str, Any]]) -> bool:
+    bitable_cfg = config.get("feishu_bitable", {})
+    if not bitable_cfg.get("enabled", False):
+        print("[INFO] Feishu Bitable sync disabled.")
+        return False
+
+    app_token = bitable_cfg.get("app_token", "").strip()
+    table_id = bitable_cfg.get("table_id", "").strip()
+    if not app_token or not table_id:
+        raise ValueError("Feishu Bitable enabled but app_token/table_id is missing.")
+
+    token = get_feishu_tenant_access_token(bitable_cfg)
+    headers = {"Authorization": f"Bearer {token}"}
+    base_url = (
+        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    )
+    mapping: dict[str, str] = load_json(FEISHU_MAPPING_FILE, {})
+    created = 0
+    updated = 0
+
+    for item in queue:
+        queue_id = item["id"]
+        fields = to_feishu_fields(item)
+        record_id = mapping.get(queue_id, "")
+        try:
+            if record_id:
+                request = urllib.request.Request(
+                    f"{base_url}/{record_id}",
+                    data=json.dumps({"fields": fields}).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": headers["Authorization"],
+                    },
+                    method="PUT",
+                )
+                with urllib.request.urlopen(request, timeout=25) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                if data.get("code", 0) != 0:
+                    raise ValueError(f"update failed: {data}")
+                updated += 1
+            else:
+                data = http_post_json(base_url, {"fields": fields}, headers=headers, timeout=25)
+                if data.get("code", 0) != 0:
+                    raise ValueError(f"create failed: {data}")
+                new_id = data.get("data", {}).get("record", {}).get("record_id", "")
+                if new_id:
+                    mapping[queue_id] = new_id
+                created += 1
+        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, ValueError) as exc:
+            print(f"[WARN] Feishu Bitable sync skipped for {queue_id}: {exc}")
+
+    save_json(FEISHU_MAPPING_FILE, mapping)
+    print(f"[OK] Feishu Bitable sync done. created={created}, updated={updated}")
+    return True
+
+
+def get_platform_adapter_cfg(config: dict[str, Any], platform: str) -> dict[str, Any]:
+    adapters = config.get("publish_adapters", {})
+    return adapters.get(platform, {})
+
+
+def wechat_get_access_token(adapter_cfg: dict[str, Any]) -> str:
+    appid = os.getenv(adapter_cfg.get("appid_env", "WECHAT_OFFICIAL_APPID"), "")
+    appsecret = os.getenv(
+        adapter_cfg.get("appsecret_env", "WECHAT_OFFICIAL_APPSECRET"), ""
+    )
+    if not appid or not appsecret:
+        raise ValueError("Missing WeChat app credentials env vars.")
+
+    params = urllib.parse.urlencode(
+        {
+            "grant_type": "client_credential",
+            "appid": appid,
+            "secret": appsecret,
+        }
+    )
+    response = http_get_json(f"https://api.weixin.qq.com/cgi-bin/token?{params}", timeout=20)
+    if response.get("errcode", 0) not in (0, None):
+        raise ValueError(f"WeChat token request failed: {response}")
+    token = response.get("access_token", "")
+    if not token:
+        raise ValueError("WeChat token response missing access_token.")
+    return token
+
+
+def read_markdown_content(path: str) -> str:
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Content file not found: {path}")
+    return file_path.read_text(encoding="utf-8")
+
+
+def auto_publish_wechat_official(
+    item: dict[str, Any], adapter_cfg: dict[str, Any]
+) -> tuple[str, str]:
+    if not adapter_cfg.get("enabled", False):
+        return (
+            "auto_publish_pending_integration",
+            "WeChat adapter is disabled in publish_adapters.wechat_official.",
+        )
+
+    thumb_media_id = adapter_cfg.get("thumb_media_id", "").strip()
+    if not thumb_media_id:
+        return (
+            "auto_publish_failed",
+            "Missing thumb_media_id for WeChat draft add API.",
+        )
+
+    token = wechat_get_access_token(adapter_cfg)
+    markdown_body = read_markdown_content(item.get("content_file", ""))
+    content_html = markdown_to_simple_html(markdown_body)
+    digest_limit = int(adapter_cfg.get("digest_max_length", 110))
+    digest = strip_markdown(markdown_body)[:digest_limit]
+    author = adapter_cfg.get("author", item.get("account_name", ""))
+
+    draft_payload = {
+        "articles": [
+            {
+                "title": item.get("title", "")[:64],
+                "author": author,
+                "digest": digest,
+                "content": content_html,
+                "content_source_url": item.get("source_link", ""),
+                "thumb_media_id": thumb_media_id,
+                "need_open_comment": int(adapter_cfg.get("need_open_comment", 0)),
+                "only_fans_can_comment": int(
+                    adapter_cfg.get("only_fans_can_comment", 0)
+                ),
+            }
+        ]
+    }
+    draft_url = f"https://api.weixin.qq.com/cgi-bin/draft/add?access_token={token}"
+    draft_response = http_post_json(draft_url, draft_payload, timeout=25)
+    if draft_response.get("errcode", 0) not in (0, None):
+        return ("auto_publish_failed", f"WeChat draft add failed: {draft_response}")
+    media_id = draft_response.get("media_id", "")
+    if not media_id:
+        return ("auto_publish_failed", "WeChat draft add missing media_id.")
+
+    if not adapter_cfg.get("submit_to_publish", True):
+        return ("auto_draft_created", f"WeChat draft created. media_id={media_id}")
+
+    submit_url = f"https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token={token}"
+    submit_response = http_post_json(submit_url, {"media_id": media_id}, timeout=25)
+    if submit_response.get("errcode", 0) not in (0, None):
+        return ("auto_publish_failed", f"WeChat submit failed: {submit_response}")
+
+    publish_id = submit_response.get("publish_id", "")
+    if publish_id:
+        return (
+            "auto_publish_submitted",
+            f"WeChat submitted. media_id={media_id}, publish_id={publish_id}",
+        )
+    return ("auto_publish_submitted", f"WeChat submitted. media_id={media_id}")
+
+
+def run_notify(config: dict[str, Any], queue: list[dict[str, Any]]) -> None:
+    summary = build_queue_summary(queue)
+    sent_any = False
+    try:
+        sent_any = send_feishu_webhook(config, summary) or sent_any
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] Feishu notify failed: {exc}")
+    try:
+        sent_any = send_email_digest(config, summary) or sent_any
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] Email notify failed: {exc}")
+    if not sent_any:
+        print("[INFO] No notification channel enabled.")
+
+
 def command_plan_day(args: argparse.Namespace) -> None:
     ensure_dirs()
     config = load_config(Path(args.config))
@@ -405,6 +770,11 @@ def command_plan_day(args: argparse.Namespace) -> None:
     save_queue(queue)
     print(f"[DONE] Created {new_items} queue items.")
 
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+    if args.notify:
+        run_notify(config, queue)
+
 
 def command_list(_: argparse.Namespace) -> None:
     ensure_dirs()
@@ -413,77 +783,86 @@ def command_list(_: argparse.Namespace) -> None:
         print("Queue is empty.")
         return
 
-    print("ID           | STATUS          | PLATFORM         | TIME   | TITLE")
-    print("-" * 98)
+    print("ID           | STATUS                    | PLATFORM         | TIME   | TITLE")
+    print("-" * 116)
     for item in queue:
         print(
             f"{item['id']:<12} | "
-            f"{item['status']:<14} | "
+            f"{item['status']:<25} | "
             f"{item['platform']:<16} | "
             f"{(item.get('publish_time') or '--'): <6} | "
-            f"{item.get('title', '')[:40]}"
+            f"{item.get('title', '')[:36]}"
         )
-
-
-def update_item_status(
-    queue: list[dict[str, Any]], item_id: str, new_status: str, notes: str = ""
-) -> bool:
-    for item in queue:
-        if item["id"] == item_id:
-            item["status"] = new_status
-            item["updated_at"] = now_local().isoformat()
-            if notes:
-                item["notes"] = notes
-            return True
-    return False
 
 
 def command_approve(args: argparse.Namespace) -> None:
     ensure_dirs()
+    config = load_config(Path(args.config))
     queue = load_queue()
     ok = update_item_status(queue, args.id, "approved", notes=args.note or "")
     if not ok:
         raise ValueError(f"Queue item not found: {args.id}")
     save_queue(queue)
     print(f"[OK] approved {args.id}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
 
 
 def command_reject(args: argparse.Namespace) -> None:
     ensure_dirs()
+    config = load_config(Path(args.config))
     queue = load_queue()
     ok = update_item_status(queue, args.id, "rejected", notes=args.note or "")
     if not ok:
         raise ValueError(f"Queue item not found: {args.id}")
     save_queue(queue)
     print(f"[OK] rejected {args.id}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
 
 
-def command_publish(_: argparse.Namespace) -> None:
+def command_publish(args: argparse.Namespace) -> None:
     ensure_dirs()
+    config = load_config(Path(args.config))
     queue = load_queue()
     changed = 0
     for item in queue:
         if item["status"] != "approved":
             continue
+
         if item.get("auto_publish", False):
-            # Stub hook: keep it explicit so you can connect official API later.
-            item["status"] = "auto_publish_pending_integration"
-            item["notes"] = (
-                "Enable platform official API integration in a custom adapter."
-            )
+            platform = item.get("platform", "")
+            if platform == "wechat_official":
+                adapter_cfg = get_platform_adapter_cfg(config, "wechat_official")
+                try:
+                    new_status, notes = auto_publish_wechat_official(item, adapter_cfg)
+                except Exception as exc:  # pylint: disable=broad-except
+                    new_status = "auto_publish_failed"
+                    notes = f"WeChat auto publish exception: {exc}"
+                item["status"] = new_status
+                item["notes"] = notes
+            else:
+                item["status"] = "auto_publish_pending_integration"
+                item["notes"] = (
+                    f"Enable official adapter under publish_adapters.{platform}."
+                )
         else:
             item["status"] = "ready_to_post"
             item["notes"] = "Manual upload required. Content file already generated."
+
         item["updated_at"] = now_local().isoformat()
         changed += 1
         print(f"[OK] publish action set for {item['id']} -> {item['status']}")
 
     save_queue(queue)
     print(f"[DONE] Updated {changed} queue items.")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
 
 
 def command_mark_posted(args: argparse.Namespace) -> None:
     ensure_dirs()
+    config = load_config(Path(args.config))
     queue = load_queue()
     found = False
     for item in queue:
@@ -498,41 +877,29 @@ def command_mark_posted(args: argparse.Namespace) -> None:
     if not found:
         raise ValueError(f"Queue item not found: {args.id}")
     save_queue(queue)
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
 
 
 def command_email_digest(args: argparse.Namespace) -> None:
     ensure_dirs()
     config = load_config(Path(args.config))
-    email_cfg = config.get("notification", {}).get("email", {})
-    if not email_cfg.get("enabled", False):
-        raise ValueError("Email notification is disabled in config.")
-
-    password = os.getenv(email_cfg.get("password_env", "SMTP_PASSWORD"), "")
-    if not password:
-        raise ValueError("SMTP password env var is missing.")
-
     queue = load_queue()
-    if not queue:
-        body = "Queue is empty."
-    else:
-        grouped: dict[str, int] = {}
-        for item in queue:
-            grouped[item["status"]] = grouped.get(item["status"], 0) + 1
-        summary_lines = [f"- {status}: {count}" for status, count in sorted(grouped.items())]
-        body = "Daily queue summary:\n" + "\n".join(summary_lines)
+    send_email_digest(config, build_queue_summary(queue))
 
-    msg = MIMEText(body, _subtype="plain", _charset="utf-8")
-    msg["Subject"] = f"[ContentOps] Queue Digest {now_local().strftime('%Y-%m-%d')}"
-    msg["From"] = email_cfg["sender"]
-    msg["To"] = ", ".join(email_cfg.get("receivers", []))
 
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL(
-        email_cfg["smtp_host"], int(email_cfg.get("smtp_port", 465)), context=context
-    ) as smtp:
-        smtp.login(email_cfg["sender"], password)
-        smtp.sendmail(email_cfg["sender"], email_cfg.get("receivers", []), msg.as_string())
-    print("[OK] digest email sent")
+def command_sync_feishu(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_notify(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    run_notify(config, queue)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -546,6 +913,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_plan = sub.add_parser("plan-day", help="Collect topics and generate drafts")
     p_plan.add_argument("--date", default=None, help="Date in YYYY-MM-DD")
+    p_plan.add_argument(
+        "--sync-feishu", action="store_true", help="Sync queue to Feishu Bitable after run"
+    )
+    p_plan.add_argument(
+        "--notify", action="store_true", help="Send reminder after queue generation"
+    )
     p_plan.set_defaults(func=command_plan_day)
 
     p_list = sub.add_parser("list", help="List queue items")
@@ -554,23 +927,41 @@ def build_parser() -> argparse.ArgumentParser:
     p_approve = sub.add_parser("approve", help="Approve one queue item")
     p_approve.add_argument("--id", required=True, help="Queue item ID")
     p_approve.add_argument("--note", default="", help="Optional note")
+    p_approve.add_argument(
+        "--sync-feishu", action="store_true", help="Sync queue to Feishu Bitable"
+    )
     p_approve.set_defaults(func=command_approve)
 
     p_reject = sub.add_parser("reject", help="Reject one queue item")
     p_reject.add_argument("--id", required=True, help="Queue item ID")
     p_reject.add_argument("--note", default="", help="Optional note")
+    p_reject.add_argument(
+        "--sync-feishu", action="store_true", help="Sync queue to Feishu Bitable"
+    )
     p_reject.set_defaults(func=command_reject)
 
     p_publish = sub.add_parser("publish", help="Prepare publishing actions")
+    p_publish.add_argument(
+        "--sync-feishu", action="store_true", help="Sync queue to Feishu Bitable"
+    )
     p_publish.set_defaults(func=command_publish)
 
     p_mark = sub.add_parser("mark-posted", help="Mark one item as posted")
     p_mark.add_argument("--id", required=True, help="Queue item ID")
     p_mark.add_argument("--url", default="", help="Published post URL")
+    p_mark.add_argument(
+        "--sync-feishu", action="store_true", help="Sync queue to Feishu Bitable"
+    )
     p_mark.set_defaults(func=command_mark_posted)
 
     p_mail = sub.add_parser("email-digest", help="Send digest email summary")
     p_mail.set_defaults(func=command_email_digest)
+
+    p_sync = sub.add_parser("sync-feishu", help="Sync queue to Feishu Bitable")
+    p_sync.set_defaults(func=command_sync_feishu)
+
+    p_notify = sub.add_parser("notify", help="Send queue summary to notification channels")
+    p_notify.set_defaults(func=command_notify)
 
     return parser
 

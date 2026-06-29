@@ -9,6 +9,10 @@
     "max_tokens": 1400
   },
   "notification": {
+    "feishu": {
+      "enabled": false,
+      "webhook_url": ""
+    },
     "email": {
       "enabled": false,
       "smtp_host": "smtp.example.com",
@@ -19,6 +23,13 @@
         "you@example.com"
       ]
     }
+  },
+  "feishu_bitable": {
+    "enabled": false,
+    "app_id_env": "FEISHU_APP_ID",
+    "app_secret_env": "FEISHU_APP_SECRET",
+    "app_token": "",
+    "table_id": ""
   },
   "generation": {
     "topics_per_track": 6,
@@ -98,7 +109,7 @@
       "account_name": "涛哥儿聊个球",
       "track": "football",
       "publish_time": "12:20",
-      "auto_publish": false,
+      "auto_publish": true,
       "post_format": "long_article"
     },
     {
@@ -133,5 +144,18 @@
       "auto_publish": false,
       "post_format": "short_video_script"
     }
-  ]
+  ],
+  "publish_adapters": {
+    "wechat_official": {
+      "enabled": false,
+      "appid_env": "WECHAT_OFFICIAL_APPID",
+      "appsecret_env": "WECHAT_OFFICIAL_APPSECRET",
+      "thumb_media_id": "",
+      "author": "涛哥儿聊个球",
+      "digest_max_length": 110,
+      "submit_to_publish": true,
+      "need_open_comment": 1,
+      "only_fans_can_comment": 0
+    }
+  }
 }

@@ -16,66 +16,143 @@ cp automation/config.example.json automation/config.json
 
 Then adjust `automation/config.json`:
 
-- Account names (already pre-filled)
-- Publish times
+- account names and publish windows
 - RSS sources and keywords
 - LLM model + endpoint
+- notification and Feishu Bitable config
+- adapter config for WeChat Official auto-publish
 
 ## 2) Environment variables
+
+Required:
 
 ```bash
 export OPENAI_API_KEY="your_api_key"
 ```
 
-Optional email digest:
+Optional (email digest):
 
 ```bash
 export SMTP_PASSWORD="your_smtp_password"
 ```
 
-## 3) Generate daily content queue
+Optional (Feishu Bitable sync):
 
 ```bash
-python3 automation/pipeline.py plan-day --config automation/config.json
-python3 automation/pipeline.py list --config automation/config.json
+export FEISHU_APP_ID="cli_xxx"
+export FEISHU_APP_SECRET="xxx"
 ```
 
-This will create:
+Optional (WeChat Official auto publish):
 
-- Topic snapshots: `automation/data/<date>/topics_*.json`
-- Draft files: `automation/outbox/<date>/<platform>/<id>.md`
-- Queue: `automation/state/publish_queue.json`
+```bash
+export WECHAT_OFFICIAL_APPID="wx_xxx"
+export WECHAT_OFFICIAL_APPSECRET="xxx"
+```
+
+## 3) Generate daily queue (with Feishu sync + reminder)
+
+```bash
+python3 automation/pipeline.py --config automation/config.json plan-day --sync-feishu --notify
+python3 automation/pipeline.py --config automation/config.json list
+```
+
+This creates:
+
+- topic snapshots: `automation/data/<date>/topics_*.json`
+- draft files: `automation/outbox/<date>/<platform>/<id>.md`
+- queue: `automation/state/publish_queue.json`
 
 ## 4) Review and approve
 
 Approve draft:
 
 ```bash
-python3 automation/pipeline.py approve --id <queue_id> --config automation/config.json
+python3 automation/pipeline.py --config automation/config.json approve --id <queue_id> --sync-feishu
 ```
 
 Reject draft:
 
 ```bash
-python3 automation/pipeline.py reject --id <queue_id> --note "rewrite hook" --config automation/config.json
+python3 automation/pipeline.py --config automation/config.json reject --id <queue_id> --note "rewrite hook" --sync-feishu
 ```
 
-## 5) Publish preparation
+## 5) Publish actions
 
 ```bash
-python3 automation/pipeline.py publish --config automation/config.json
+python3 automation/pipeline.py --config automation/config.json publish --sync-feishu
 ```
 
-- For `auto_publish=false`: status becomes `ready_to_post` (manual upload)
-- For `auto_publish=true`: status becomes `auto_publish_pending_integration` (API adapter required)
+Behavior:
+
+- `auto_publish=false` -> `ready_to_post`
+- `auto_publish=true` + supported adapter:
+  - WeChat Official currently supported via official API
+  - status updates to `auto_draft_created` / `auto_publish_submitted` / `auto_publish_failed`
+- unsupported adapter -> `auto_publish_pending_integration`
 
 After manual upload:
 
 ```bash
-python3 automation/pipeline.py mark-posted --id <queue_id> --url "<post_link>" --config automation/config.json
+python3 automation/pipeline.py --config automation/config.json mark-posted --id <queue_id> --url "<post_link>" --sync-feishu
 ```
 
-## 6) Schedule with cron
+## 6) Feishu Bitable field requirements
+
+Create the following fields in your table:
+
+- QueueID
+- Date
+- Platform
+- Account
+- Track
+- Status
+- PublishTime
+- Title
+- Hashtags
+- SourceTopic
+- SourceLink
+- ContentFile
+- PostURL
+- UpdatedAt
+- Notes
+
+You can sync on demand:
+
+```bash
+python3 automation/pipeline.py --config automation/config.json sync-feishu
+```
+
+## 7) Reminder channels
+
+Run anytime:
+
+```bash
+python3 automation/pipeline.py --config automation/config.json notify
+python3 automation/pipeline.py --config automation/config.json email-digest
+```
+
+## 8) WeChat Official adapter notes
+
+Enable in config:
+
+```json
+"publish_adapters": {
+  "wechat_official": {
+    "enabled": true,
+    "thumb_media_id": "YOUR_THUMB_MEDIA_ID"
+  }
+}
+```
+
+Important:
+
+- `thumb_media_id` must already exist in the WeChat Official account material library.
+- This pipeline submits through official endpoints:
+  - `draft/add`
+  - `freepublish/submit`
+
+## 9) Schedule with cron
 
 Edit crontab:
 
@@ -86,23 +163,23 @@ crontab -e
 Recommended jobs (Asia/Shanghai):
 
 ```cron
-# 07:30 collect topics + generate drafts
-30 7 * * * cd /workspace && /usr/bin/python3 automation/pipeline.py plan-day --config automation/config.json >> /workspace/automation_cron.log 2>&1
+# 07:30 generate drafts, sync bitable, notify
+30 7 * * * cd /workspace && /usr/bin/python3 automation/pipeline.py --config automation/config.json plan-day --sync-feishu --notify >> /workspace/automation_cron.log 2>&1
 
-# 11:35 queue snapshot before football article window
-35 11 * * * cd /workspace && /usr/bin/python3 automation/pipeline.py list --config automation/config.json >> /workspace/automation_cron.log 2>&1
+# 11:35 midday reminder for football article
+35 11 * * * cd /workspace && /usr/bin/python3 automation/pipeline.py --config automation/config.json notify >> /workspace/automation_cron.log 2>&1
 
-# 17:35 queue snapshot before evening short-video windows
-35 17 * * * cd /workspace && /usr/bin/python3 automation/pipeline.py list --config automation/config.json >> /workspace/automation_cron.log 2>&1
+# 17:35 evening reminder for short-video windows
+35 17 * * * cd /workspace && /usr/bin/python3 automation/pipeline.py --config automation/config.json notify >> /workspace/automation_cron.log 2>&1
 ```
 
-## 7) Recommended next integration step
+## 10) Remaining roadmap
 
-Implement official API adapters one by one:
+Implement official adapters one by one:
 
-1. WeChat Official Account publish API
-2. Douyin creator API (if account access qualifies)
-3. WeChat Channels official workflow APIs/tooling
-4. Xiaohongshu / Kuaishou official creator integrations
+1. Douyin creator API (if account access qualifies)
+2. WeChat Channels official workflow APIs/tooling
+3. Xiaohongshu creator APIs/tooling
+4. Kuaishou creator APIs/tooling
 
 Do not use unauthorized automation that simulates private account login behavior.
