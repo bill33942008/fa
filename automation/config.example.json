@@ -35,6 +35,12 @@
     "topics_per_track": 6,
     "default_timezone": "Asia/Shanghai"
   },
+  "quality_scoring": {
+    "enabled": true,
+    "llm_review_enabled": true,
+    "publish_threshold": 80,
+    "revise_threshold": 60
+  },
   "tracks": {
     "football": {
       "description": "football tactical analysis with data interpretation for竞彩关注人群",

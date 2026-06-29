@@ -31,6 +31,11 @@ Current target matrix:
    python3 automation/pipeline.py --config automation/config.json plan-day --sync-feishu --notify
    ```
 
+   Each item is automatically scored with a quality badge:
+   - 🟢 可发
+   - 🟡 需改
+   - 🔴 禁发
+
 4. Review queue and approve drafts:
 
    ```bash

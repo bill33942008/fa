@@ -19,6 +19,7 @@ Then adjust `automation/config.json`:
 - account names and publish windows
 - RSS sources and keywords
 - LLM model + endpoint
+- quality scoring thresholds (`quality_scoring`)
 - notification and Feishu Bitable config
 - adapter config for WeChat Official auto-publish
 
@@ -62,6 +63,7 @@ This creates:
 - topic snapshots: `automation/data/<date>/topics_*.json`
 - draft files: `automation/outbox/<date>/<platform>/<id>.md`
 - queue: `automation/state/publish_queue.json`
+- quality score per item (0-100) + publish advice (`可发/需改/禁发`)
 
 ## 4) Review and approve
 
@@ -116,6 +118,34 @@ Create the following fields in your table:
 - PostURL
 - UpdatedAt
 - Notes
+- HookScore
+- StructureScore
+- PlatformFitScore
+- CommercialScore
+- ComplianceScore
+- TotalScore
+- QualityLevel
+- QualityBadge
+- PublishAdvice
+- QualityReason
+
+Recommended field types:
+
+- TotalScore / HookScore / StructureScore / PlatformFitScore / CommercialScore / ComplianceScore: Number
+- PublishAdvice / QualityLevel / QualityBadge: Single line text (or Single select)
+- QualityReason: Long text
+
+Recommended coloring rules in Bitable view:
+
+- If `PublishAdvice = 可发` -> row color green
+- If `PublishAdvice = 需改` -> row color yellow
+- If `PublishAdvice = 禁发` -> row color red
+
+If you use `QualityBadge` as a front column, it will display:
+
+- 🟢 = high quality
+- 🟡 = medium quality
+- 🔴 = high risk / low quality
 
 You can sync on demand:
 

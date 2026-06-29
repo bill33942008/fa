@@ -316,11 +316,194 @@ def generate_draft(
     return fallback_draft(platform_cfg, track_cfg, topic)
 
 
+def clamp_score(value: Any, minimum: int = 0, maximum: int = 20) -> int:
+    try:
+        score = int(round(float(value)))
+    except (TypeError, ValueError):
+        return minimum
+    return max(minimum, min(maximum, score))
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def quality_level_from_score(total_score: int, quality_cfg: dict[str, Any]) -> tuple[str, str, str]:
+    publish_threshold = int(quality_cfg.get("publish_threshold", 80))
+    revise_threshold = int(quality_cfg.get("revise_threshold", 60))
+    if total_score >= publish_threshold:
+        return ("high", "🟢", "可发")
+    if total_score >= revise_threshold:
+        return ("medium", "🟡", "需改")
+    return ("low", "🔴", "禁发")
+
+
+def heuristic_quality_review(
+    platform_cfg: dict[str, Any], track_cfg: dict[str, Any], draft: dict[str, Any]
+) -> dict[str, Any]:
+    title = str(draft.get("title", "")).strip()
+    hook = str(draft.get("hook", "")).strip()
+    body = str(draft.get("body_markdown", "")).strip()
+    hashtags = draft.get("hashtags", [])
+    body_len = len(body)
+
+    hook_score = clamp_score(6 + min(len(hook) / 6.0, 12))
+    structure_points = 8
+    structure_points += 4 if "## " in body else 0
+    structure_points += 4 if any(ch in body for ch in ["1.", "2.", "3.", "- "]) else 0
+    structure_points += 4 if body_len >= 240 else 0
+    structure_score = clamp_score(structure_points)
+
+    platform = platform_cfg.get("platform", "")
+    post_format = platform_cfg.get("post_format", "")
+    platform_fit = 10
+    if post_format == "long_article":
+        platform_fit += 6 if body_len >= 450 else -3
+    elif post_format == "short_video_script":
+        platform_fit += 5 if 80 <= body_len <= 800 else -2
+        platform_fit += 3 if len(hook) >= 18 else -2
+    elif post_format == "graphic_post":
+        platform_fit += 4 if any(token in body for token in ["预算", "路线", "避坑", "清单"]) else -1
+    if title:
+        platform_fit += 2
+    if platform in {"douyin", "wechat_channels", "kuaishou"} and len(title) > 36:
+        platform_fit -= 2
+    platform_fit_score = clamp_score(platform_fit)
+
+    cta_keywords = ["评论", "关注", "收藏", "私信", "转发", "点击", "领取", "清单", "下期"]
+    cta_hits = sum(1 for keyword in cta_keywords if keyword in body or keyword in hook or keyword in title)
+    commercial_score = clamp_score(8 + cta_hits * 2 + (2 if hashtags else 0))
+
+    compliance_score = 18
+    risky_words = ["稳赚", "包赢", "内幕", "下注", "赌博", "保过", "躺赚", "暴富", "医疗奇迹"]
+    if track_cfg.get("description", "").lower().find("football") >= 0:
+        risky_words.extend(["单场必胜", "杀庄", "倍投"])
+    for word in risky_words:
+        if word in body or word in hook or word in title:
+            compliance_score -= 4
+
+    # Sensitive events should not be used as pure comedy hooks.
+    if platform == "kuaishou" and any(word in (title + body + hook) for word in ["地震", "灾难", "伤亡"]):
+        compliance_score -= 6
+    compliance_score = clamp_score(compliance_score)
+
+    scores = {
+        "hook_score": hook_score,
+        "structure_score": structure_score,
+        "platform_fit_score": platform_fit_score,
+        "commercial_score": commercial_score,
+        "compliance_score": compliance_score,
+    }
+    lowest = sorted(scores.items(), key=lambda kv: kv[1])[:2]
+    reason = "；".join([f"{name}:{value}" for name, value in lowest])
+    return {**scores, "reason": f"启发式评分，建议优先优化 {reason}"}
+
+
+def llm_quality_review(
+    config: dict[str, Any],
+    platform_cfg: dict[str, Any],
+    track_cfg: dict[str, Any],
+    topic: dict[str, Any],
+    draft: dict[str, Any],
+) -> dict[str, Any] | None:
+    quality_cfg = config.get("quality_scoring", {})
+    if not quality_cfg.get("llm_review_enabled", True):
+        return None
+
+    system_prompt = (
+        "你是内容质检编辑。请对内容打分并输出 JSON，不要输出任何额外文字。"
+    )
+    user_prompt = textwrap.dedent(
+        f"""
+        请按以下五个维度分别打分（0-20，整数）：
+        1) hook_score（开头抓力）
+        2) structure_score（结构清晰度）
+        3) platform_fit_score（平台适配度）
+        4) commercial_score（变现相关度）
+        5) compliance_score（合规安全度）
+
+        并返回：
+        {{
+          "hook_score": 0,
+          "structure_score": 0,
+          "platform_fit_score": 0,
+          "commercial_score": 0,
+          "compliance_score": 0,
+          "reason": "一句话说明主要短板"
+        }}
+
+        平台: {platform_cfg.get("platform", "")}
+        账号: {platform_cfg.get("account_name", "")}
+        内容格式: {platform_cfg.get("post_format", "")}
+        赛道: {track_cfg.get("description", "")}
+        选题: {topic.get("title", "")}
+        内容标题: {draft.get("title", "")}
+        Hook: {draft.get("hook", "")}
+        正文:
+        {draft.get("body_markdown", "")}
+        """
+    ).strip()
+
+    return llm_generate(config.get("llm", {}), system_prompt, user_prompt)
+
+
+def evaluate_draft_quality(
+    config: dict[str, Any],
+    platform_cfg: dict[str, Any],
+    track_cfg: dict[str, Any],
+    topic: dict[str, Any],
+    draft: dict[str, Any],
+) -> dict[str, Any]:
+    quality_cfg = config.get("quality_scoring", {})
+    if not quality_cfg.get("enabled", True):
+        return {
+            "hook_score": 0,
+            "structure_score": 0,
+            "platform_fit_score": 0,
+            "commercial_score": 0,
+            "compliance_score": 0,
+            "total_score": 0,
+            "quality_level": "unknown",
+            "quality_badge": "⚪",
+            "publish_advice": "需改",
+            "reason": "质量评分已关闭",
+        }
+
+    review = llm_quality_review(config, platform_cfg, track_cfg, topic, draft)
+    if review is None:
+        review = heuristic_quality_review(platform_cfg, track_cfg, draft)
+
+    hook_score = clamp_score(review.get("hook_score", 0))
+    structure_score = clamp_score(review.get("structure_score", 0))
+    platform_fit_score = clamp_score(review.get("platform_fit_score", 0))
+    commercial_score = clamp_score(review.get("commercial_score", 0))
+    compliance_score = clamp_score(review.get("compliance_score", 0))
+    total_score = hook_score + structure_score + platform_fit_score + commercial_score + compliance_score
+    quality_level, quality_badge, publish_advice = quality_level_from_score(total_score, quality_cfg)
+
+    return {
+        "hook_score": hook_score,
+        "structure_score": structure_score,
+        "platform_fit_score": platform_fit_score,
+        "commercial_score": commercial_score,
+        "compliance_score": compliance_score,
+        "total_score": total_score,
+        "quality_level": quality_level,
+        "quality_badge": quality_badge,
+        "publish_advice": publish_advice,
+        "reason": str(review.get("reason", "")).strip()[:200],
+    }
+
+
 def render_markdown(
     queue_id: str,
     platform_cfg: dict[str, Any],
     topic: dict[str, Any],
     draft: dict[str, Any],
+    quality: dict[str, Any] | None = None,
 ) -> str:
     hashtags = draft.get("hashtags", [])
     hashtag_line = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
@@ -347,6 +530,26 @@ def render_markdown(
         hashtag_line,
         "",
     ]
+    if quality:
+        lines.extend(
+            [
+                "## Quality",
+                (
+                    f"{quality.get('quality_badge', '⚪')} 总分 {quality.get('total_score', 0)}/100 | "
+                    f"发布建议：{quality.get('publish_advice', '需改')}"
+                ),
+                (
+                    "维度："
+                    f"Hook {quality.get('hook_score', 0)}/20, "
+                    f"结构 {quality.get('structure_score', 0)}/20, "
+                    f"平台适配 {quality.get('platform_fit_score', 0)}/20, "
+                    f"变现 {quality.get('commercial_score', 0)}/20, "
+                    f"合规 {quality.get('compliance_score', 0)}/20"
+                ),
+                f"说明：{quality.get('reason', '')}",
+                "",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -431,6 +634,16 @@ def build_queue_summary(queue: list[dict[str, Any]]) -> str:
     ]
     for status, count in sorted(grouped.items()):
         lines.append(f"- {status}: {count}")
+    advice_grouped: dict[str, int] = {}
+    for item in queue:
+        advice = item.get("publish_advice", "")
+        if advice:
+            advice_grouped[advice] = advice_grouped.get(advice, 0) + 1
+    if advice_grouped:
+        lines.append("")
+        lines.append("Quality advice summary:")
+        for advice, count in sorted(advice_grouped.items()):
+            lines.append(f"- {advice}: {count}")
     lines.append("")
     lines.append("Top pending items:")
     pending = [item for item in queue if item["status"] in {"pending_review", "approved"}][:8]
@@ -439,7 +652,11 @@ def build_queue_summary(queue: list[dict[str, Any]]) -> str:
     else:
         for item in pending:
             lines.append(
-                f"- {item['id']} | {item['platform']} | {item.get('publish_time', '--')} | {item.get('title', '')[:36]}"
+                (
+                    f"- {item['id']} | {item['platform']} | "
+                    f"{item.get('quality_badge', '⚪')}{item.get('total_score', 0)} | "
+                    f"{item.get('publish_time', '--')} | {item.get('title', '')[:36]}"
+                )
             )
     return "\n".join(lines)
 
@@ -525,6 +742,16 @@ def to_feishu_fields(item: dict[str, Any]) -> dict[str, Any]:
         "PostURL": item.get("post_url") or "",
         "UpdatedAt": item.get("updated_at", ""),
         "Notes": item.get("notes", ""),
+        "HookScore": clamp_score(item.get("hook_score", 0)),
+        "StructureScore": clamp_score(item.get("structure_score", 0)),
+        "PlatformFitScore": clamp_score(item.get("platform_fit_score", 0)),
+        "CommercialScore": clamp_score(item.get("commercial_score", 0)),
+        "ComplianceScore": clamp_score(item.get("compliance_score", 0)),
+        "TotalScore": max(0, min(100, safe_int(item.get("total_score", 0), default=0))),
+        "QualityLevel": item.get("quality_level", ""),
+        "QualityBadge": item.get("quality_badge", "⚪"),
+        "PublishAdvice": item.get("publish_advice", "需改"),
+        "QualityReason": item.get("quality_reason", ""),
     }
 
 
@@ -734,11 +961,12 @@ def command_plan_day(args: argparse.Namespace) -> None:
 
         queue_id = uuid.uuid4().hex[:12]
         draft = generate_draft(config, platform_cfg, tracks[track_name], topic)
+        quality = evaluate_draft_quality(config, platform_cfg, tracks[track_name], topic, draft)
         output_dir = OUTBOX_DIR / date / platform_cfg["platform"]
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / f"{queue_id}.md"
         output_file.write_text(
-            render_markdown(queue_id, platform_cfg, topic, draft), encoding="utf-8"
+            render_markdown(queue_id, platform_cfg, topic, draft, quality=quality), encoding="utf-8"
         )
 
         queue_item = {
@@ -760,11 +988,25 @@ def command_plan_day(args: argparse.Namespace) -> None:
             "updated_at": now_local().isoformat(),
             "post_url": None,
             "notes": "",
+            "hook_score": quality["hook_score"],
+            "structure_score": quality["structure_score"],
+            "platform_fit_score": quality["platform_fit_score"],
+            "commercial_score": quality["commercial_score"],
+            "compliance_score": quality["compliance_score"],
+            "total_score": quality["total_score"],
+            "quality_level": quality["quality_level"],
+            "quality_badge": quality["quality_badge"],
+            "publish_advice": quality["publish_advice"],
+            "quality_reason": quality["reason"],
         }
         queue.append(queue_item)
         new_items += 1
         print(
-            f"[OK] queued {platform_cfg['platform']} -> {queue_id} ({queue_item['title'][:38]})"
+            (
+                f"[OK] queued {platform_cfg['platform']} -> {queue_id} "
+                f"{quality['quality_badge']}{quality['total_score']} "
+                f"({queue_item['title'][:38]})"
+            )
         )
 
     save_queue(queue)
@@ -783,12 +1025,14 @@ def command_list(_: argparse.Namespace) -> None:
         print("Queue is empty.")
         return
 
-    print("ID           | STATUS                    | PLATFORM         | TIME   | TITLE")
-    print("-" * 116)
+    print("ID           | STATUS                    | SCORE | ADVICE | PLATFORM         | TIME   | TITLE")
+    print("-" * 138)
     for item in queue:
         print(
             f"{item['id']:<12} | "
             f"{item['status']:<25} | "
+            f"{(str(item.get('quality_badge', '⚪')) + str(item.get('total_score', 0))).ljust(5)} | "
+            f"{str(item.get('publish_advice', '需改')):<5} | "
             f"{item['platform']:<16} | "
             f"{(item.get('publish_time') or '--'): <6} | "
             f"{item.get('title', '')[:36]}"
