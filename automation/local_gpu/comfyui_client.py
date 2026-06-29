@@ -12,6 +12,25 @@ from pathlib import Path
 from typing import Any
 
 
+MODEL_FILE_EXTENSIONS = (".safetensors", ".ckpt", ".pt", ".pth", ".bin")
+
+
+def is_model_filename(name: str) -> bool:
+    lower = name.lower()
+    return lower.endswith(MODEL_FILE_EXTENSIONS)
+
+
+def extract_checkpoint_names_from_object_info(data: dict[str, Any]) -> list[str]:
+    node = data.get("CheckpointLoaderSimple", data if "input" in data else {})
+    ckpt_cfg = node.get("input", {}).get("required", {}).get("ckpt_name")
+    if not isinstance(ckpt_cfg, list) or not ckpt_cfg:
+        return []
+    options = ckpt_cfg[0]
+    if not isinstance(options, list):
+        return []
+    return [str(name).strip() for name in options if str(name).strip() and is_model_filename(name)]
+
+
 TEXT_NODE_INPUTS: dict[str, str] = {
     "CLIPTextEncode": "text",
     "PrimitiveStringMultiline": "value",
@@ -61,30 +80,25 @@ class ComfyUIClient:
 
     def list_checkpoints(self) -> list[str]:
         found: set[str] = set()
-        endpoints = [
-            f"{self.base_url}/models/checkpoints",
-            f"{self.base_url}/models?folder=checkpoints",
-        ]
-        for url in endpoints:
-            try:
-                data = http_get_json(url, timeout=15)
-                if isinstance(data, list):
-                    found.update(str(name).strip() for name in data if str(name).strip())
-            except Exception:  # pylint: disable=broad-except
-                continue
 
         for path in ("/object_info/CheckpointLoaderSimple", "/object_info"):
             try:
                 data = http_get_json(f"{self.base_url}{path}", timeout=20)
-                if path.endswith("CheckpointLoaderSimple"):
-                    node = data.get("CheckpointLoaderSimple", data)
-                else:
-                    node = data.get("CheckpointLoaderSimple", {})
-                ckpt_cfg = node.get("input", {}).get("required", {}).get("ckpt_name")
-                if isinstance(ckpt_cfg, list) and ckpt_cfg and isinstance(ckpt_cfg[0], list):
-                    found.update(str(name).strip() for name in ckpt_cfg[0] if str(name).strip())
+                found.update(extract_checkpoint_names_from_object_info(data))
             except Exception:  # pylint: disable=broad-except
                 continue
+
+        # Some builds expose only file names here (not top-level model folders).
+        try:
+            data = http_get_json(f"{self.base_url}/models/checkpoints", timeout=15)
+            if isinstance(data, list):
+                found.update(
+                    str(name).strip()
+                    for name in data
+                    if str(name).strip() and is_model_filename(str(name))
+                )
+        except Exception:  # pylint: disable=broad-except
+            pass
 
         return sorted(found)
 
