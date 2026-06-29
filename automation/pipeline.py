@@ -41,6 +41,38 @@ OUTBOX_DIR = BASE_DIR / "outbox"
 QUEUE_FILE = STATE_DIR / "publish_queue.json"
 FEISHU_MAPPING_FILE = STATE_DIR / "feishu_record_mapping.json"
 
+FEISHU_FIELD_DEFINITIONS: dict[str, dict[str, Any]] = {
+    "QueueID": {"type": 1},
+    "Date": {"type": 1},
+    "Platform": {"type": 1},
+    "Account": {"type": 1},
+    "Track": {"type": 1},
+    "Status": {"type": 1},
+    "PublishTime": {"type": 1},
+    "Title": {"type": 1},
+    "Hashtags": {"type": 1},
+    "SourceTopic": {"type": 1},
+    "SourceLink": {"type": 1},
+    "ContentFile": {"type": 1},
+    "HookText": {"type": 1},
+    "BodyPreview": {"type": 1},
+    "ContentMarkdown": {"type": 1},
+    "CoverText": {"type": 1},
+    "PostURL": {"type": 1},
+    "UpdatedAt": {"type": 1},
+    "Notes": {"type": 1},
+    "HookScore": {"type": 2, "property": {"formatter": "0"}},
+    "StructureScore": {"type": 2, "property": {"formatter": "0"}},
+    "PlatformFitScore": {"type": 2, "property": {"formatter": "0"}},
+    "CommercialScore": {"type": 2, "property": {"formatter": "0"}},
+    "ComplianceScore": {"type": 2, "property": {"formatter": "0"}},
+    "TotalScore": {"type": 2, "property": {"formatter": "0"}},
+    "QualityLevel": {"type": 1},
+    "QualityBadge": {"type": 1},
+    "PublishAdvice": {"type": 1},
+    "QualityReason": {"type": 1},
+}
+
 
 def ensure_dirs() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -329,6 +361,142 @@ def safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def extract_markdown_section(markdown_text: str, heading: str, next_heading: str) -> str:
+    pattern = rf"{re.escape(heading)}\s*(.*?)(?:{re.escape(next_heading)}|\Z)"
+    match = re.search(pattern, markdown_text, flags=re.DOTALL)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def extract_content_payload(item: dict[str, Any]) -> dict[str, str]:
+    hook_text = str(item.get("hook_text", "")).strip()
+    body_markdown = str(item.get("body_markdown", "")).strip()
+    cover_text = str(item.get("cover_text", "")).strip()
+    markdown_text = ""
+
+    content_file = str(item.get("content_file", "")).strip()
+    if content_file:
+        file_path = Path(content_file)
+        if file_path.exists():
+            markdown_text = file_path.read_text(encoding="utf-8")
+            if not hook_text:
+                hook_text = extract_markdown_section(markdown_text, "## Hook", "## Body")
+            if not body_markdown:
+                body_markdown = extract_markdown_section(
+                    markdown_text, "## Body", "## Cover Text"
+                )
+            if not cover_text:
+                cover_text = extract_markdown_section(
+                    markdown_text, "## Cover Text", "## Hashtags"
+                )
+
+    if not markdown_text:
+        markdown_text = str(item.get("content_markdown", "")).strip()
+
+    body_preview = strip_markdown(body_markdown)[:320]
+    markdown_trimmed = markdown_text[:8000]
+    return {
+        "hook_text": hook_text,
+        "body_markdown": body_markdown,
+        "cover_text": cover_text,
+        "body_preview": body_preview,
+        "content_markdown": markdown_trimmed,
+    }
+
+
+def apply_quality_guard(config: dict[str, Any], queue: list[dict[str, Any]]) -> dict[str, Any]:
+    guard_cfg = config.get("quality_guard", {})
+    if not guard_cfg.get("enabled", True):
+        return {"changed": 0, "blocked_items": []}
+
+    block_threshold = int(guard_cfg.get("block_score_threshold", 60))
+    min_body_chars = int(guard_cfg.get("min_body_chars", 120))
+    min_hook_chars = int(guard_cfg.get("min_hook_chars", 10))
+    target_statuses = set(
+        guard_cfg.get("target_statuses", ["pending_review", "approved", "ready_to_post"])
+    )
+    placeholder_patterns = guard_cfg.get(
+        "placeholder_patterns",
+        [
+            "围绕以上选题，结合账号定位给出可执行观点，避免空泛结论。",
+            "用一个反常识观点开场，提升完播和阅读意愿。",
+            "无摘要，建议补充自己的观察。",
+        ],
+    )
+
+    changed = 0
+    blocked_items: list[dict[str, Any]] = []
+    for item in queue:
+        if item.get("status") not in target_statuses:
+            continue
+
+        content = extract_content_payload(item)
+        score = safe_int(item.get("total_score", 0), default=0)
+        title_text = str(item.get("title", "")).strip()
+        hook_text = content["hook_text"]
+        body_text = content["body_markdown"]
+        body_plain = strip_markdown(body_text)
+        reasons: list[str] = []
+
+        if score < block_threshold:
+            reasons.append(f"总分{score}低于{block_threshold}")
+        if not title_text:
+            reasons.append("标题为空")
+        if len(strip_markdown(hook_text)) < min_hook_chars:
+            reasons.append("开头hook过短")
+        if len(body_plain) < min_body_chars:
+            reasons.append("正文为空或过短")
+        if any(pattern in (hook_text + "\n" + body_text) for pattern in placeholder_patterns):
+            reasons.append("命中模板占位内容")
+
+        if not reasons:
+            continue
+
+        reason_text = "；".join(dict.fromkeys(reasons))
+        item["status"] = "auto_blocked"
+        item["publish_advice"] = "禁发"
+        item["quality_level"] = "low"
+        item["quality_badge"] = "🔴"
+        item["total_score"] = min(score, max(0, block_threshold - 1))
+
+        existing_reason = str(item.get("quality_reason", "")).strip()
+        if existing_reason:
+            item["quality_reason"] = f"{existing_reason}；{reason_text}"[:260]
+        else:
+            item["quality_reason"] = reason_text[:260]
+
+        guard_note = f"自动质检拦截：{reason_text}"
+        existing_notes = str(item.get("notes", "")).strip()
+        if guard_note not in existing_notes:
+            item["notes"] = f"{existing_notes} | {guard_note}".strip(" |")
+        item["updated_at"] = now_local().isoformat()
+
+        blocked_items.append(
+            {
+                "id": item.get("id", ""),
+                "platform": item.get("platform", ""),
+                "score": item.get("total_score", 0),
+                "reason": reason_text,
+            }
+        )
+        changed += 1
+
+    return {"changed": changed, "blocked_items": blocked_items}
+
+
+def build_block_alert(blocked_items: list[dict[str, Any]]) -> str:
+    lines = [
+        f"Quality Guard Alert: auto-blocked {len(blocked_items)} item(s)",
+        "",
+    ]
+    for item in blocked_items[:12]:
+        lines.append(
+            f"- {item['id']} | {item['platform']} | score={item['score']} | {item['reason']}"
+        )
+    return "\n".join(lines)
 
 
 def quality_level_from_score(total_score: int, quality_cfg: dict[str, Any]) -> tuple[str, str, str]:
@@ -644,6 +812,18 @@ def build_queue_summary(queue: list[dict[str, Any]]) -> str:
         lines.append("Quality advice summary:")
         for advice, count in sorted(advice_grouped.items()):
             lines.append(f"- {advice}: {count}")
+    blocked = [item for item in queue if item.get("status") == "auto_blocked"]
+    if blocked:
+        lines.append("")
+        lines.append(f"Auto-blocked items: {len(blocked)}")
+        for item in blocked[:8]:
+            lines.append(
+                (
+                    f"- {item.get('id', '')} | {item.get('platform', '')} | "
+                    f"{item.get('quality_badge', '🔴')}{item.get('total_score', 0)} | "
+                    f"{item.get('quality_reason', '')[:60]}"
+                )
+            )
     lines.append("")
     lines.append("Top pending items:")
     pending = [item for item in queue if item["status"] in {"pending_review", "approved"}][:8]
@@ -723,9 +903,57 @@ def get_feishu_tenant_access_token(bitable_cfg: dict[str, Any]) -> str:
     return token
 
 
+def list_feishu_field_names(token: str, app_token: str, table_id: str) -> set[str]:
+    url = (
+        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/"
+        f"{table_id}/fields?page_size=500"
+    )
+    request = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {token}"}, method="GET"
+    )
+    with urllib.request.urlopen(request, timeout=25) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    if data.get("code", 0) != 0:
+        raise ValueError(f"list fields failed: {data}")
+    items = data.get("data", {}).get("items", [])
+    return {str(item.get("field_name", "")).strip() for item in items if item.get("field_name")}
+
+
+def ensure_feishu_fields(token: str, app_token: str, table_id: str) -> None:
+    existing = list_feishu_field_names(token, app_token, table_id)
+    created: list[str] = []
+    for field_name, definition in FEISHU_FIELD_DEFINITIONS.items():
+        if field_name in existing:
+            continue
+        payload: dict[str, Any] = {"field_name": field_name, "type": definition["type"]}
+        if "property" in definition:
+            payload["property"] = definition["property"]
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/"
+            f"{table_id}/fields"
+        )
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=25) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if data.get("code", 0) != 0:
+            raise ValueError(f"create field failed {field_name}: {data}")
+        created.append(field_name)
+    if created:
+        print(f"[OK] Feishu fields created: {', '.join(created)}")
+
+
 def to_feishu_fields(item: dict[str, Any]) -> dict[str, Any]:
     hashtags = item.get("hashtags", [])
     hashtags_text = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
+    content = extract_content_payload(item)
     return {
         "QueueID": item.get("id", ""),
         "Date": item.get("date", ""),
@@ -739,6 +967,10 @@ def to_feishu_fields(item: dict[str, Any]) -> dict[str, Any]:
         "SourceTopic": item.get("source_topic", ""),
         "SourceLink": item.get("source_link", ""),
         "ContentFile": item.get("content_file", ""),
+        "HookText": content["hook_text"][:2000],
+        "BodyPreview": content["body_preview"][:1200],
+        "ContentMarkdown": content["content_markdown"][:8000],
+        "CoverText": content["cover_text"][:500],
         "PostURL": item.get("post_url") or "",
         "UpdatedAt": item.get("updated_at", ""),
         "Notes": item.get("notes", ""),
@@ -767,6 +999,8 @@ def sync_queue_to_feishu_bitable(config: dict[str, Any], queue: list[dict[str, A
         raise ValueError("Feishu Bitable enabled but app_token/table_id is missing.")
 
     token = get_feishu_tenant_access_token(bitable_cfg)
+    if bitable_cfg.get("auto_create_fields", True):
+        ensure_feishu_fields(token, app_token, table_id)
     headers = {"Authorization": f"Bearer {token}"}
     base_url = (
         f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
@@ -803,6 +1037,9 @@ def sync_queue_to_feishu_bitable(config: dict[str, Any], queue: list[dict[str, A
                 if new_id:
                     mapping[queue_id] = new_id
                 created += 1
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")[:500]
+            print(f"[WARN] Feishu Bitable sync skipped for {queue_id}: http={exc.code} {detail}")
         except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, ValueError) as exc:
             print(f"[WARN] Feishu Bitable sync skipped for {queue_id}: {exc}")
 
@@ -984,6 +1221,13 @@ def command_plan_day(args: argparse.Namespace) -> None:
             "source_topic": topic.get("title"),
             "source_link": topic.get("link"),
             "content_file": str(output_file),
+            "hook_text": str(draft.get("hook", "")).strip(),
+            "body_markdown": str(draft.get("body_markdown", "")).strip(),
+            "cover_text": str(draft.get("cover_text", "")).strip(),
+            "body_preview": strip_markdown(str(draft.get("body_markdown", "")))[:320],
+            "content_markdown": render_markdown(
+                queue_id, platform_cfg, topic, draft, quality=quality
+            )[:8000],
             "created_at": now_local().isoformat(),
             "updated_at": now_local().isoformat(),
             "post_url": None,
@@ -1009,12 +1253,31 @@ def command_plan_day(args: argparse.Namespace) -> None:
             )
         )
 
+    guard_result = apply_quality_guard(config, queue)
+    if guard_result["changed"]:
+        print(
+            f"[INFO] Quality guard auto-blocked {len(guard_result['blocked_items'])} item(s)."
+        )
+
     save_queue(queue)
     print(f"[DONE] Created {new_items} queue items.")
 
+    notified = False
+    guard_cfg = config.get("quality_guard", {})
+    if guard_result["blocked_items"] and guard_cfg.get("notify_on_block", True):
+        alert_body = build_block_alert(guard_result["blocked_items"])
+        try:
+            notified = send_feishu_webhook(config, alert_body) or notified
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[WARN] block alert feishu failed: {exc}")
+        try:
+            notified = send_email_digest(config, alert_body) or notified
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[WARN] block alert email failed: {exc}")
+
     if args.sync_feishu:
         sync_queue_to_feishu_bitable(config, queue)
-    if args.notify:
+    if args.notify and not notified:
         run_notify(config, queue)
 
 
@@ -1069,6 +1332,11 @@ def command_publish(args: argparse.Namespace) -> None:
     ensure_dirs()
     config = load_config(Path(args.config))
     queue = load_queue()
+    guard_result = apply_quality_guard(config, queue)
+    if guard_result["changed"]:
+        print(
+            f"[INFO] Quality guard auto-blocked {len(guard_result['blocked_items'])} item(s) before publish."
+        )
     changed = 0
     for item in queue:
         if item["status"] != "approved":
@@ -1100,6 +1368,17 @@ def command_publish(args: argparse.Namespace) -> None:
 
     save_queue(queue)
     print(f"[DONE] Updated {changed} queue items.")
+    guard_cfg = config.get("quality_guard", {})
+    if guard_result["blocked_items"] and guard_cfg.get("notify_on_block", True):
+        alert_body = build_block_alert(guard_result["blocked_items"])
+        try:
+            send_feishu_webhook(config, alert_body)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[WARN] block alert feishu failed: {exc}")
+        try:
+            send_email_digest(config, alert_body)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[WARN] block alert email failed: {exc}")
     if args.sync_feishu:
         sync_queue_to_feishu_bitable(config, queue)
 

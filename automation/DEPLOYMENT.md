@@ -20,6 +20,7 @@ Then adjust `automation/config.json`:
 - RSS sources and keywords
 - LLM model + endpoint
 - quality scoring thresholds (`quality_scoring`)
+- quality guard rules (`quality_guard`) for auto-blocking low-score or empty drafts
 - notification and Feishu Bitable config
 - adapter config for WeChat Official auto-publish
 
@@ -64,6 +65,7 @@ This creates:
 - draft files: `automation/outbox/<date>/<platform>/<id>.md`
 - queue: `automation/state/publish_queue.json`
 - quality score per item (0-100) + publish advice (`可发/需改/禁发`)
+- low quality / empty drafts can be auto-marked as `auto_blocked` by quality guard
 
 ## 4) Review and approve
 
@@ -115,6 +117,10 @@ Create the following fields in your table:
 - SourceTopic
 - SourceLink
 - ContentFile
+- HookText
+- BodyPreview
+- ContentMarkdown
+- CoverText
 - PostURL
 - UpdatedAt
 - Notes
@@ -134,6 +140,7 @@ Recommended field types:
 - TotalScore / HookScore / StructureScore / PlatformFitScore / CommercialScore / ComplianceScore: Number
 - PublishAdvice / QualityLevel / QualityBadge: Single line text (or Single select)
 - QualityReason: Long text
+- HookText / BodyPreview / ContentMarkdown: Long text
 
 Recommended coloring rules in Bitable view:
 
@@ -146,6 +153,16 @@ If you use `QualityBadge` as a front column, it will display:
 - 🟢 = high quality
 - 🟡 = medium quality
 - 🔴 = high risk / low quality
+
+## 6.1) Dashboard update cadence
+
+With the cron jobs in this guide:
+
+- 07:30: new drafts generated and synced to Feishu
+- every 10 minutes: status changes synced (approved / ready_to_post / posted / auto_blocked)
+- any manual action (`approve`, `publish`, `mark-posted`, `sync-feishu`) can update immediately
+
+So the table is not static; it keeps updating daily + incremental updates during the day.
 
 You can sync on demand:
 

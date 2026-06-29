@@ -35,6 +35,7 @@ Current target matrix:
    - 🟢 可发
    - 🟡 需改
    - 🔴 禁发
+   - Low-score / empty-content drafts are auto-blocked by quality guard.
 
 4. Review queue and approve drafts:
 
@@ -60,5 +61,14 @@ Current target matrix:
    ```bash
    python3 automation/pipeline.py --config automation/config.json notify
    ```
+
+8. Sync detailed content to Feishu dashboard:
+
+   ```bash
+   python3 automation/pipeline.py --config automation/config.json sync-feishu
+   ```
+
+   Feishu table now includes `HookText`, `BodyPreview`, and `ContentMarkdown`
+   so you can read actual draft content directly in the table.
 
 See full deployment guide in `automation/DEPLOYMENT.md`.
