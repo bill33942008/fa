@@ -908,7 +908,7 @@ def build_video_script_text(item: dict[str, Any]) -> str:
 
 def build_video_job_payload(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
     local_cfg = config.get("local_gpu", {})
-    gen_cfg = local_cfg.get("generation", {})
+    comfy_cfg = local_cfg.get("comfyui", {})
     queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
     item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
     content = extract_content_payload(item)
@@ -927,20 +927,15 @@ def build_video_job_payload(config: dict[str, Any], item: dict[str, Any]) -> dic
         "remote_media_path": f"{item_date}/{queue_id}.mp4",
         "status": "pending",
         "created_at": now_local().isoformat(),
-        "pixelle_web_url": str(local_cfg.get("pixelle_web_url", "http://127.0.0.1:8501")).rstrip("/"),
-        "pixelle_api_url": str(local_cfg.get("pixelle_api_url", "http://127.0.0.1:8502")).rstrip("/"),
         "comfyui_url": str(local_cfg.get("comfyui_url", "http://127.0.0.1:8000")).rstrip("/"),
-        "generation": {
-            "mode": str(gen_cfg.get("mode", "fixed")),
-            "n_scenes": int(gen_cfg.get("n_scenes", 5)),
-            "frame_template": str(gen_cfg.get("frame_template", "1080x1920/image_default.html")),
-            "tts_workflow": str(gen_cfg.get("tts_workflow", "tts_edge.json")),
-            "media_workflow": str(gen_cfg.get("media_workflow", "image_flux.json")),
-            "prompt_prefix": str(gen_cfg.get("prompt_prefix", "")),
-            "bgm_volume": float(gen_cfg.get("bgm_volume", 0.25)),
-            "poll_interval_seconds": int(gen_cfg.get("poll_interval_seconds", 5)),
-            "timeout_seconds": int(gen_cfg.get("timeout_seconds", 1800)),
-            "use_async_api": bool(gen_cfg.get("use_async_api", True)),
+        "comfyui": {
+            "url": str(comfy_cfg.get("url", local_cfg.get("comfyui_url", "http://127.0.0.1:8000"))).rstrip("/"),
+            "workflow_file": str(comfy_cfg.get("workflow_file", "short_video.api.json")),
+            "workflow_dir": str(comfy_cfg.get("workflow_dir", "workflows")),
+            "auto_inject_text": bool(comfy_cfg.get("auto_inject_text", True)),
+            "poll_interval_seconds": int(comfy_cfg.get("poll_interval_seconds", 3)),
+            "timeout_seconds": int(comfy_cfg.get("timeout_seconds", 3600)),
+            "injections": comfy_cfg.get("injections", []),
         },
         "upload": local_cfg.get("upload", {}),
     }
@@ -1112,7 +1107,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
             if sample_video_url
             else (
                 "<div class='video-missing'>暂未生成样片视频。本地 GPU 模式请执行 export-video-jobs，"
-                "在电脑上跑 Pixelle-Video 后回传；服务器模式请执行 render-samples。</div>"
+                "在电脑上通过 ComfyUI worker 渲染后回传；服务器模式请执行 render-samples。</div>"
                 if local_gpu_enabled(config)
                 else "<div class='video-missing'>暂未生成样片视频，请先执行 render-samples。</div>"
             )
@@ -2536,7 +2531,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_export = sub.add_parser(
         "export-video-jobs",
-        help="Export short-video jobs for local ComfyUI / Pixelle-Video rendering",
+        help="Export short-video jobs for local ComfyUI rendering",
     )
     p_export.add_argument("--id", default="", help="Queue item ID")
     p_export.add_argument("--date", default="", help="Date filter YYYY-MM-DD")

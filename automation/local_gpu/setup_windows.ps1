@@ -1,22 +1,11 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  One-click local GPU worker setup for ComfyUI + Pixelle-Video on Windows.
-
-.DESCRIPTION
-  1. Creates D:\content-ops folders
-  2. Downloads preconfigured bundle from your server
-  3. Checks ComfyUI (8000) and Pixelle-Video API (8501)
-  4. Runs the video worker once (or loops if -Daemon)
-
-.EXAMPLE
-  powershell -ExecutionPolicy Bypass -File setup_windows.ps1
-  powershell -ExecutionPolicy Bypass -File setup_windows.ps1 -Daemon
+  One-click local ComfyUI worker setup on Windows.
 #>
 param(
     [string]$ServerHost = "118.25.178.116",
     [string]$BaseDir = "D:\content-ops",
-    [string]$RepoDir = "",
     [switch]$Daemon,
     [switch]$SkipHealthCheck
 )
@@ -35,6 +24,7 @@ $dirs = @(
     "$BaseDir\video_jobs\completed",
     "$BaseDir\video_jobs\failed",
     "$BaseDir\rendered_videos",
+    "$BaseDir\workflows",
     "$BaseDir\ssh",
     "$BaseDir\scripts"
 )
@@ -44,14 +34,17 @@ Write-Step "Downloading deploy bundle from $DeployUrl"
 $bundleFiles = @(
     "local_config.json",
     "worker.py",
+    "comfyui_client.py",
     "start_worker.bat",
-    "worker_key"
+    "worker_key",
+    "workflows_README.txt"
 )
 foreach ($name in $bundleFiles) {
     $out = Join-Path $BaseDir $name
     if ($name -eq "worker_key") { $out = Join-Path "$BaseDir\ssh" "worker_key" }
-    if ($name -eq "worker.py" -or $name -eq "start_worker.bat") { $out = Join-Path "$BaseDir\scripts" $name }
+    if ($name -in @("worker.py", "comfyui_client.py", "start_worker.bat")) { $out = Join-Path "$BaseDir\scripts" $name }
     if ($name -eq "local_config.json") { $out = Join-Path $BaseDir "local_config.json" }
+    if ($name -eq "workflows_README.txt") { $out = Join-Path "$BaseDir\workflows" "README.txt" }
     Invoke-WebRequest -Uri "$DeployUrl/$name" -OutFile $out -UseBasicParsing
     Write-Ok "Downloaded $name"
 }
@@ -63,35 +56,27 @@ $configPath = "$BaseDir\local_config.json"
 $config = Get-Content $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $config.jobs_dir = "$BaseDir\video_jobs".Replace("\", "/")
 $config.output_dir = "$BaseDir\rendered_videos".Replace("\", "/")
+$config.comfyui.workflow_dir = "$BaseDir\workflows".Replace("\", "/")
 $config.upload.ssh_identity_file = $keyPath.Replace("\", "/")
 $config.pull_jobs_from_server.ssh_identity_file = $keyPath.Replace("\", "/")
 $config | ConvertTo-Json -Depth 8 | Set-Content -Path $configPath -Encoding UTF8
 
 if (-not $SkipHealthCheck) {
-    Write-Step "Checking ComfyUI at $($config.comfyui_url)"
+    $comfyUrl = $config.comfyui.url
+    if (-not $comfyUrl) { $comfyUrl = $config.comfyui_url }
+    Write-Step "Checking ComfyUI at $comfyUrl"
     try {
-        Invoke-WebRequest -Uri $config.comfyui_url -UseBasicParsing -TimeoutSec 5 | Out-Null
+        Invoke-WebRequest -Uri "$comfyUrl/system_stats" -UseBasicParsing -TimeoutSec 5 | Out-Null
         Write-Ok "ComfyUI is reachable"
     } catch {
-        Write-Warn "ComfyUI not reachable. Please start ComfyUI first (port 8000)."
+        Write-Warn "ComfyUI not reachable. Start ComfyUI on port 8000 first."
     }
 
-    $webUrl = $config.pixelle_web_url
-    if (-not $webUrl) { $webUrl = "http://127.0.0.1:8501" }
-    Write-Step "Checking Pixelle Web UI at $webUrl"
-    try {
-        Invoke-WebRequest -Uri $webUrl -UseBasicParsing -TimeoutSec 5 | Out-Null
-        Write-Ok "Pixelle Web UI is reachable (Streamlit, not REST API)"
-    } catch {
-        Write-Warn "Pixelle Web UI not reachable on $webUrl"
-    }
-
-    Write-Step "Checking Pixelle REST API at $($config.pixelle_api_url)"
-    try {
-        $health = Invoke-WebRequest -Uri "$($config.pixelle_api_url)/health" -UseBasicParsing -TimeoutSec 5
-        Write-Ok "Pixelle REST API is reachable"
-    } catch {
-        Write-Warn "Pixelle REST API not reachable on port 8502. Run start_pixelle_api.bat first (8501 is Web UI only)."
+    $workflow = Join-Path "$BaseDir\workflows" "short_video.api.json"
+    if (Test-Path $workflow) {
+        Write-Ok "Workflow found: $workflow"
+    } else {
+        Write-Warn "Missing $workflow - export API workflow from ComfyUI (see workflows\README.txt)"
     }
 }
 
@@ -103,7 +88,7 @@ $worker = "$BaseDir\scripts\worker.py"
 $args = @($worker, "--config", $configPath)
 if (-not $Daemon) { $args += "--once" }
 
-Write-Step "Starting local GPU worker"
+Write-Step "Starting ComfyUI worker"
 & $python.Source @args
-Write-Ok "Setup complete. Rendered videos: $BaseDir\rendered_videos"
-Write-Ok "Preview portal: http://${ServerHost}:8787/index.html"
+Write-Ok "Done. Videos: $BaseDir\rendered_videos"
+Write-Ok "Preview: http://${ServerHost}:8787/index.html"

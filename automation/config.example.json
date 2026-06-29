@@ -44,24 +44,15 @@
     "enabled": false,
     "auto_export_on_plan_day": true,
     "jobs_dir": "state/video_jobs",
-    "pixelle_web_url": "http://127.0.0.1:8501",
-    "pixelle_api_url": "http://127.0.0.1:8502",
     "comfyui_url": "http://127.0.0.1:8000",
-    "pixelle_api_candidates": [
-      "http://127.0.0.1:8502",
-      "http://127.0.0.1:8888"
-    ],
-    "generation": {
-      "mode": "fixed",
-      "n_scenes": 5,
-      "frame_template": "1080x1920/image_default.html",
-      "tts_workflow": "tts_edge.json",
-      "media_workflow": "image_flux.json",
-      "prompt_prefix": "",
-      "bgm_volume": 0.25,
-      "poll_interval_seconds": 5,
-      "timeout_seconds": 1800,
-      "use_async_api": true
+    "comfyui": {
+      "url": "http://127.0.0.1:8000",
+      "workflow_file": "short_video.api.json",
+      "workflow_dir": "workflows",
+      "auto_inject_text": true,
+      "poll_interval_seconds": 3,
+      "timeout_seconds": 3600,
+      "injections": []
     },
     "upload": {
       "enabled": true,
