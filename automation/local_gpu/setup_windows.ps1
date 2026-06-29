@@ -6,7 +6,7 @@
 .DESCRIPTION
   1. Creates D:\content-ops folders
   2. Downloads preconfigured bundle from your server
-  3. Checks ComfyUI (8188) and Pixelle-Video API (8000)
+  3. Checks ComfyUI (8000) and Pixelle-Video API (8501)
   4. Runs the video worker once (or loops if -Daemon)
 
 .EXAMPLE
@@ -73,7 +73,7 @@ if (-not $SkipHealthCheck) {
         Invoke-WebRequest -Uri $config.comfyui_url -UseBasicParsing -TimeoutSec 5 | Out-Null
         Write-Ok "ComfyUI is reachable"
     } catch {
-        Write-Warn "ComfyUI not reachable. Please start ComfyUI first (port 8188)."
+        Write-Warn "ComfyUI not reachable. Please start ComfyUI first (port 8000)."
     }
 
     Write-Step "Checking Pixelle-Video API at $($config.pixelle_api_url)"
@@ -81,7 +81,7 @@ if (-not $SkipHealthCheck) {
         $health = Invoke-WebRequest -Uri "$($config.pixelle_api_url)/api/health" -UseBasicParsing -TimeoutSec 5
         Write-Ok "Pixelle-Video API is reachable"
     } catch {
-        Write-Warn "Pixelle-Video API not reachable. Start with: uv run uvicorn api.app:app --host 0.0.0.0 --port 8000"
+        Write-Warn "Pixelle-Video API not reachable. Start with: uv run uvicorn api.app:app --host 0.0.0.0 --port 8501"
     }
 }
 

@@ -44,8 +44,8 @@
     "enabled": false,
     "auto_export_on_plan_day": true,
     "jobs_dir": "state/video_jobs",
-    "pixelle_api_url": "http://127.0.0.1:8000",
-    "comfyui_url": "http://127.0.0.1:8188",
+    "pixelle_api_url": "http://127.0.0.1:8501",
+    "comfyui_url": "http://127.0.0.1:8000",
     "generation": {
       "mode": "fixed",
       "n_scenes": 5,

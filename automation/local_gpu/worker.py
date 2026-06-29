@@ -3,8 +3,8 @@
 Local GPU worker for ComfyUI + Pixelle-Video rendering.
 
 Run on your Windows PC (RTX 4070) after:
-1. ComfyUI is running (default http://127.0.0.1:8188)
-2. Pixelle-Video API is running (default http://127.0.0.1:8000)
+1. ComfyUI is running (default http://127.0.0.1:8000)
+2. Pixelle-Video API is running (default http://127.0.0.1:8501)
 3. Server exported jobs via: export-video-jobs
 
 Usage:
@@ -150,7 +150,7 @@ def download_pixelle_video(api_base: str, video_url: str, output_file: Path) -> 
 
 def generate_with_pixelle(job: dict[str, Any], config: dict[str, Any]) -> Path:
     api_base = str(
-        job.get("pixelle_api_url") or config.get("pixelle_api_url", "http://127.0.0.1:8000")
+        job.get("pixelle_api_url") or config.get("pixelle_api_url", "http://127.0.0.1:8501")
     ).rstrip("/")
     defaults = config.get("generation_defaults", {})
     generation = {**defaults, **job.get("generation", {})}

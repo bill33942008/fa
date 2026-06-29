@@ -9,8 +9,8 @@ flowchart LR
   Server["云服务器 pipeline"] --> Export["export-video-jobs"]
   Export --> Jobs["state/video_jobs/pending/*.json"]
   Jobs --> Worker["本地 worker.py"]
-  Worker --> ComfyUI["ComfyUI :8188"]
-  Worker --> Pixelle["Pixelle-Video API :8000"]
+  Worker --> ComfyUI["ComfyUI :8000"]
+  Worker --> Pixelle["Pixelle-Video API :8501"]
   Pixelle --> MP4["本地 MP4"]
   MP4 --> Upload["scp 上传"]
   Upload --> Media["server previews/media/"]
@@ -26,7 +26,8 @@ flowchart LR
 "local_gpu": {
   "enabled": true,
   "auto_export_on_plan_day": true,
-  "pixelle_api_url": "http://127.0.0.1:8000",
+  "pixelle_api_url": "http://127.0.0.1:8501",
+  "comfyui_url": "http://127.0.0.1:8000",
   "upload": {
     "server_host": "YOUR_SERVER_IP",
     "remote_media_dir": "/opt/fa/automation/previews/media"
@@ -57,8 +58,8 @@ powershell -ExecutionPolicy Bypass -Command "Invoke-WebRequest http://118.25.178
 
 Prerequisites on your PC before running:
 
-1. ComfyUI running at `http://127.0.0.1:8188`
-2. Pixelle-Video API at `http://127.0.0.1:8000`
+1. ComfyUI running at `http://127.0.0.1:8000`
+2. Pixelle-Video API at `http://127.0.0.1:8501`
 3. Python 3.10+ in PATH
 
 After setup, double-click `D:\content-ops\scripts\start_worker.bat` for daily runs.
@@ -67,11 +68,11 @@ After setup, double-click `D:\content-ops\scripts\start_worker.bat` for daily ru
 
 ### Prerequisites
 
-1. **ComfyUI** running at `http://127.0.0.1:8188`
-2. **Pixelle-Video** API running at `http://127.0.0.1:8000`
+1. **ComfyUI** running at `http://127.0.0.1:8000`
+2. **Pixelle-Video** API running at `http://127.0.0.1:8501`
 
    ```bash
-   uv run uvicorn api.app:app --host 0.0.0.0 --port 8000
+   uv run uvicorn api.app:app --host 0.0.0.0 --port 8501
    ```
 
 3. OpenSSH client (`scp` / `ssh`) available in PowerShell or Git Bash
@@ -142,7 +143,7 @@ Adjust `media_workflow` based on models you have installed in ComfyUI.
 
 | Issue | Check |
 |---|---|
-| Pixelle API connection refused | Start API on port 8000 |
+| Pixelle API connection refused | Start API on port 8501 |
 | ComfyUI workflow fails | Open ComfyUI, load `workflows/selfhost/analyse_image.json` first |
 | scp upload fails | Test `ssh root@YOUR_SERVER_IP`, verify key and firewall |
 | Video not in portal | Run `import-local-video` and hard refresh (`Ctrl+F5`) |
