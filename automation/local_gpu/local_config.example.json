@@ -18,8 +18,9 @@
     "height": 1280,
     "max_segments": 6,
     "tts_voice": "zh-CN-XiaoxiaoNeural",
-    "base_seed": 42,
-    "poll_interval_seconds": 3,
+      "base_seed": 42,
+      "allow_plain_fallback": true,
+      "poll_interval_seconds": 3,
     "timeout_seconds": 3600
   },
   "pull_jobs_from_server": {

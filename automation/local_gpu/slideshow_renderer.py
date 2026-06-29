@@ -110,10 +110,8 @@ def list_checkpoints(client: ComfyUIClient) -> list[str]:
     return client.list_checkpoints()
 
 
-def resolve_checkpoint(client: ComfyUIClient, comfy_cfg: dict[str, Any]) -> str:
+def resolve_checkpoint(client: ComfyUIClient, comfy_cfg: dict[str, Any]) -> str | None:
     configured = str(comfy_cfg.get("checkpoint_name", "")).strip()
-    if configured and configured != "__CHECKPOINT__":
-        return configured
     candidates = comfy_cfg.get(
         "checkpoint_candidates",
         [
@@ -123,13 +121,40 @@ def resolve_checkpoint(client: ComfyUIClient, comfy_cfg: dict[str, Any]) -> str:
             "sd_xl_base_1.0.safetensors",
         ],
     )
-    available = set(list_checkpoints(client))
+    available = list_checkpoints(client)
+    if configured and configured != "__CHECKPOINT__":
+        if configured in available:
+            return configured
+        if available:
+            print(f"[WARN] checkpoint_name not found: {configured}, using {available[0]}")
+            return available[0]
+        print(f"[WARN] checkpoint_name not found and ComfyUI has no models: {configured}")
+        return None
     if available:
         for name in candidates:
             if name in available:
                 return name
-        return sorted(available)[0]
-    return str(candidates[0])
+        return available[0]
+    return None
+
+
+def render_plain_slide(image_path: Path, width: int, height: int, color: str) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found in PATH")
+    run_command(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c={color}:s={width}x{height}",
+            "-frames:v",
+            "1",
+            str(image_path),
+        ]
+    )
 
 
 def prepare_image_workflow(
@@ -178,7 +203,17 @@ def render_slideshow_video(
 
     template = client.load_workflow_file(workflow_path)
     checkpoint = resolve_checkpoint(client, comfy_cfg)
-    print(f"[OK] Using checkpoint: {checkpoint}")
+    use_plain_slides = checkpoint is None
+    if use_plain_slides:
+        if not bool(comfy_cfg.get("allow_plain_fallback", True)):
+            raise RuntimeError(
+                "ComfyUI has no checkpoint models. "
+                "Download a .safetensors model into ComfyUI/models/checkpoints/, "
+                "or set comfyui.allow_plain_fallback=true for color-slide preview."
+            )
+        print("[WARN] No checkpoint in ComfyUI; using plain color slides (add a model for AI images)")
+    else:
+        print(f"[OK] Using checkpoint: {checkpoint}")
 
     script = str(job.get("script_text", "")).strip()
     hook = str(job.get("hook_text", "")).strip()
@@ -194,6 +229,7 @@ def render_slideshow_video(
     height = int(comfy_cfg.get("height", 1280))
     poll_interval = float(comfy_cfg.get("poll_interval_seconds", 3))
     timeout_seconds = int(comfy_cfg.get("timeout_seconds", 3600))
+    slide_colors = ["0x1e3a8a", "0x1d4ed8", "0x2563eb", "0x3b82f6", "0x1e40af", "0x172554"]
 
     with tempfile.TemporaryDirectory(prefix="comfy-slideshow-") as temp_dir:
         temp_path = Path(temp_dir)
@@ -202,25 +238,34 @@ def render_slideshow_video(
         timeline = 0.0
 
         for index, segment in enumerate(segments):
-            prompt = build_visual_prompt(segment, job)
-            workflow = prepare_image_workflow(
-                template,
-                positive_prompt=prompt,
-                checkpoint_name=checkpoint,
-                seed=int(comfy_cfg.get("base_seed", 42)) + index,
-                width=width,
-                height=height,
-            )
-            prompt_id = client.queue_prompt(workflow)
-            print(f"[OK] ComfyUI image {index + 1}/{len(segments)} prompt_id={prompt_id}")
-            outputs = client.wait_for_outputs(
-                prompt_id,
-                poll_interval=poll_interval,
-                timeout_seconds=timeout_seconds,
-            )
-            image_info = client.pick_output_file(outputs)
             image_path = temp_path / f"slide_{index:02d}.png"
-            client.download_output(image_info, image_path)
+            if use_plain_slides:
+                render_plain_slide(
+                    image_path,
+                    width,
+                    height,
+                    slide_colors[index % len(slide_colors)],
+                )
+                print(f"[OK] plain slide {index + 1}/{len(segments)}")
+            else:
+                prompt = build_visual_prompt(segment, job)
+                workflow = prepare_image_workflow(
+                    template,
+                    positive_prompt=prompt,
+                    checkpoint_name=str(checkpoint),
+                    seed=int(comfy_cfg.get("base_seed", 42)) + index,
+                    width=width,
+                    height=height,
+                )
+                prompt_id = client.queue_prompt(workflow)
+                print(f"[OK] ComfyUI image {index + 1}/{len(segments)} prompt_id={prompt_id}")
+                outputs = client.wait_for_outputs(
+                    prompt_id,
+                    poll_interval=poll_interval,
+                    timeout_seconds=timeout_seconds,
+                )
+                image_info = client.pick_output_file(outputs)
+                client.download_output(image_info, image_path)
 
             audio_path = temp_path / f"slide_{index:02d}.mp3"
             synthesize_tts(segment, audio_path, voice)

@@ -248,6 +248,12 @@ def probe_services(config: dict[str, Any]) -> int:
 
     render_mode = str(comfy_cfg.get("render_mode", "slideshow"))
     print(f"[OK] render_mode={render_mode}")
+    checkpoints = ComfyUIClient(url).list_checkpoints()
+    if checkpoints:
+        print(f"[OK] ComfyUI checkpoints ({len(checkpoints)}): {', '.join(checkpoints[:5])}")
+    else:
+        print("[WARN] No checkpoint models detected in ComfyUI")
+        print("       Will use plain color slides until you add a model to models/checkpoints/")
     if render_mode == "slideshow":
         for binary, install_hint in (
             ("ffmpeg", "Install ffmpeg and add to PATH"),
@@ -295,6 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--once", action="store_true", help="Process pending jobs once and exit")
     parser.add_argument("--probe", action="store_true", help="Check ComfyUI and workflow file")
+    parser.add_argument("--list-checkpoints", action="store_true", help="List ComfyUI checkpoint models")
     parser.add_argument("--retry-failed", action="store_true", help="Retry failed jobs")
     return parser
 
@@ -310,6 +317,18 @@ def main() -> None:
 
     if args.probe:
         sys.exit(probe_services(config))
+
+    if args.list_checkpoints:
+        comfy_cfg = merge_comfy_cfg(config, {})
+        url = str(comfy_cfg.get("url", "http://127.0.0.1:8000")).rstrip("/")
+        names = ComfyUIClient(url).list_checkpoints()
+        if names:
+            print("Checkpoints:")
+            for name in names:
+                print(f"  - {name}")
+        else:
+            print("No checkpoints found in ComfyUI.")
+        sys.exit(0)
 
     poll_once = bool(args.once or config.get("poll_once", False))
     interval = int(config.get("poll_interval_seconds", 60))

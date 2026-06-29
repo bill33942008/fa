@@ -60,13 +60,33 @@ class ComfyUIClient:
             return {"status": "ok"}
 
     def list_checkpoints(self) -> list[str]:
-        try:
-            data = http_get_json(f"{self.base_url}/models/checkpoints", timeout=15)
-            if isinstance(data, list):
-                return [str(name) for name in data if str(name).strip()]
-        except Exception:  # pylint: disable=broad-except
-            return []
-        return []
+        found: set[str] = set()
+        endpoints = [
+            f"{self.base_url}/models/checkpoints",
+            f"{self.base_url}/models?folder=checkpoints",
+        ]
+        for url in endpoints:
+            try:
+                data = http_get_json(url, timeout=15)
+                if isinstance(data, list):
+                    found.update(str(name).strip() for name in data if str(name).strip())
+            except Exception:  # pylint: disable=broad-except
+                continue
+
+        for path in ("/object_info/CheckpointLoaderSimple", "/object_info"):
+            try:
+                data = http_get_json(f"{self.base_url}{path}", timeout=20)
+                if path.endswith("CheckpointLoaderSimple"):
+                    node = data.get("CheckpointLoaderSimple", data)
+                else:
+                    node = data.get("CheckpointLoaderSimple", {})
+                ckpt_cfg = node.get("input", {}).get("required", {}).get("ckpt_name")
+                if isinstance(ckpt_cfg, list) and ckpt_cfg and isinstance(ckpt_cfg[0], list):
+                    found.update(str(name).strip() for name in ckpt_cfg[0] if str(name).strip())
+            except Exception:  # pylint: disable=broad-except
+                continue
+
+        return sorted(found)
 
     def load_workflow_file(self, workflow_path: Path) -> dict[str, Any]:
         raw = json.loads(workflow_path.read_text(encoding="utf-8"))
