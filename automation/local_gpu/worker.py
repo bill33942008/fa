@@ -189,13 +189,25 @@ def upload_video_to_server(job: dict[str, Any], local_video: Path, config: dict[
     if upload_cfg.get("run_remote_import", True):
         remote_python = str(upload_cfg.get("remote_python", "python3"))
         remote_config = str(upload_cfg.get("remote_config", "/opt/fa/automation/config.json"))
+        remote_pipeline_dir = str(upload_cfg.get("remote_pipeline_dir", "/opt/fa"))
+        remote_env_script = str(upload_cfg.get("remote_env_script", "")).strip()
+        sync_feishu = bool(upload_cfg.get("remote_sync_feishu", False))
+        import_required = bool(upload_cfg.get("remote_import_required", False))
+        sync_flag = " --sync-feishu" if sync_feishu else ""
         remote_cmd = (
-            f"cd {upload_cfg.get('remote_pipeline_dir', '/opt/fa')} && "
+            f"cd {remote_pipeline_dir} && "
             f"{remote_python} automation/pipeline.py --config {remote_config} "
-            f"import-local-video --id {job.get('job_id')} --sync-feishu"
+            f"import-local-video --id {job.get('job_id')}{sync_flag}"
         )
-        run_command(ssh_base_args(upload_cfg) + [remote_cmd])
-        print(f"[OK] remote import-local-video completed for {job.get('job_id')}")
+        if remote_env_script:
+            remote_cmd = f"set -a; . {remote_env_script}; set +a; {remote_cmd}"
+        try:
+            run_command(ssh_base_args(upload_cfg) + [remote_cmd])
+            print(f"[OK] remote import-local-video completed for {job.get('job_id')}")
+        except Exception as exc:  # pylint: disable=broad-except
+            if import_required:
+                raise
+            print(f"[WARN] remote import-local-video failed (ignored): {exc}")
 
 
 def process_job(job_file: Path, config: dict[str, Any], jobs_dir: Path) -> bool:

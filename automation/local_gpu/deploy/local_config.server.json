@@ -42,7 +42,10 @@
     "remote_python": "/opt/fa/.venv/bin/python",
     "remote_config": "/opt/fa/automation/config.json",
     "ssh_identity_file": "D:/content-ops/ssh/worker_key",
-    "run_remote_import": true
+    "run_remote_import": true,
+    "remote_env_script": "/etc/profile.d/content_ops_env.sh",
+    "remote_sync_feishu": false,
+    "remote_import_required": false
   },
   "keep_local_copy": true,
   "poll_once": false,
