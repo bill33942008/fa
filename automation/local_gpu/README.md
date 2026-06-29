@@ -69,14 +69,17 @@ After setup, double-click `D:\content-ops\scripts\start_worker.bat` for daily ru
 ### Prerequisites
 
 1. **ComfyUI** running at `http://127.0.0.1:8000`
-2. **Pixelle-Video** API running at `http://127.0.0.1:8501`
+2. **Pixelle Web UI** at `http://127.0.0.1:8501` (Streamlit, optional)
+3. **Pixelle REST API** at `http://127.0.0.1:8502` (required for worker)
 
    ```bash
-   uv run uvicorn api.app:app --host 0.0.0.0 --port 8501
+   uv run python api/app.py --host 0.0.0.0 --port 8502
    ```
 
-3. OpenSSH client (`scp` / `ssh`) available in PowerShell or Git Bash
-4. SSH key access to your server (recommended)
+   Or double-click `start_pixelle_api.bat`
+
+4. OpenSSH client (`scp` / `ssh`) available in PowerShell or Git Bash
+5. SSH key access to your server (recommended)
 
 ### Configure local worker
 
