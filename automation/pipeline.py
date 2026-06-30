@@ -3041,6 +3041,7 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 <a class="green" href="{html.escape(bulk_all_url or f'/download-packs?date={dashboard_date}&status=all')}" target="_blank">下载今日全部素材包</a>
 <a class="green" href="{html.escape(bulk_selected_url)}" target="_blank">下载已选素材包</a>
 <a href="/daily-log" target="_blank">查看每日自动生成日志</a>
+<a href="/health" target="_blank">系统健康检查</a>
 </div>
 <div class="card"><h2>今日优先处理</h2><table><thead><tr><th>账号</th><th>平台</th><th>内容</th><th>状态</th><th>评分</th><th>更新时间</th><th>下一步</th></tr></thead><tbody>{''.join(priority_rows) or '<tr><td colspan="7">暂无待处理内容</td></tr>'}</tbody></table></div>
 <br />
@@ -4428,6 +4429,74 @@ def command_serve_review(args: argparse.Namespace) -> None:
                     parts.append("\n## 最近详细日志")
                     parts.append(detail_path.read_text(encoding="utf-8", errors="replace")[-8000:])
                 payload = "\n".join(parts)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(payload.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/health":
+                lines: list[str] = ["# 系统健康检查", ""]
+                lines.append(f"- 检查时间：{now_local().strftime('%Y-%m-%d %H:%M:%S')}")
+                lines.append(f"- 工作目录：{BASE_DIR.parent}")
+                lines.append(f"- DeepSeek Key：{'已配置' if os.getenv('DEEPSEEK_API_KEY') else '未配置'}")
+                lines.append(f"- DashScope Key：{'已配置' if os.getenv('DASHSCOPE_API_KEY') else '未配置'}")
+                try:
+                    cron = subprocess.run(
+                        ["crontab", "-l"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    ).stdout
+                except Exception as exc:  # pylint: disable=broad-except
+                    cron = f"crontab 读取失败：{exc}"
+                lines.extend(["", "## 定时任务", "```", cron.strip() or "无", "```"])
+
+                try:
+                    queue = load_queue()
+                    lines.extend(["", "## 队列与素材覆盖"])
+                    lines.append(f"- 总内容数：{len(queue)}")
+                    by_account: dict[str, dict[str, Any]] = {}
+                    for item in queue:
+                        account = str(item.get("account_name", ""))
+                        data = by_account.setdefault(
+                            account,
+                            {"items": 0, "images": 0, "packs": 0, "latest": ""},
+                        )
+                        data["items"] += 1
+                        if len(item.get("illustration_urls") or []) > 0:
+                            data["images"] += 1
+                        if item.get("asset_pack_file") and Path(str(item.get("asset_pack_file"))).exists():
+                            data["packs"] += 1
+                        data["latest"] = max(
+                            str(data["latest"]),
+                            str(item.get("updated_at") or item.get("created_at") or ""),
+                        )
+                    for account, data in sorted(by_account.items()):
+                        lines.append(
+                            f"- {account}：内容 {data['items']} / 有图 {data['images']} / "
+                            f"素材包 {data['packs']} / 最近 {display_datetime(data['latest']) or '-'}"
+                        )
+                except Exception as exc:  # pylint: disable=broad-except
+                    lines.append(f"- 队列检查失败：{exc}")
+
+                lines.extend(["", "## 最近自动生成日志"])
+                log_path = BASE_DIR / "daily_generate_summary.log"
+                if log_path.exists():
+                    lines.extend(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:])
+                else:
+                    lines.append("暂无自动生成日志。")
+
+                lines.extend(["", "## 关键文件"])
+                for path in [
+                    BASE_DIR / "pipeline.py",
+                    BASE_DIR / "config.json",
+                    BASE_DIR / "daily_generate.sh",
+                    PREVIEW_DIR / "dashboard.html",
+                    PREVIEW_DIR / "index.html",
+                ]:
+                    lines.append(f"- {path}: {'存在' if path.exists() else '缺失'}")
+
+                payload = "\n".join(lines)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.end_headers()
