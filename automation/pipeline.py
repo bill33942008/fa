@@ -1240,6 +1240,35 @@ def display_datetime(value: Any) -> str:
         return raw[:16]
 
 
+STATUS_LABELS = {
+    "pending_review": "待筛选",
+    "approved": "已选用",
+    "ready_to_post": "待发布",
+    "posted": "已发布",
+    "rejected": "已丢弃",
+    "auto_blocked": "系统拦截",
+    "draft": "草稿",
+}
+
+
+def status_label(status: Any) -> str:
+    raw = str(status or "").strip()
+    return STATUS_LABELS.get(raw, raw or "未知")
+
+
+def next_step_for_item(item: dict[str, Any]) -> str:
+    status = str(item.get("status", "")).strip()
+    if status == "posted":
+        return "已发布：如需复盘，可记录发布链接和数据。"
+    if status == "rejected":
+        return "已丢弃：无需处理，也可重新生成同账号内容。"
+    if status in {"approved", "ready_to_post"}:
+        return "下一步：复制发布文案，按插图标记上传图片，发布后点击“已发布”。"
+    if len(item.get("illustration_urls") or []) == 0:
+        return "下一步：先点击“重新配图”，再筛选是否发布。"
+    return "下一步：检查标题、正文和配图，满意就点击“选用”。"
+
+
 def split_video_segments(body_markdown: str, limit: int = 8) -> list[str]:
     plain = strip_markdown(body_markdown)
     chunks = [segment.strip() for segment in re.split(r"[。！？!?;\n]+", plain) if segment.strip()]
@@ -2071,14 +2100,16 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     score = safe_int(item.get("total_score", 0), default=0)
     advice = html.escape(str(item.get("publish_advice", "需改")))
     reason = html.escape(str(item.get("quality_reason", "")).strip())
-    status = html.escape(str(item.get("status", "")).strip())
+    raw_status = str(item.get("status", "")).strip()
+    status = html.escape(status_label(raw_status))
+    next_step = html.escape(next_step_for_item(item))
     updated_time = html.escape(display_datetime(item.get("updated_at") or item.get("created_at")))
     body_html = markdown_to_simple_html(content.get("body_markdown", ""))
     post_format = str(item.get("post_format", ""))
 
     metadata_html = (
         f"<div class='meta'><span>{badge} {score}/100 · {advice}</span>"
-        f"<span>Status: {status}</span><span>发布时间: {publish_time}</span><span>更新时间: {updated_time or '无'}</span></div>"
+        f"<span>状态: {status}</span><span>发布时间: {publish_time}</span><span>更新时间: {updated_time or '无'}</span></div>"
         f"<div class='meta'><span>账号: {account}</span><span>平台: {platform}</span></div>"
         f"<div class='meta'><span>选题: {source_topic}</span>"
         f"<a href='{source_link}' target='_blank' rel='noreferrer'>来源链接</a></div>"
@@ -2143,6 +2174,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','pack',this)\">重建素材包</button>"
         "<span class='status-result'></span>"
         "</div>"
+        f"<div class='next-step'>运营提示：{next_step}</div>"
         f"<textarea id='copy-title-{queue_id}'>{html.escape(raw_title)}</textarea>"
         f"<textarea id='copy-body-{queue_id}'>{html.escape(raw_body)}</textarea>"
         f"<textarea id='copy-full-{queue_id}'>{html.escape(publish_text)}</textarea>"
@@ -2249,6 +2281,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .status-actions button.danger {{ background:#dc2626; }}
     .status-actions button.secondary {{ background:#475569; }}
     .status-result {{ color:#64748b; font-size:12px; }}
+    .next-step {{ margin-top:10px; background:#ecfdf5; color:#065f46; border:1px solid #a7f3d0; border-radius:8px; padding:8px 10px; font-size:12px; line-height:1.6; }}
     .copy-panel textarea {{ position:absolute; left:-9999px; top:-9999px; }}
     .rich-copy-details {{ margin-top: 10px; color:#475569; font-size:13px; }}
     .rich-copy-area {{ margin-top:8px; background:#fff; border:1px dashed #94a3b8; border-radius:10px; padding:14px; color:#111827; }}
@@ -2526,10 +2559,11 @@ def build_accounts_index(
             score = safe_int(item.get("total_score", 0), default=0)
             ill_count = len(item.get("illustration_urls") or item.get("illustration_files") or [])
             material = f"{ill_count} 张图" if ill_count else "待配图"
-            status = html.escape(str(item.get("status", "pending_review")))
+            raw_status = str(item.get("status", "pending_review"))
+            status = html.escape(status_label(raw_status))
             updated = html.escape(display_datetime(item.get("updated_at") or item.get("created_at")) or "-")
             item_rows.append(
-                "<li>"
+                f"<li data-status='{html.escape(raw_status)}'>"
                 f"<a href='{href}' target='_blank' rel='noreferrer'>{title}</a>"
                 f"<span>{badge}{score}</span><span>{material}</span><span>{status}</span><span>{updated}</span>"
                 "</li>"
@@ -2561,6 +2595,9 @@ body{{margin:0;background:#f3f5f9;color:#111827;font-family:-apple-system,BlinkM
 .hero h1{{margin:0 0 8px;font-size:24px;}} .hero p{{margin:0;opacity:.9;line-height:1.7;}}
 .toolbar{{display:flex;gap:10px;align-items:center;margin:0 0 16px;}}
 .toolbar input{{width:min(420px,100%);border:1px solid #dbe3ef;border-radius:10px;padding:10px 12px;font-size:14px;}}
+.status-filter{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px;}}
+.status-filter button{{background:#fff;color:#334155;border:1px solid #cbd5e1;margin:0;}}
+.status-filter button.active{{background:#2563eb;color:#fff;border-color:#2563eb;}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:16px;}}
 .account-card{{background:#fff;border-radius:16px;padding:16px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
 .account-head{{display:flex;align-items:center;justify-content:space-between;gap:12px;}}
@@ -2618,10 +2655,24 @@ function filterAccounts(input){{
     card.style.display = hay.includes(q) ? '' : 'none';
   }});
 }}
+function filterStatus(status, btn){{
+  document.querySelectorAll('.status-filter button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.items li').forEach(row => {{
+    row.style.display = (!status || row.dataset.status === status) ? '' : 'none';
+  }});
+}}
 </script></head><body><div class="wrap">
 <div class="hero"><h1>按账号生成/选择内容{title_suffix}</h1>
 <p>公众号和小红书输出可直接粘贴的完整图文；抖音/视频号/快手输出剪映可用的口播稿、分镜和配图素材，不再生成视频。</p></div>
 <div class="toolbar"><input placeholder="搜索账号或平台，例如 小红书 / 公众号 / 快手" oninput="filterAccounts(this)" /></div>
+<div class="status-filter">
+  <button type="button" class="active" onclick="filterStatus('', this)">全部</button>
+  <button type="button" onclick="filterStatus('pending_review', this)">待筛选</button>
+  <button type="button" onclick="filterStatus('approved', this)">已选用</button>
+  <button type="button" onclick="filterStatus('posted', this)">已发布</button>
+  <button type="button" onclick="filterStatus('rejected', this)">已丢弃</button>
+</div>
 <div class="grid">{''.join(cards)}</div></div></body></html>"""
     target_dir = PREVIEW_DIR / latest_date if latest_date else PREVIEW_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -2652,12 +2703,49 @@ def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], d
     by_account: dict[str, list[dict[str, Any]]] = {}
     for item in items:
         by_account.setdefault(str(item.get("account_name", "")), []).append(item)
+    priority_items = sorted(
+        [
+            item
+            for item in items
+            if item.get("status") in {"pending_review", "approved", "ready_to_post"}
+            and item.get("publish_advice") != "禁发"
+        ],
+        key=lambda item: (
+            str(item.get("status", "")) != "approved",
+            -safe_int(item.get("total_score", 0), default=0),
+            str(item.get("updated_at", "")),
+        ),
+    )[:8]
+    priority_rows = []
+    for item in priority_items:
+        preview_file = Path(str(item.get("preview_file", "")).strip() or "#")
+        href = "#"
+        if preview_file != Path("#"):
+            try:
+                href = preview_file.relative_to(PREVIEW_DIR).as_posix()
+            except ValueError:
+                href = preview_file.name
+        priority_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(item.get('account_name', '')))}</td>"
+            f"<td><a href='{html.escape(href)}'>{html.escape(str(item.get('title', ''))[:52])}</a></td>"
+            f"<td>{html.escape(status_label(item.get('status')))}</td>"
+            f"<td>{safe_int(item.get('total_score', 0), default=0)}</td>"
+            f"<td>{html.escape(next_step_for_item(item))}</td>"
+            "</tr>"
+        )
     account_rows = []
+    coverage_rows = []
     for account, account_items in sorted(by_account.items()):
         best = max([safe_int(item.get("total_score", 0), default=0) for item in account_items] or [0])
         ready = sum(1 for item in account_items if item.get("status") in {"approved", "ready_to_post"})
+        posted = sum(1 for item in account_items if item.get("status") == "posted")
+        suggestion = "已覆盖" if ready or posted else "建议先选 1 条"
         account_rows.append(
             f"<tr><td>{html.escape(account)}</td><td>{len(account_items)}</td><td>{ready}</td><td>{best}</td></tr>"
+        )
+        coverage_rows.append(
+            f"<tr><td>{html.escape(account)}</td><td>{ready}</td><td>{posted}</td><td>{html.escape(suggestion)}</td></tr>"
         )
     dashboard_html = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -2691,6 +2779,10 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 <a class="green" href="/export-selected?date={dashboard_date}" target="_blank">导出已选清单</a>
 <a href="/daily-log" target="_blank">查看每日自动生成日志</a>
 </div>
+<div class="card"><h2>今日优先处理</h2><table><thead><tr><th>账号</th><th>内容</th><th>状态</th><th>评分</th><th>下一步</th></tr></thead><tbody>{''.join(priority_rows) or '<tr><td colspan="5">暂无待处理内容</td></tr>'}</tbody></table></div>
+<br />
+<div class="card"><h2>账号发布覆盖</h2><table><thead><tr><th>账号</th><th>已选</th><th>已发布</th><th>建议</th></tr></thead><tbody>{''.join(coverage_rows)}</tbody></table></div>
+<br />
 <div class="card"><h2>账号概览</h2><table><thead><tr><th>账号</th><th>候选</th><th>已选</th><th>最高分</th></tr></thead><tbody>{''.join(account_rows)}</tbody></table></div>
 </div></body></html>"""
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
@@ -4106,7 +4198,8 @@ def command_export_selected(args: argparse.Namespace) -> None:
             [
                 f"## {item.get('account_name', '')} / {item.get('platform', '')} / {item.get('id', '')}",
                 "",
-                f"- 状态：{item.get('status', '')}",
+                f"- 状态：{status_label(item.get('status'))}",
+                f"- 下一步：{next_step_for_item(item)}",
                 f"- 预览：{item.get('preview_url', '')}",
                 f"- 素材包：{item.get('asset_pack_url', '')}",
                 "",
