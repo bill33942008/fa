@@ -1713,6 +1713,7 @@ def build_bulk_asset_pack(
     *,
     date: str = "",
     status: str = "all",
+    rebuild_items: bool = True,
 ) -> dict[str, str]:
     target_date = date or max([str(item.get("date", "")) for item in queue] or [now_local().strftime("%Y-%m-%d")])
     selected = [item for item in queue if item.get("date") == target_date]
@@ -1744,8 +1745,11 @@ def build_bulk_asset_pack(
     with zipfile.ZipFile(bulk_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         manifest_lines = [f"# 批量素材包 {target_date}", ""]
         for item in selected:
-            build_asset_pack_for_item(config, item)
+            if rebuild_items:
+                build_asset_pack_for_item(config, item)
             pack_path = Path(str(item.get("asset_pack_file", "")))
+            if not pack_path.exists() and not rebuild_items:
+                continue
             folder = "_".join(
                 [
                     sanitize_filename_part(item.get("account_name", ""), 16),
@@ -4339,7 +4343,9 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 try:
                     config = load_config(Path(config_path))
                     queue = load_queue()
-                    result = build_bulk_asset_pack(config, queue, date=date, status=status)
+                    result = build_bulk_asset_pack(
+                        config, queue, date=date, status=status, rebuild_items=False
+                    )
                     pack_path = Path(result["bulk_pack_file"])
                     payload = pack_path.read_bytes()
                     self.send_response(200)
