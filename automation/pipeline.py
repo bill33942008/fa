@@ -1144,6 +1144,14 @@ def image_card_html(url: str, label: str) -> str:
     )
 
 
+def clean_image_html(url: str, label: str) -> str:
+    safe_url = html.escape(str(url))
+    return (
+        f"<p class='image-marker'>【插入{html.escape(label)}】</p>"
+        f"<p><img src='{safe_url}' alt='{html.escape(label)}' style='max-width:100%;height:auto;' /></p>"
+    )
+
+
 def markdown_to_html_with_inline_images(markdown_text: str, image_urls: list[str]) -> str:
     lines = markdown_text.splitlines()
     blocks: list[list[str]] = []
@@ -1172,6 +1180,35 @@ def markdown_to_html_with_inline_images(markdown_text: str, image_urls: list[str
         for url in image_after.get(block_idx, []):
             rendered_image_idx += 1
             html_parts.append(image_card_html(url, f"配图{rendered_image_idx:02d}：对应上方段落"))
+    return "\n".join(html_parts)
+
+
+def markdown_to_clean_rich_html(markdown_text: str, image_urls: list[str]) -> str:
+    lines = markdown_text.splitlines()
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if line.strip():
+            current.append(line)
+            continue
+        if current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    if not blocks:
+        return markdown_to_simple_html(markdown_text)
+    image_after: dict[int, list[str]] = {}
+    for idx, url in enumerate(image_urls):
+        block_idx = min(len(blocks) - 1, int((idx + 1) * len(blocks) / (len(image_urls) + 1)))
+        image_after.setdefault(block_idx, []).append(url)
+    html_parts: list[str] = []
+    rendered_image_idx = 0
+    for block_idx, block in enumerate(blocks):
+        html_parts.append(markdown_to_simple_html("\n".join(block)))
+        for url in image_after.get(block_idx, []):
+            rendered_image_idx += 1
+            html_parts.append(clean_image_html(url, f"配图{rendered_image_idx:02d}：对应上方段落"))
     return "\n".join(html_parts)
 
 
@@ -2131,6 +2168,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     if not isinstance(illustration_urls, list):
         illustration_urls = []
     body_html = markdown_to_html_with_inline_images(content.get("body_markdown", ""), illustration_urls)
+    clean_body_html = markdown_to_clean_rich_html(content.get("body_markdown", ""), illustration_urls)
     marker_publish_text = "\n\n".join(
         [
             part
@@ -2148,7 +2186,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         "<article class='rich-article'>"
         f"<h1>{title}</h1>"
         f"<p class='rich-hook'>{hook_text}</p>"
-        f"{body_html}"
+        f"{clean_body_html}"
         f"<p class='rich-cover'>封面文案：{cover_text}</p>"
         f"<p class='rich-tags'>{html.escape(hashtag_line)}</p>"
         "</article>"
