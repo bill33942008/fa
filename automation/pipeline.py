@@ -2205,13 +2205,38 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .ill-actions a {{ color:#2563eb; text-decoration:none; }}
   </style>
   <script>
+    async function copyToClipboard(text) {{
+      if (navigator.clipboard && window.isSecureContext) {{
+        await navigator.clipboard.writeText(text);
+        return true;
+      }}
+      const temp = document.createElement('textarea');
+      temp.value = text;
+      temp.setAttribute('readonly', '');
+      temp.style.position = 'fixed';
+      temp.style.left = '-9999px';
+      temp.style.top = '0';
+      document.body.appendChild(temp);
+      temp.focus();
+      temp.select();
+      let ok = false;
+      try {{ ok = document.execCommand('copy'); }} catch (err) {{ ok = false; }}
+      document.body.removeChild(temp);
+      if (!ok) throw new Error('浏览器阻止复制，请手动选中文案复制');
+      return true;
+    }}
     async function copyTarget(btn) {{
       const el = document.getElementById(btn.dataset.copyTarget);
       if (!el) return;
-      await navigator.clipboard.writeText(el.value || el.textContent || '');
       const old = btn.innerText;
-      btn.innerText = '已复制';
-      setTimeout(() => btn.innerText = old, 1300);
+      try {{
+        await copyToClipboard(el.value || el.textContent || '');
+        btn.innerText = '已复制';
+      }} catch (err) {{
+        btn.innerText = '复制失败';
+        alert(err.message || err);
+      }}
+      setTimeout(() => btn.innerText = old, 1600);
     }}
     async function setStatus(id, status, btn) {{
       const box = btn.closest('.status-actions').querySelector('.status-result');
@@ -2518,6 +2543,7 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 <a href="{dashboard_date}/accounts.html">进入账号工作台</a>
 <a href="{dashboard_date}/index.html">查看全部候选</a>
 <a class="green" href="/export-selected?date={dashboard_date}" target="_blank">导出已选清单</a>
+<a href="/daily-log" target="_blank">查看每日自动生成日志</a>
 </div>
 <div class="card"><h2>账号概览</h2><table><thead><tr><th>账号</th><th>候选</th><th>已选</th><th>最高分</th></tr></thead><tbody>{''.join(account_rows)}</tbody></table></div>
 </div></body></html>"""
@@ -3881,6 +3907,24 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(buffer.getvalue().encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/daily-log":
+                log_path = BASE_DIR / "daily_generate_summary.log"
+                detail_path = BASE_DIR / "daily_generate.log"
+                parts = ["# 每日自动生成日志", ""]
+                if log_path.exists():
+                    parts.append("## 摘要")
+                    parts.append(log_path.read_text(encoding="utf-8", errors="replace")[-8000:])
+                else:
+                    parts.append("暂无摘要日志。")
+                if detail_path.exists():
+                    parts.append("\n## 最近详细日志")
+                    parts.append(detail_path.read_text(encoding="utf-8", errors="replace")[-8000:])
+                payload = "\n".join(parts)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(payload.encode("utf-8", errors="replace"))
                 return
             if parsed.path == "/":
                 self.path = "/index.html"
