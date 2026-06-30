@@ -133,7 +133,7 @@
     "include_blocked": false,
     "public_base_url": "http://118.25.178.116:8787",
     "tts_engine": "edge-tts",
-    "tts_binary": "edge-tts",
+    "tts_binary": "/opt/fa/.venv/bin/edge-tts",
     "tts_voice": "zh-CN-XiaoxiaoNeural",
     "tts_speed": 165,
     "segment_gap_seconds": 0.25,

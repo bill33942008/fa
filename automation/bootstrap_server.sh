@@ -56,6 +56,29 @@ restore_config() {
   echo "[WARN] if Feishu sync fails, fill feishu_bitable.app_token/table_id in automation/config.json"
 }
 
+normalize_config() {
+  "$PYTHON" - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("automation/config.json")
+data = json.loads(path.read_text(encoding="utf-8"))
+sample = data.setdefault("sample_video", {})
+sample["enabled"] = True
+sample["tts_engine"] = "edge-tts"
+sample["tts_binary"] = "/opt/fa/.venv/bin/edge-tts"
+cloud = data.setdefault("cloud_media", {})
+cloud["enabled"] = True
+cloud.setdefault("image", {})["enabled"] = True
+cloud.setdefault("image", {})["allow_placeholder_fallback"] = True
+cloud.setdefault("video", {})["enabled"] = True
+cloud.setdefault("video", {})["allow_server_fallback"] = True
+data.setdefault("local_gpu", {})["enabled"] = False
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+print("[OK] normalized config for cloud media fallbacks")
+PY
+}
+
 update_code() {
   curl -fsSL "${RAW_BASE}/automation/pipeline.py" -o automation/pipeline.py
   curl -fsSL "${RAW_BASE}/automation/config.server.json" -o automation/config.server.json
@@ -131,6 +154,7 @@ run_renders() {
 restore_config
 update_code
 install_deps
+normalize_config
 run_renders
 
 echo "[DONE] bootstrap complete"
