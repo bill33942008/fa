@@ -2797,6 +2797,7 @@ def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], d
             f"<td><a href='{html.escape(href)}'>{html.escape(str(item.get('title', ''))[:52])}</a></td>"
             f"<td>{html.escape(status_label(item.get('status')))}</td>"
             f"<td>{safe_int(item.get('total_score', 0), default=0)}</td>"
+            f"<td>{html.escape(display_datetime(item.get('updated_at') or item.get('created_at')) or '-')}</td>"
             f"<td>{html.escape(next_step_for_item(item))}</td>"
             "</tr>"
         )
@@ -2812,6 +2813,7 @@ def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], d
         best = max([safe_int(item.get("total_score", 0), default=0) for item in account_items] or [0])
         ready = sum(1 for item in account_items if item.get("status") in {"approved", "ready_to_post"})
         posted = sum(1 for item in account_items if item.get("status") == "posted")
+        latest = max([display_datetime(item.get("updated_at") or item.get("created_at")) for item in account_items] or [""])
         suggestion = "已覆盖" if ready or posted else "建议先选 1 条"
         account_rows.append(
             "<tr>"
@@ -2819,11 +2821,11 @@ def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], d
             f"<td>{html.escape(platform_label(platform))}</td>"
             f"<td>{html.escape(str(publish_time) or '-')}</td>"
             f"<td>{html.escape(post_format_label(post_format))}</td>"
-            f"<td>{len(account_items)}</td><td>{ready}</td><td>{best}</td>"
+            f"<td>{len(account_items)}</td><td>{ready}</td><td>{best}</td><td>{html.escape(latest or '-')}</td>"
             "</tr>"
         )
         coverage_rows.append(
-            f"<tr><td>{html.escape(account)}</td><td>{html.escape(platform_label(platform))}</td><td>{ready}</td><td>{posted}</td><td>{html.escape(suggestion)}</td></tr>"
+            f"<tr><td>{html.escape(account)}</td><td>{html.escape(platform_label(platform))}</td><td>{ready}</td><td>{posted}</td><td>{html.escape(latest or '-')}</td><td>{html.escape(suggestion)}</td></tr>"
         )
         schedule_rows.append(
             (
@@ -2835,6 +2837,7 @@ def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], d
                 f"<td>{html.escape(post_format_label(post_format))}</td>"
                 f"<td>{len(account_items)}</td>"
                 f"<td>{ready or posted}</td>"
+                f"<td>{html.escape(latest or '-')}</td>"
                 "</tr>",
             )
         )
@@ -2878,13 +2881,13 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 <a class="green" href="/export-selected?date={dashboard_date}" target="_blank">导出已选清单</a>
 <a href="/daily-log" target="_blank">查看每日自动生成日志</a>
 </div>
-<div class="card"><h2>今日优先处理</h2><table><thead><tr><th>账号</th><th>平台</th><th>内容</th><th>状态</th><th>评分</th><th>下一步</th></tr></thead><tbody>{''.join(priority_rows) or '<tr><td colspan="6">暂无待处理内容</td></tr>'}</tbody></table></div>
+<div class="card"><h2>今日优先处理</h2><table><thead><tr><th>账号</th><th>平台</th><th>内容</th><th>状态</th><th>评分</th><th>更新时间</th><th>下一步</th></tr></thead><tbody>{''.join(priority_rows) or '<tr><td colspan="7">暂无待处理内容</td></tr>'}</tbody></table></div>
 <br />
-<div class="card"><h2>今日发布排期</h2><table><thead><tr><th>时间</th><th>账号</th><th>平台</th><th>形式</th><th>候选</th><th>是否已覆盖</th></tr></thead><tbody>{schedule_html}</tbody></table></div>
+<div class="card"><h2>今日发布排期</h2><table><thead><tr><th>时间</th><th>账号</th><th>平台</th><th>形式</th><th>候选</th><th>是否已覆盖</th><th>更新时间</th></tr></thead><tbody>{schedule_html}</tbody></table></div>
 <br />
-<div class="card"><h2>账号发布覆盖</h2><table><thead><tr><th>账号</th><th>平台</th><th>已选</th><th>已发布</th><th>建议</th></tr></thead><tbody>{''.join(coverage_rows)}</tbody></table></div>
+<div class="card"><h2>账号发布覆盖</h2><table><thead><tr><th>账号</th><th>平台</th><th>已选</th><th>已发布</th><th>更新时间</th><th>建议</th></tr></thead><tbody>{''.join(coverage_rows)}</tbody></table></div>
 <br />
-<div class="card"><h2>账号概览</h2><table><thead><tr><th>账号</th><th>平台</th><th>发布时间</th><th>内容形式</th><th>候选</th><th>已选</th><th>最高分</th></tr></thead><tbody>{''.join(account_rows)}</tbody></table></div>
+<div class="card"><h2>账号概览</h2><table><thead><tr><th>账号</th><th>平台</th><th>发布时间</th><th>内容形式</th><th>候选</th><th>已选</th><th>最高分</th><th>更新时间</th></tr></thead><tbody>{''.join(account_rows)}</tbody></table></div>
 </div></body></html>"""
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
     index_file = PREVIEW_DIR / "dashboard.html"
