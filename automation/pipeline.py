@@ -1376,6 +1376,8 @@ PLATFORM_LABELS = {
     "douyin": "抖音",
     "wechat_channels": "视频号",
     "kuaishou": "快手",
+    "free_graphic": "自由图文",
+    "free_video": "自由视频脚本",
 }
 
 
@@ -1671,6 +1673,50 @@ def rewrite_queue_item_draft(
         render_cloud_illustrations_for_items(config, [item])
     generate_preview_for_item(config, item)
     return {"status": "ok", "id": queue_id, "title": item.get("title", ""), "score": item.get("total_score", 0)}
+
+
+def create_free_content_item(
+    config: dict[str, Any],
+    idea: str,
+    content_type: str,
+    *,
+    render_images: bool = True,
+) -> dict[str, Any]:
+    idea = idea.strip()
+    if not idea:
+        raise ValueError("请输入想法/主题。")
+    date = now_local().strftime("%Y-%m-%d")
+    is_video = content_type == "video"
+    platform_cfg = {
+        "platform": "free_video" if is_video else "free_graphic",
+        "account_name": "自由内容-视频脚本" if is_video else "自由内容-图文",
+        "track": "free_content",
+        "publish_time": "",
+        "auto_publish": False,
+        "post_format": "short_video_script" if is_video else "graphic_post",
+    }
+    track_cfg = {
+        "description": (
+            "user-provided free content idea, generate high-quality Chinese social media content"
+        ),
+        "keywords": ["自由内容", "运营", "图文", "短视频"],
+        "system_prompt": (
+            "你是资深中文新媒体内容主编，擅长把用户给出的粗略想法扩展成可直接发布的图文或短视频脚本。"
+            "要求内容具体、有结构、有传播点，避免空泛。"
+        ),
+    }
+    topic = {
+        "title": idea[:80],
+        "description": idea,
+        "link": "",
+    }
+    item = build_queue_item(config, date, platform_cfg, track_cfg, "free_content", topic)
+    item["free_content"] = True
+    item["notes"] = "自由生成内容"
+    if render_images:
+        render_cloud_illustrations_for_items(config, [item])
+    generate_preview_for_item(config, item)
+    return item
 
 
 def build_video_script_text(item: dict[str, Any]) -> str:
@@ -3100,10 +3146,13 @@ body{{margin:0;background:#f3f5f9;color:#111827;font-family:-apple-system,BlinkM
 .stat b{{display:block;font-size:26px;margin-top:6px;}}
 .pill-row{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 18px;}}
 .pill{{background:#e0f2fe;color:#075985;border-radius:999px;padding:7px 10px;font-size:13px;}}
-.actions{{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;}}
-.actions a{{background:#2563eb;color:#fff;border-radius:10px;padding:10px 13px;text-decoration:none;}}
-.actions a.green{{background:#059669;}}
-.actions a.orange{{background:#f97316;}}
+.action-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:18px;}}
+.action-group{{background:#fff;border-radius:14px;padding:14px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
+.action-group h3{{margin:0 0 10px;font-size:15px;color:#334155;}}
+.action-group a{{display:inline-block;background:#2563eb;color:#fff;border-radius:10px;padding:9px 12px;text-decoration:none;margin:0 6px 8px 0;font-size:13px;}}
+.action-group a.green{{background:#059669;}}
+.action-group a.orange{{background:#f97316;}}
+.action-group a.purple{{background:#7c3aed;}}
 .card{{background:#fff;border-radius:14px;padding:16px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
 table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-bottom:1px solid #eef2f7;padding:10px;text-align:left;}} th{{background:#f8fafc;}}
 </style></head><body><div class="wrap">
@@ -3118,15 +3167,24 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 <div class="stat">最近更新<b style="font-size:16px;">{html.escape(latest_update or '-')}</b></div>
 </div>
 <div class="pill-row">{platform_stats}</div>
-<div class="actions">
-<a href="{dashboard_date}/accounts.html">进入账号工作台</a>
-<a class="orange" href="/health" target="_blank">状态检查</a>
-<a href="{dashboard_date}/index.html">查看全部候选</a>
-<a class="green" href="/export-selected?date={dashboard_date}" target="_blank">导出已选清单</a>
-<a class="green" href="{html.escape(bulk_all_url or f'/download-packs?date={dashboard_date}&status=all')}" target="_blank">下载今日全部素材包</a>
-<a class="green" href="{html.escape(bulk_selected_url)}" target="_blank">下载已选素材包</a>
-<a href="/daily-log" target="_blank">查看每日自动生成日志</a>
-<a href="/reminders" target="_blank">发布提醒记录</a>
+<div class="action-grid">
+  <div class="action-group"><h3>生成内容</h3>
+    <a href="{dashboard_date}/accounts.html">账号工作台</a>
+    <a class="purple" href="/free.html">自由生成内容</a>
+  </div>
+  <div class="action-group"><h3>发布处理</h3>
+    <a href="{dashboard_date}/index.html">查看全部候选</a>
+    <a href="/reminders" target="_blank">发布提醒记录</a>
+    <a class="green" href="/export-selected?date={dashboard_date}" target="_blank">导出已选清单</a>
+  </div>
+  <div class="action-group"><h3>素材下载</h3>
+    <a class="green" href="{html.escape(bulk_all_url or f'/download-packs?date={dashboard_date}&status=all')}" target="_blank">下载今日全部素材包</a>
+    <a class="green" href="{html.escape(bulk_selected_url)}" target="_blank">下载已选素材包</a>
+  </div>
+  <div class="action-group"><h3>系统状态</h3>
+    <a class="orange" href="/health" target="_blank">状态检查</a>
+    <a href="/daily-log" target="_blank">每日自动生成日志</a>
+  </div>
 </div>
 <div class="card"><h2>今日优先处理</h2><table><thead><tr><th>账号</th><th>平台</th><th>内容</th><th>状态</th><th>评分</th><th>更新时间</th><th>下一步</th></tr></thead><tbody>{''.join(priority_rows) or '<tr><td colspan="7">暂无待处理内容</td></tr>'}</tbody></table></div>
 <br />
@@ -3141,9 +3199,81 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
         build_bulk_asset_pack(config, queue, date=dashboard_date, status="all")
     except Exception as exc:  # pylint: disable=broad-except
         print(f"[WARN] build bulk asset pack failed: {exc}")
+    build_free_content_page(config)
     index_file = PREVIEW_DIR / "dashboard.html"
     index_file.write_text(dashboard_html, encoding="utf-8")
     return {"index_file": str(index_file), "index_url": build_preview_url(config, index_file)}
+
+
+def build_free_content_page(config: dict[str, Any]) -> dict[str, str]:
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    page_html = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>自由生成内容</title>
+<style>
+body{margin:0;background:#f3f5f9;color:#111827;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;}
+.wrap{max-width:920px;margin:0 auto;padding:24px;}
+.hero{background:linear-gradient(135deg,#581c87,#2563eb);color:#fff;border-radius:18px;padding:22px;margin-bottom:18px;}
+.card{background:#fff;border-radius:16px;padding:18px;box-shadow:0 6px 18px rgba(15,23,42,.08);}
+label{display:block;font-weight:700;margin:14px 0 6px;}
+textarea,select,input{width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:10px;padding:11px;font-size:15px;}
+textarea{min-height:150px;line-height:1.7;}
+.row{display:grid;grid-template-columns:1fr 160px;gap:12px;}
+button{border:0;background:#2563eb;color:#fff;border-radius:10px;padding:11px 15px;cursor:pointer;margin-top:14px;font-size:15px;}
+pre{display:none;white-space:pre-wrap;background:#0f172a;color:#dbeafe;border-radius:12px;padding:14px;max-height:420px;overflow:auto;}
+.hint{color:#64748b;font-size:13px;line-height:1.7;}
+a{color:#2563eb;text-decoration:none;}
+</style></head><body><div class="wrap">
+<div class="hero"><h1>自由生成内容</h1><p>输入你的想法，选择图文或视频脚本。系统会用 DeepSeek 生成内容，并用 DashScope 自动配图。</p></div>
+<div class="card">
+<label>你的想法/主题</label>
+<textarea id="idea" placeholder="例如：我想写一篇小红书，主题是周末带孩子去城市公园，重点是低预算、好拍照、避坑。"></textarea>
+<div class="row">
+  <div><label>内容类型</label><select id="content-type"><option value="graphic">图文内容（公众号/小红书）</option><option value="video">视频脚本（剪映素材）</option></select></div>
+  <div><label>配图</label><select id="render-images"><option value="1">生成配图</option><option value="0">先不配图</option></select></div>
+</div>
+<button onclick="generateFree()">开始生成</button>
+<p class="hint">生成完成后会返回预览链接。若不满意，进入内容页点击“重写文案”或“重写文案+配图”。</p>
+<pre id="log"></pre>
+</div></div>
+<script>
+async function generateFree(){
+  const idea = document.getElementById('idea').value.trim();
+  const type = document.getElementById('content-type').value;
+  const renderImages = document.getElementById('render-images').value;
+  const log = document.getElementById('log');
+  if (!idea){ alert('请先输入想法'); return; }
+  log.style.display='block'; log.textContent='正在创建自由生成任务...';
+  const params = new URLSearchParams({idea, type, render_images: renderImages});
+  try {
+    const resp = await fetch('/free-generate?' + params.toString());
+    const payload = await resp.json();
+    if (!resp.ok) throw new Error(payload.error || '创建任务失败');
+    await pollJob(payload.job_id, log);
+  } catch (err) {
+    log.textContent = '生成失败：' + err;
+  }
+}
+async function pollJob(jobId, log){
+  while (true) {
+    const resp = await fetch('/job-status?id=' + encodeURIComponent(jobId));
+    const payload = await resp.json();
+    log.textContent = (payload.lines || []).join('\\n');
+    if (payload.status === 'done') {
+      log.textContent += '\\n\\n生成完成，请打开上方日志中的预览链接。';
+      return;
+    }
+    if (payload.status === 'failed') {
+      log.textContent += '\\n\\n生成失败，请看上方错误。';
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1500));
+  }
+}
+</script></body></html>"""
+    page_file = PREVIEW_DIR / "free.html"
+    page_file.write_text(page_html, encoding="utf-8")
+    return {"index_file": str(page_file), "index_url": build_preview_url(config, page_file)}
 
 
 def list_preview_dates() -> list[str]:
@@ -4514,6 +4644,54 @@ def command_serve_review(args: argparse.Namespace) -> None:
         threading.Thread(target=runner, daemon=True).start()
         return job_id
 
+    def start_free_generation_job(idea: str, content_type: str, render_images: bool) -> str:
+        job_id = uuid.uuid4().hex[:10]
+        with jobs_lock:
+            jobs[job_id] = {
+                "status": "running",
+                "lines": [
+                    f"[START] 自由生成 类型={content_type} 配图={'是' if render_images else '否'}",
+                    f"[IDEA] {idea[:160]}",
+                    "[STEP] DeepSeek生成内容 -> DashScope配图 -> 重建预览/素材包",
+                ],
+                "created_at": now_local().isoformat(),
+            }
+
+        def runner() -> None:
+            writer = JobLogWriter(job_id)
+            try:
+                with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+                    config = load_config(Path(config_path))
+                    queue = load_queue()
+                    item = create_free_content_item(
+                        config,
+                        idea,
+                        content_type,
+                        render_images=render_images,
+                    )
+                    queue.append(item)
+                    date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+                    build_preview_index(config, [entry for entry in queue if entry.get("date") == date], date)
+                    build_accounts_index(config, queue, date)
+                    build_dashboard_index(config, queue, date)
+                    build_preview_portal(config)
+                    save_queue(queue)
+                    print(f"[OK] 自由内容已生成 -> {item.get('id')} {item.get('title')}")
+                    print(f"[OK] 预览链接: {item.get('preview_url')}")
+                    print(f"[OK] 素材包: {item.get('asset_pack_url')}")
+                writer.flush()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "done"
+                    jobs[job_id].setdefault("lines", []).append("[DONE] 生成完成")
+            except Exception as exc:  # pylint: disable=broad-except
+                writer.flush()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "failed"
+                    jobs[job_id].setdefault("lines", []).append(f"[ERROR] {exc}")
+
+        threading.Thread(target=runner, daemon=True).start()
+        return job_id
+
     class ReviewHandler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *handler_args: Any, **handler_kwargs: Any) -> None:
             super().__init__(*handler_args, directory=str(PREVIEW_DIR), **handler_kwargs)
@@ -4574,6 +4752,24 @@ def command_serve_review(args: argparse.Namespace) -> None:
                     payload = dict(jobs.get(job_id) or {"status": "missing", "lines": ["任务不存在或服务已重启"]})
                     payload["lines"] = list(payload.get("lines", []))[-120:]
                 self.send_response(200 if payload.get("status") != "missing" else 404)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+                return
+            if parsed.path == "/free-generate":
+                params = urllib.parse.parse_qs(parsed.query)
+                idea = (params.get("idea") or [""])[0]
+                content_type = (params.get("type") or ["graphic"])[0]
+                if content_type not in {"graphic", "video"}:
+                    content_type = "graphic"
+                render_images = (params.get("render_images") or ["1"])[0] not in {"0", "false", "False"}
+                try:
+                    job_id = start_free_generation_job(idea, content_type, render_images)
+                    payload = {"job_id": job_id, "status": "running"}
+                    self.send_response(200)
+                except Exception as exc:  # pylint: disable=broad-except
+                    payload = {"error": str(exc)}
+                    self.send_response(500)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
