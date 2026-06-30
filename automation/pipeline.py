@@ -3101,6 +3101,7 @@ body{{margin:0;background:#f3f5f9;color:#111827;font-family:-apple-system,BlinkM
 .actions{{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;}}
 .actions a{{background:#2563eb;color:#fff;border-radius:10px;padding:10px 13px;text-decoration:none;}}
 .actions a.green{{background:#059669;}}
+.actions a.orange{{background:#f97316;}}
 .card{{background:#fff;border-radius:14px;padding:16px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
 table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-bottom:1px solid #eef2f7;padding:10px;text-align:left;}} th{{background:#f8fafc;}}
 </style></head><body><div class="wrap">
@@ -3117,12 +3118,12 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 <div class="pill-row">{platform_stats}</div>
 <div class="actions">
 <a href="{dashboard_date}/accounts.html">进入账号工作台</a>
+<a class="orange" href="/health" target="_blank">状态检查</a>
 <a href="{dashboard_date}/index.html">查看全部候选</a>
 <a class="green" href="/export-selected?date={dashboard_date}" target="_blank">导出已选清单</a>
 <a class="green" href="{html.escape(bulk_all_url or f'/download-packs?date={dashboard_date}&status=all')}" target="_blank">下载今日全部素材包</a>
 <a class="green" href="{html.escape(bulk_selected_url)}" target="_blank">下载已选素材包</a>
 <a href="/daily-log" target="_blank">查看每日自动生成日志</a>
-<a href="/health" target="_blank">系统健康检查</a>
 </div>
 <div class="card"><h2>今日优先处理</h2><table><thead><tr><th>账号</th><th>平台</th><th>内容</th><th>状态</th><th>评分</th><th>更新时间</th><th>下一步</th></tr></thead><tbody>{''.join(priority_rows) or '<tr><td colspan="7">暂无待处理内容</td></tr>'}</tbody></table></div>
 <br />
