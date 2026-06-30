@@ -15,12 +15,16 @@ Capabilities:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import email.utils
 import html
+import http.server
+import io
 import json
 import os
 import re
+import shlex
 import shutil
 import smtplib
 import ssl
@@ -1185,6 +1189,8 @@ def filter_queue_items(
     *,
     item_id: str = "",
     date: str = "",
+    account: str = "",
+    platform: str = "",
     limit: int = 0,
     only_pending: bool = False,
     include_blocked: bool = False,
@@ -1195,6 +1201,21 @@ def filter_queue_items(
         return [item for item in filtered if item.get("id") == item_id]
     if date:
         filtered = [item for item in filtered if item.get("date") == date]
+    if account:
+        needle = account.strip().lower()
+        filtered = [
+            item
+            for item in filtered
+            if needle in str(item.get("account_name", "")).lower()
+            or needle in str(item.get("account_id", "")).lower()
+        ]
+    if platform:
+        needle = platform.strip().lower()
+        filtered = [
+            item
+            for item in filtered
+            if needle == str(item.get("platform", "")).strip().lower()
+        ]
     if only_pending:
         filtered = [
             item
@@ -1212,6 +1233,95 @@ def filter_queue_items(
     if limit > 0:
         return filtered[-limit:]
     return filtered
+
+
+def platform_account_id(platform_cfg: dict[str, Any]) -> str:
+    explicit = str(platform_cfg.get("account_id", "")).strip()
+    if explicit:
+        return explicit
+    raw = f"{platform_cfg.get('platform', '')}-{platform_cfg.get('account_name', '')}"
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", raw).strip("-").lower()
+    return slug or uuid.uuid4().hex[:8]
+
+
+def find_platform_configs(
+    config: dict[str, Any], account: str = "", platform: str = ""
+) -> list[dict[str, Any]]:
+    platforms = list(config.get("platforms", []))
+    account_needle = account.strip().lower()
+    platform_needle = platform.strip().lower()
+    if account_needle:
+        platforms = [
+            cfg
+            for cfg in platforms
+            if account_needle in str(cfg.get("account_name", "")).lower()
+            or account_needle in str(cfg.get("account_id", "")).lower()
+            or account_needle in platform_account_id(cfg).lower()
+        ]
+    if platform_needle:
+        platforms = [
+            cfg
+            for cfg in platforms
+            if platform_needle == str(cfg.get("platform", "")).strip().lower()
+        ]
+    return platforms
+
+
+def build_queue_item(
+    config: dict[str, Any],
+    date: str,
+    platform_cfg: dict[str, Any],
+    track_cfg: dict[str, Any],
+    track_name: str,
+    topic: dict[str, Any],
+) -> dict[str, Any]:
+    queue_id = uuid.uuid4().hex[:12]
+    draft = generate_draft(config, platform_cfg, track_cfg, topic)
+    quality = evaluate_draft_quality(config, platform_cfg, track_cfg, topic, draft)
+    output_dir = OUTBOX_DIR / date / platform_cfg["platform"]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / f"{queue_id}.md"
+    markdown = render_markdown(queue_id, platform_cfg, topic, draft, quality=quality)
+    output_file.write_text(markdown, encoding="utf-8")
+    return {
+        "id": queue_id,
+        "date": date,
+        "status": "pending_review",
+        "platform": platform_cfg["platform"],
+        "account_id": platform_account_id(platform_cfg),
+        "account_name": platform_cfg["account_name"],
+        "track": track_name,
+        "publish_time": platform_cfg.get("publish_time"),
+        "auto_publish": bool(platform_cfg.get("auto_publish", False)),
+        "post_format": platform_cfg.get("post_format", "generic"),
+        "title": draft.get("title", ""),
+        "hashtags": draft.get("hashtags", []),
+        "source_topic": topic.get("title"),
+        "source_link": topic.get("link"),
+        "content_file": str(output_file),
+        "hook_text": str(draft.get("hook", "")).strip(),
+        "body_markdown": str(draft.get("body_markdown", "")).strip(),
+        "cover_text": str(draft.get("cover_text", "")).strip(),
+        "body_preview": strip_markdown(str(draft.get("body_markdown", "")))[:320],
+        "content_markdown": markdown[:8000],
+        "sample_video_file": "",
+        "sample_video_url": "",
+        "sample_audio_file": "",
+        "created_at": now_local().isoformat(),
+        "updated_at": now_local().isoformat(),
+        "post_url": None,
+        "notes": "",
+        "hook_score": quality["hook_score"],
+        "structure_score": quality["structure_score"],
+        "platform_fit_score": quality["platform_fit_score"],
+        "commercial_score": quality["commercial_score"],
+        "compliance_score": quality["compliance_score"],
+        "total_score": quality["total_score"],
+        "quality_level": quality["quality_level"],
+        "quality_badge": quality["quality_badge"],
+        "publish_advice": quality["publish_advice"],
+        "quality_reason": quality["reason"],
+    }
 
 
 def build_video_script_text(item: dict[str, Any]) -> str:
@@ -1487,7 +1597,7 @@ def render_cloud_illustrations_for_items(
     image_cfg = config.get("cloud_media", {}).get("image", {})
     item_delay = float(image_cfg.get("item_delay_seconds", 1.5))
     for item in items:
-        if item.get("post_format") not in {"long_article", "graphic_post"}:
+        if item.get("post_format") not in {"long_article", "graphic_post", "short_video_script"}:
             continue
         try:
             result = render_cloud_illustrations_for_item(config, item)
@@ -1780,15 +1890,11 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
                 "</li>"
             )
         timeline_html = "\n".join(timeline_rows) if timeline_rows else "<li><span class='line'>暂无分镜</span></li>"
-        video_player = (
-            f"<div class='video-player'><video controls playsinline preload='metadata' src='{html.escape(sample_video_url)}'></video></div>"
-            if sample_video_url
-            else (
-                "<div class='video-missing'>暂未生成样片视频。本地 GPU 模式请执行 export-video-jobs，"
-                "在电脑上通过 ComfyUI worker 渲染后回传；服务器模式请执行 render-samples。</div>"
-                if local_gpu_enabled(config)
-                else "<div class='video-missing'>暂未生成样片视频，请先执行 render-samples。</div>"
-            )
+        narration_text = html.escape(strip_markdown(content.get("body_markdown", "")).strip())
+        image_hint = (
+            gallery_html
+            if gallery_html
+            else "<div class='video-missing'>暂未配图，请执行 render-illustrations。配图后可直接下载导入剪映。</div>"
         )
         content_card = (
             "<div class='phone video'>"
@@ -1796,10 +1902,14 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
             f"<div class='cover-text'>{cover_text or title}</div>"
             f"<div class='video-hook'>{hook_text}</div>"
             "</div>"
-            f"{video_player}"
-            "<div class='timeline'><h3>视频分镜时间轴（预演）</h3><ol>"
+            "<div class='timeline'><h3>剪映口播稿</h3>"
+            f"<div class='script-box'>{narration_text}</div>"
+            "<h3>分镜/画面节奏</h3><ol>"
             f"{timeline_html}"
-            "</ol></div></div>"
+            "</ol></div>"
+            f"{image_hint}"
+            "<div class='cover'>剪映使用：下载上方配图，按分镜顺序导入；口播稿可直接复制为字幕/配音文本。</div>"
+            "</div>"
         )
     else:
         content_card = (
@@ -1851,6 +1961,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .timeline h3 {{ margin: 14px 0 8px; font-size: 14px; }}
     .timeline ol {{ margin: 0; padding-left: 18px; }}
     .timeline li {{ margin: 8px 0; font-size: 13px; line-height: 1.6; }}
+    .script-box {{ white-space: pre-wrap; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; font-size: 13px; line-height: 1.7; }}
     .time {{ display: inline-block; width: 70px; color: #2563eb; font-weight: 600; }}
     .line {{ color: #1f2937; }}
     .ill-gallery {{ margin: 10px 0 12px; }}
@@ -1941,6 +2052,121 @@ a{{color:#2563eb;text-decoration:none;}}
     return {"index_file": str(index_file), "index_url": index_url}
 
 
+def build_accounts_index(
+    config: dict[str, Any], queue: list[dict[str, Any]], date: str = ""
+) -> dict[str, str]:
+    preview_cfg = config.get("preview", {})
+    if not preview_cfg.get("enabled", True):
+        return {"index_file": "", "index_url": ""}
+    platforms = config.get("platforms", [])
+    if date:
+        visible_items = [item for item in queue if item.get("date") == date]
+    else:
+        visible_items = list(queue)
+    latest_date = date or (max([str(item.get("date", "")) for item in visible_items] or [""]) or "")
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in visible_items:
+        grouped.setdefault(str(item.get("account_id") or item.get("account_name") or ""), []).append(item)
+
+    cards: list[str] = []
+    for platform_cfg in platforms:
+        account_id = platform_account_id(platform_cfg)
+        account_name = str(platform_cfg.get("account_name", "")).strip()
+        platform = str(platform_cfg.get("platform", "")).strip()
+        post_format = str(platform_cfg.get("post_format", "")).strip()
+        track = str(platform_cfg.get("track", "")).strip()
+        mode = "公众号/小红书完整图文" if post_format != "short_video_script" else "剪映图文素材包"
+        items = sorted(
+            grouped.get(account_id, [])
+            + [
+                item
+                for item in visible_items
+                if not item.get("account_id") and item.get("account_name") == account_name
+            ],
+            key=lambda item: str(item.get("created_at", "")),
+            reverse=True,
+        )
+        item_rows: list[str] = []
+        for item in items[:8]:
+            preview_file = Path(str(item.get("preview_file", "")).strip() or "#")
+            href = html.escape(preview_file.name) if preview_file != Path("#") else "#"
+            title = html.escape(str(item.get("title", "")).strip()[:64] or "未命名草稿")
+            badge = html.escape(str(item.get("quality_badge", "⚪")))
+            score = safe_int(item.get("total_score", 0), default=0)
+            ill_count = len(item.get("illustration_urls") or item.get("illustration_files") or [])
+            material = f"{ill_count} 张图" if ill_count else "待配图"
+            item_rows.append(
+                "<li>"
+                f"<a href='{href}' target='_blank' rel='noreferrer'>{title}</a>"
+                f"<span>{badge}{score}</span><span>{material}</span>"
+                "</li>"
+            )
+        if not item_rows:
+            item_rows.append("<li><span>暂无候选内容，先运行生成命令。</span></li>")
+        command = (
+            "cd /opt/fa && source /etc/profile.d/content_ops_env.sh && "
+            f"/opt/fa/.venv/bin/python automation/pipeline.py --config automation/config.json "
+            f"generate-account --account {shlex.quote(account_name)} --count 3 --sync-feishu"
+        )
+        cards.append(
+            "<section class='account-card'>"
+            f"<div class='account-head'><h2>{html.escape(account_name)}</h2><span>{html.escape(platform)}</span></div>"
+            f"<p class='position'>定位：{html.escape(track)} · {html.escape(mode)}</p>"
+            f"<button type='button' onclick=\"runGenerate(this)\" data-account=\"{html.escape(account_name)}\">点击生成3条</button> "
+            f"<button type='button' class='secondary' onclick=\"copyText(this)\" data-copy=\"{html.escape(command)}\">复制命令</button>"
+            "<pre class='run-log'></pre>"
+            "<ul class='items'>"
+            f"{''.join(item_rows)}"
+            "</ul></section>"
+        )
+    title_suffix = f"（{html.escape(latest_date)}）" if latest_date else ""
+    accounts_html = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>按账号生成内容{title_suffix}</title>
+<style>
+body{{margin:0;background:#f3f5f9;color:#111827;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;}}
+.wrap{{max-width:1160px;margin:0 auto;padding:24px;}}
+.hero{{background:linear-gradient(135deg,#111827,#1d4ed8);color:#fff;border-radius:18px;padding:22px;margin-bottom:18px;}}
+.hero h1{{margin:0 0 8px;font-size:24px;}} .hero p{{margin:0;opacity:.9;line-height:1.7;}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:16px;}}
+.account-card{{background:#fff;border-radius:16px;padding:16px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
+.account-head{{display:flex;align-items:center;justify-content:space-between;gap:12px;}}
+.account-head h2{{margin:0;font-size:19px;}} .account-head span{{font-size:12px;background:#eff6ff;color:#1d4ed8;border-radius:999px;padding:4px 9px;}}
+.position{{font-size:13px;color:#4b5563;line-height:1.6;}}
+button{{border:0;background:#2563eb;color:#fff;border-radius:9px;padding:8px 11px;cursor:pointer;margin-bottom:10px;}}
+button.secondary{{background:#64748b;}}
+.run-log{{display:none;white-space:pre-wrap;background:#0f172a;color:#dbeafe;border-radius:10px;padding:10px;font-size:12px;max-height:220px;overflow:auto;}}
+.items{{list-style:none;margin:0;padding:0;display:grid;gap:8px;}}
+.items li{{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;border-top:1px solid #eef2f7;padding-top:8px;font-size:13px;}}
+a{{color:#2563eb;text-decoration:none;}} .items span{{color:#6b7280;white-space:nowrap;}}
+</style>
+<script>
+function copyText(btn){{navigator.clipboard.writeText(btn.dataset.copy || '');btn.innerText='已复制命令';setTimeout(()=>btn.innerText='复制生成命令',1400);}}
+async function runGenerate(btn){{
+  const card = btn.closest('.account-card');
+  const log = card.querySelector('.run-log');
+  log.style.display='block'; log.textContent='正在生成，请等待...';
+  btn.disabled=true;
+  try {{
+    const resp = await fetch('/generate?count=3&sync_feishu=1&account=' + encodeURIComponent(btn.dataset.account || ''));
+    log.textContent = await resp.text();
+  }} catch (err) {{
+    log.textContent = '生成失败：' + err;
+  }} finally {{
+    btn.disabled=false;
+  }}
+}}
+</script></head><body><div class="wrap">
+<div class="hero"><h1>按账号生成/选择内容{title_suffix}</h1>
+<p>公众号和小红书输出可直接粘贴的完整图文；抖音/视频号/快手输出剪映可用的口播稿、分镜和配图素材，不再生成视频。</p></div>
+<div class="grid">{''.join(cards)}</div></div></body></html>"""
+    target_dir = PREVIEW_DIR / latest_date if latest_date else PREVIEW_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    index_file = target_dir / "accounts.html"
+    index_file.write_text(accounts_html, encoding="utf-8")
+    return {"index_file": str(index_file), "index_url": build_preview_url(config, index_file)}
+
+
 def list_preview_dates() -> list[str]:
     if not PREVIEW_DIR.exists():
         return []
@@ -1965,16 +2191,22 @@ def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
     links: list[str] = []
     for date in dates:
         date_index = PREVIEW_DIR / date / "index.html"
+        account_index = PREVIEW_DIR / date / "accounts.html"
         version = str(int(date_index.stat().st_mtime)) if date_index.exists() else "0"
+        account_version = str(int(account_index.stat().st_mtime)) if account_index.exists() else version
         links.append(
             (
                 f"<a class='date-link' href='{date}/index.html?v={version}' target='date-content-frame' "
                 f"onclick=\"document.getElementById('current-date').innerText='{date}';\">{date}</a>"
+                f"<a class='account-link' href='{date}/accounts.html?v={account_version}' target='date-content-frame' "
+                f"onclick=\"document.getElementById('current-date').innerText='{date} 按账号';\">按账号查看</a>"
             )
         )
 
     default_date = dates[0]
-    default_index = PREVIEW_DIR / default_date / "index.html"
+    default_index = PREVIEW_DIR / default_date / "accounts.html"
+    if not default_index.exists():
+        default_index = PREVIEW_DIR / default_date / "index.html"
     default_version = str(int(default_index.stat().st_mtime)) if default_index.exists() else "0"
     portal_html = f"""<!doctype html>
 <html lang="zh-CN">
@@ -2000,6 +2232,11 @@ def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
       margin-bottom: 6px; background: #f8fafc;
     }}
     .date-link:hover {{ background: #e8f1ff; color: #1d4ed8; }}
+    .account-link {{
+      display: block; padding: 7px 12px; border-radius: 8px; color: #1d4ed8; text-decoration: none;
+      margin: -2px 0 10px 10px; background: #eff6ff; font-size: 13px;
+    }}
+    .account-link:hover {{ background: #dbeafe; }}
     .content {{
       padding: 16px;
     }}
@@ -2025,7 +2262,7 @@ def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
       <div class="header">
         <h1>当前日期：<span id="current-date">{default_date}</span></h1>
       </div>
-      <iframe name="date-content-frame" src="{default_date}/index.html?v={default_version}"></iframe>
+      <iframe name="date-content-frame" src="{default_date}/{default_index.name}?v={default_version}"></iframe>
     </main>
   </div>
 </body>
@@ -2710,64 +2947,17 @@ def command_plan_day(args: argparse.Namespace) -> None:
         selection_index[track_name] = idx + 1
         topic = topics[idx]
 
-        queue_id = uuid.uuid4().hex[:12]
-        draft = generate_draft(config, platform_cfg, tracks[track_name], topic)
-        quality = evaluate_draft_quality(config, platform_cfg, tracks[track_name], topic, draft)
-        output_dir = OUTBOX_DIR / date / platform_cfg["platform"]
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_file = output_dir / f"{queue_id}.md"
-        output_file.write_text(
-            render_markdown(queue_id, platform_cfg, topic, draft, quality=quality), encoding="utf-8"
+        queue_item = build_queue_item(
+            config, date, platform_cfg, tracks[track_name], track_name, topic
         )
-
-        queue_item = {
-            "id": queue_id,
-            "date": date,
-            "status": "pending_review",
-            "platform": platform_cfg["platform"],
-            "account_name": platform_cfg["account_name"],
-            "track": track_name,
-            "publish_time": platform_cfg.get("publish_time"),
-            "auto_publish": bool(platform_cfg.get("auto_publish", False)),
-            "post_format": platform_cfg.get("post_format", "generic"),
-            "title": draft.get("title", ""),
-            "hashtags": draft.get("hashtags", []),
-            "source_topic": topic.get("title"),
-            "source_link": topic.get("link"),
-            "content_file": str(output_file),
-            "hook_text": str(draft.get("hook", "")).strip(),
-            "body_markdown": str(draft.get("body_markdown", "")).strip(),
-            "cover_text": str(draft.get("cover_text", "")).strip(),
-            "body_preview": strip_markdown(str(draft.get("body_markdown", "")))[:320],
-            "content_markdown": render_markdown(
-                queue_id, platform_cfg, topic, draft, quality=quality
-            )[:8000],
-            "sample_video_file": "",
-            "sample_video_url": "",
-            "sample_audio_file": "",
-            "created_at": now_local().isoformat(),
-            "updated_at": now_local().isoformat(),
-            "post_url": None,
-            "notes": "",
-            "hook_score": quality["hook_score"],
-            "structure_score": quality["structure_score"],
-            "platform_fit_score": quality["platform_fit_score"],
-            "commercial_score": quality["commercial_score"],
-            "compliance_score": quality["compliance_score"],
-            "total_score": quality["total_score"],
-            "quality_level": quality["quality_level"],
-            "quality_badge": quality["quality_badge"],
-            "publish_advice": quality["publish_advice"],
-            "quality_reason": quality["reason"],
-        }
         generate_preview_for_item(config, queue_item)
         queue.append(queue_item)
         newly_created_items.append(queue_item)
         new_items += 1
         print(
             (
-                f"[OK] queued {platform_cfg['platform']} -> {queue_id} "
-                f"{quality['quality_badge']}{quality['total_score']} "
+                f"[OK] queued {platform_cfg['platform']} -> {queue_item['id']} "
+                f"{queue_item['quality_badge']}{queue_item['total_score']} "
                 f"({queue_item['title'][:38]})"
             )
         )
@@ -2783,6 +2973,11 @@ def command_plan_day(args: argparse.Namespace) -> None:
         print(f"[OK] Preview index: {preview_index['index_file']}")
         if preview_index["index_url"]:
             print(f"[OK] Preview URL: {preview_index['index_url']}")
+    accounts_index = build_accounts_index(config, queue, date)
+    if accounts_index["index_file"]:
+        print(f"[OK] Accounts index: {accounts_index['index_file']}")
+        if accounts_index["index_url"]:
+            print(f"[OK] Accounts URL: {accounts_index['index_url']}")
     preview_portal = build_preview_portal(config)
     if preview_portal["portal_file"]:
         print(f"[OK] Preview portal: {preview_portal['portal_file']}")
@@ -2990,6 +3185,159 @@ def command_notify(args: argparse.Namespace) -> None:
     run_notify(config, queue)
 
 
+def command_reset_generated(args: argparse.Namespace) -> None:
+    if not bool(args.yes):
+        raise ValueError("Refusing to clear generated data without --yes")
+    for path in [DATA_DIR, OUTBOX_DIR, PREVIEW_DIR, VIDEO_JOBS_DIR]:
+        if path.exists():
+            shutil.rmtree(path)
+            print(f"[OK] removed {path}")
+    if QUEUE_FILE.exists():
+        QUEUE_FILE.unlink()
+        print(f"[OK] removed {QUEUE_FILE}")
+    ensure_dirs()
+    save_queue([])
+    print("[DONE] Generated data cleared. Config and Feishu mapping were preserved.")
+
+
+def command_generate_account(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    date = str(args.date or now_local().strftime("%Y-%m-%d"))
+    count = max(1, int(args.count))
+    platforms = find_platform_configs(
+        config,
+        account=str(args.account or "").strip(),
+        platform=str(args.platform or "").strip(),
+    )
+    if not platforms:
+        raise ValueError("No account matched. Use --account with account name or --platform.")
+    tracks: dict[str, Any] = config.get("tracks", {})
+    if not tracks:
+        raise ValueError("Config missing tracks.")
+
+    per_track_limit = max(count * len(platforms), int(config.get("generation", {}).get("topics_per_track", 6)))
+    track_topics: dict[str, list[dict[str, Any]]] = {}
+    for platform_cfg in platforms:
+        track_name = str(platform_cfg.get("track", "")).strip()
+        if track_name in track_topics:
+            continue
+        track_cfg = tracks.get(track_name)
+        if not track_cfg:
+            print(f"[WARN] missing track config: {track_name}")
+            continue
+        topics = collect_track_topics(track_name, track_cfg, per_track_limit)
+        track_topics[track_name] = topics
+        save_json(DATA_DIR / date / f"topics_{track_name}.json", topics)
+        print(f"[INFO] {track_name}: collected {len(topics)} topics")
+
+    queue = load_queue()
+    created_items: list[dict[str, Any]] = []
+    for platform_cfg in platforms:
+        track_name = str(platform_cfg.get("track", "")).strip()
+        track_cfg = tracks.get(track_name, {})
+        topics = track_topics.get(track_name, [])
+        if not topics:
+            print(f"[WARN] no topics for {platform_cfg.get('account_name')} ({track_name})")
+            continue
+        for idx in range(count):
+            topic = topics[idx % len(topics)]
+            item = build_queue_item(config, date, platform_cfg, track_cfg, track_name, topic)
+            queue.append(item)
+            created_items.append(item)
+            print(
+                f"[OK] generated {item['account_name']} -> {item['id']} "
+                f"{item['quality_badge']}{item['total_score']} {item['title'][:42]}"
+            )
+
+    if not created_items:
+        print("[DONE] No content generated.")
+        return
+
+    guard_result = apply_quality_guard(config, queue)
+    if guard_result["changed"]:
+        print(f"[INFO] Quality guard auto-blocked {len(guard_result['blocked_items'])} item(s).")
+
+    cloud_cfg = config.get("cloud_media", {})
+    image_cfg = cloud_cfg.get("image", {})
+    if bool(args.render_images) and cloud_cfg.get("enabled", False) and image_cfg.get("enabled", False):
+        image_results = render_cloud_illustrations_for_items(config, created_items)
+        ok_count = len([x for x in image_results if x.get("status") == "ok"])
+        print(f"[OK] illustrations ready: {ok_count}/{len(created_items)}")
+
+    for item in created_items:
+        generate_preview_for_item(config, item)
+
+    date_items = [item for item in queue if item.get("date") == date]
+    preview_index = build_preview_index(config, date_items, date)
+    accounts_index = build_accounts_index(config, queue, date)
+    preview_portal = build_preview_portal(config)
+    save_queue(queue)
+
+    print(f"[OK] preview index: {preview_index.get('index_url') or preview_index.get('index_file')}")
+    print(f"[OK] accounts page: {accounts_index.get('index_url') or accounts_index.get('index_file')}")
+    if preview_portal.get("portal_url"):
+        print(f"[OK] preview portal: {preview_portal['portal_url']}")
+    print(f"[DONE] Generated {len(created_items)} item(s).")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_serve_review(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config_path = str(args.config)
+    host = str(args.host)
+    port = int(args.port)
+
+    class ReviewHandler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *handler_args: Any, **handler_kwargs: Any) -> None:
+            super().__init__(*handler_args, directory=str(PREVIEW_DIR), **handler_kwargs)
+
+        def end_headers(self) -> None:
+            self.send_header("Cache-Control", "no-store")
+            super().end_headers()
+
+        def do_GET(self) -> None:  # noqa: N802 - stdlib API
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/generate":
+                params = urllib.parse.parse_qs(parsed.query)
+                account = (params.get("account") or [""])[0]
+                platform = (params.get("platform") or [""])[0]
+                count = safe_int((params.get("count") or ["3"])[0], default=3)
+                sync_feishu = (params.get("sync_feishu") or ["1"])[0] not in {"0", "false", "False"}
+                buffer = io.StringIO()
+                status = 200
+                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                    try:
+                        command_generate_account(
+                            argparse.Namespace(
+                                config=config_path,
+                                account=account,
+                                platform=platform,
+                                date=None,
+                                count=count,
+                                render_images=True,
+                                sync_feishu=sync_feishu,
+                            )
+                        )
+                    except Exception as exc:  # pylint: disable=broad-except
+                        status = 500
+                        print(f"[ERROR] {exc}")
+                payload = buffer.getvalue()
+                self.send_response(status)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(payload.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/":
+                self.path = "/index.html"
+            return super().do_GET()
+
+    server = http.server.ThreadingHTTPServer((host, port), ReviewHandler)
+    print(f"[OK] Review server running: http://{host}:{port}")
+    server.serve_forever()
+
+
 def command_preview(args: argparse.Namespace) -> None:
     ensure_dirs()
     config = load_config(Path(args.config))
@@ -3002,6 +3350,8 @@ def command_preview(args: argparse.Namespace) -> None:
         queue,
         item_id=str(args.id or "").strip(),
         date=str(args.date or "").strip(),
+        account=str(getattr(args, "account", "") or "").strip(),
+        platform=str(getattr(args, "platform", "") or "").strip(),
         limit=int(args.limit),
     )
     if not selected:
@@ -3019,6 +3369,8 @@ def command_preview(args: argparse.Namespace) -> None:
         print(f"[OK] preview index ({item_date}): {preview_index['index_file']}")
         if preview_index["index_url"]:
             print(f"[OK] preview url ({item_date}): {preview_index['index_url']}")
+        accounts_index = build_accounts_index(config, queue, item_date)
+        print(f"[OK] accounts index ({item_date}): {accounts_index['index_file']}")
 
     preview_portal = build_preview_portal(config)
     if preview_portal["portal_file"]:
@@ -3077,6 +3429,8 @@ def command_render_illustrations(args: argparse.Namespace) -> None:
         queue,
         item_id=str(args.id or "").strip(),
         date=str(args.date or "").strip(),
+        account=str(getattr(args, "account", "") or "").strip(),
+        platform=str(getattr(args, "platform", "") or "").strip(),
         limit=int(args.limit),
         only_pending=bool(args.only_pending),
         include_blocked=bool(args.include_blocked),
@@ -3085,8 +3439,15 @@ def command_render_illustrations(args: argparse.Namespace) -> None:
         print("No queue items matched render-illustrations filters.")
         return
     results = render_cloud_illustrations_for_items(config, selected)
+    grouped_by_date: dict[str, list[dict[str, Any]]] = {}
     for item in selected:
         generate_preview_for_item(config, item)
+        item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+        grouped_by_date.setdefault(item_date, []).append(item)
+    for item_date, items in grouped_by_date.items():
+        build_preview_index(config, [item for item in queue if item.get("date") == item_date], item_date)
+        build_accounts_index(config, queue, item_date)
+    build_preview_portal(config)
     save_queue(queue)
     ok_count = len([x for x in results if x.get("status") == "ok"])
     print(f"[DONE] Cloud illustration render complete. success={ok_count}")
@@ -3282,9 +3643,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_notify = sub.add_parser("notify", help="Send queue summary to notification channels")
     p_notify.set_defaults(func=command_notify)
 
+    p_reset = sub.add_parser("reset-generated", help="Clear generated queue/outbox/preview data")
+    p_reset.add_argument("--yes", action="store_true", help="Required confirmation")
+    p_reset.set_defaults(func=command_reset_generated)
+
+    p_gen_account = sub.add_parser(
+        "generate-account",
+        help="Generate several candidate posts for one account and render images",
+    )
+    p_gen_account.add_argument("--account", default="", help="Account name or account id")
+    p_gen_account.add_argument("--platform", default="", help="Optional exact platform filter")
+    p_gen_account.add_argument("--date", default=None, help="Date in YYYY-MM-DD")
+    p_gen_account.add_argument("--count", type=int, default=3, help="How many candidates per account")
+    p_gen_account.add_argument(
+        "--no-render-images", dest="render_images", action="store_false", help="Skip DashScope images"
+    )
+    p_gen_account.add_argument(
+        "--sync-feishu", action="store_true", help="Sync generated items to Feishu Bitable"
+    )
+    p_gen_account.set_defaults(func=command_generate_account, render_images=True)
+
+    p_serve = sub.add_parser("serve-review", help="Serve preview UI with click-to-generate endpoint")
+    p_serve.add_argument("--host", default="0.0.0.0", help="Bind host")
+    p_serve.add_argument("--port", type=int, default=8787, help="Bind port")
+    p_serve.set_defaults(func=command_serve_review)
+
     p_preview = sub.add_parser("preview", help="Generate visual preview HTML pages")
     p_preview.add_argument("--id", default="", help="Queue item ID")
     p_preview.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_preview.add_argument("--account", default="", help="Account filter")
+    p_preview.add_argument("--platform", default="", help="Exact platform filter")
     p_preview.add_argument("--limit", type=int, default=10, help="How many recent items")
     p_preview.add_argument(
         "--sync-feishu", action="store_true", help="Sync preview fields to Feishu Bitable"
@@ -3312,6 +3700,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ill.add_argument("--id", default="", help="Queue item ID")
     p_ill.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_ill.add_argument("--account", default="", help="Account filter")
+    p_ill.add_argument("--platform", default="", help="Exact platform filter")
     p_ill.add_argument("--limit", type=int, default=10, help="How many recent items")
     p_ill.add_argument(
         "--only-pending", action="store_true", help="Only process pending/approved items"

@@ -63,6 +63,12 @@ from pathlib import Path
 
 path = Path("automation/config.json")
 data = json.loads(path.read_text(encoding="utf-8"))
+llm = data.setdefault("llm", {})
+llm["enabled"] = True
+llm["provider"] = "openai-compatible"
+llm["api_key_env"] = "DEEPSEEK_API_KEY"
+llm["base_url"] = "https://api.deepseek.com/chat/completions"
+llm["model"] = "deepseek-chat"
 sample = data.setdefault("sample_video", {})
 sample["enabled"] = True
 sample["tts_engine"] = "edge-tts"
