@@ -2054,6 +2054,15 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     if not isinstance(illustration_urls, list):
         illustration_urls = []
     body_html = markdown_to_html_with_inline_images(content.get("body_markdown", ""), illustration_urls)
+    rich_publish_html = (
+        "<article class='rich-article'>"
+        f"<h1>{title}</h1>"
+        f"<p class='rich-hook'>{hook_text}</p>"
+        f"{body_html}"
+        f"<p class='rich-cover'>封面文案：{cover_text}</p>"
+        f"<p class='rich-tags'>{html.escape(hashtag_line)}</p>"
+        "</article>"
+    )
     copy_panel = (
         "<div class='copy-panel'>"
         "<h3>发布素材复制区</h3>"
@@ -2061,6 +2070,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         f"<button type='button' data-copy-target='copy-title-{queue_id}' onclick='copyTarget(this)'>复制标题</button>"
         f"<button type='button' data-copy-target='copy-body-{queue_id}' onclick='copyTarget(this)'>复制正文</button>"
         f"<button type='button' data-copy-target='copy-full-{queue_id}' onclick='copyTarget(this)'>复制完整发布文案</button>"
+        f"<button type='button' data-rich-target='rich-copy-{queue_id}' onclick='copyRichTarget(this)'>复制公众号图文（含图片）</button>"
         f"<button type='button' data-copy-target='copy-capcut-{queue_id}' onclick='copyTarget(this)'>复制剪映口播稿</button>"
         f"<a class='download-pack' href='{html.escape(asset_pack_url)}' target='_blank' rel='noreferrer'>下载素材包</a>"
         "</div>"
@@ -2076,6 +2086,10 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         f"<textarea id='copy-body-{queue_id}'>{html.escape(raw_body)}</textarea>"
         f"<textarea id='copy-full-{queue_id}'>{html.escape(publish_text)}</textarea>"
         f"<textarea id='copy-capcut-{queue_id}'>{html.escape(capcut_text)}</textarea>"
+        "<details class='rich-copy-details'>"
+        "<summary>公众号富文本复制区（按钮失败时，展开后框选整块 Ctrl+C）</summary>"
+        f"<div id='rich-copy-{queue_id}' class='rich-copy-area' contenteditable='true'>{rich_publish_html}</div>"
+        "</details>"
         "</div>"
     )
     gallery_html = ""
@@ -2171,6 +2185,13 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .status-actions button.secondary {{ background:#475569; }}
     .status-result {{ color:#64748b; font-size:12px; }}
     .copy-panel textarea {{ position:absolute; left:-9999px; top:-9999px; }}
+    .rich-copy-details {{ margin-top: 10px; color:#475569; font-size:13px; }}
+    .rich-copy-area {{ margin-top:8px; background:#fff; border:1px dashed #94a3b8; border-radius:10px; padding:14px; color:#111827; }}
+    .rich-copy-area h1 {{ font-size:22px; line-height:1.45; }}
+    .rich-copy-area p, .rich-copy-area li {{ font-size:15px; line-height:1.8; }}
+    .rich-copy-area img {{ max-width:100%; border-radius:8px; margin:8px 0; }}
+    .rich-hook {{ background:#eff6ff; border-left:3px solid #3b82f6; padding:8px 10px; }}
+    .rich-cover, .rich-tags {{ color:#64748b; }}
     .article h1 {{ font-size: 21px; line-height: 1.4; margin: 0 0 12px; }}
     .hook {{ background: #eff6ff; border-left: 3px solid #3b82f6; padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }}
     .body p, .body li {{ font-size: 14px; line-height: 1.75; }}
@@ -2237,6 +2258,39 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         alert(err.message || err);
       }}
       setTimeout(() => btn.innerText = old, 1600);
+    }}
+    async function copyRichTarget(btn) {{
+      const el = document.getElementById(btn.dataset.richTarget);
+      if (!el) return;
+      const old = btn.innerText;
+      try {{
+        const html = el.innerHTML;
+        const text = el.innerText || el.textContent || '';
+        if (navigator.clipboard && window.ClipboardItem && window.isSecureContext) {{
+          await navigator.clipboard.write([
+            new ClipboardItem({{
+              'text/html': new Blob([html], {{type: 'text/html'}}),
+              'text/plain': new Blob([text], {{type: 'text/plain'}})
+            }})
+          ]);
+        }} else {{
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          const selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+          const ok = document.execCommand('copy');
+          selection.removeAllRanges();
+          if (!ok) throw new Error('浏览器阻止富文本复制，请展开下方富文本复制区，手动框选 Ctrl+C');
+        }}
+        btn.innerText = '图文已复制';
+      }} catch (err) {{
+        btn.innerText = '复制失败';
+        const details = el.closest('details');
+        if (details) details.open = true;
+        alert((err && err.message) || '复制失败，请展开富文本复制区手动复制');
+      }}
+      setTimeout(() => btn.innerText = old, 1800);
     }}
     async function setStatus(id, status, btn) {{
       const box = btn.closest('.status-actions').querySelector('.status-result');
