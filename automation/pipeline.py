@@ -1731,6 +1731,16 @@ def build_bulk_asset_pack(
     bulk_dir.mkdir(parents=True, exist_ok=True)
     suffix = "selected" if status == "selected" else status or "all"
     bulk_file = bulk_dir / f"{target_date}_{sanitize_filename_part(suffix, 20)}_asset_packs.zip"
+    newest_item_update = max(
+        [
+            str(item.get("updated_at") or item.get("created_at") or "")
+            for item in selected
+        ]
+        or [""]
+    )
+    marker_file = bulk_dir / f"{bulk_file.stem}.meta"
+    if bulk_file.exists() and marker_file.exists() and marker_file.read_text(encoding="utf-8") == newest_item_update:
+        return {"bulk_pack_file": str(bulk_file), "bulk_pack_url": build_preview_url(config, bulk_file)}
     with zipfile.ZipFile(bulk_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         manifest_lines = [f"# 批量素材包 {target_date}", ""]
         for item in selected:
@@ -1751,6 +1761,7 @@ def build_bulk_asset_pack(
             if pack_path.exists():
                 zf.write(pack_path, f"{folder}/{pack_path.name}")
         zf.writestr("README.md", "\n".join(manifest_lines))
+    marker_file.write_text(newest_item_update, encoding="utf-8")
     return {"bulk_pack_file": str(bulk_file), "bulk_pack_url": build_preview_url(config, bulk_file)}
 
 
@@ -2939,6 +2950,10 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 <div class="card"><h2>账号概览</h2><table><thead><tr><th>账号</th><th>平台</th><th>发布时间</th><th>内容形式</th><th>候选</th><th>已选</th><th>最高分</th><th>更新时间</th></tr></thead><tbody>{''.join(account_rows)}</tbody></table></div>
 </div></body></html>"""
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        build_bulk_asset_pack(config, queue, date=dashboard_date, status="all")
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] build bulk asset pack failed: {exc}")
     index_file = PREVIEW_DIR / "dashboard.html"
     index_file.write_text(dashboard_html, encoding="utf-8")
     return {"index_file": str(index_file), "index_url": build_preview_url(config, index_file)}
