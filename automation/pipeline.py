@@ -154,7 +154,7 @@ def ensure_config_file(path: Path) -> None:
     raise FileNotFoundError(
         f"Config not found: {path}\n"
         "Run: curl -fsSL https://raw.githubusercontent.com/bill33942008/fa/"
-        "cursor/multi-platform-auto-ops-2a43/automation/bootstrap_server.sh | bash"
+        "refs/heads/cursor/multi-platform-auto-ops-2a43/automation/bootstrap_server.sh | bash"
     )
 
 

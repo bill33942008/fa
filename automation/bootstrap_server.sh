@@ -4,7 +4,7 @@ set -euo pipefail
 
 FA_ROOT="${FA_ROOT:-/opt/fa}"
 BRANCH="${BRANCH:-cursor/multi-platform-auto-ops-2a43}"
-RAW_BASE="https://raw.githubusercontent.com/bill33942008/fa/${BRANCH}"
+RAW_BASE="https://raw.githubusercontent.com/bill33942008/fa/refs/heads/${BRANCH}"
 ILLUSTRATION_ID="${ILLUSTRATION_ID:-99d3165d18a2}"
 BOOTSTRAP_VERSION="4"
 TARGET_SCRIPT="$FA_ROOT/automation/bootstrap_server.sh"
