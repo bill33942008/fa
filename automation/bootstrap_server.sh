@@ -69,6 +69,7 @@ llm["provider"] = "openai-compatible"
 llm["api_key_env"] = "DEEPSEEK_API_KEY"
 llm["base_url"] = "https://api.deepseek.com/chat/completions"
 llm["model"] = "deepseek-chat"
+llm["max_tokens"] = 2600
 sample = data.setdefault("sample_video", {})
 sample["enabled"] = True
 sample["tts_engine"] = "edge-tts"

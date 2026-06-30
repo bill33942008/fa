@@ -617,27 +617,56 @@ def fallback_draft(
     description = topic.get("description", "无摘要，建议补充自己的观察。")
     keywords = track.get("keywords", [])[:5]
     hashtags = [f"#{k}" for k in keywords]
-    body = textwrap.dedent(
-        f"""
-        ## 选题来源
-        - 标题：{title}
-        - 链接：{topic_link}
+    if platform.get("post_format") == "short_video_script":
+        body = textwrap.dedent(
+            f"""
+            ## 口播稿
+            先用一个具体冲突开场：为什么“{title}”值得今天讲？用普通人能听懂的话解释背景，再给出 2-3 个关键观点，最后用一个提问收尾，引导评论。
 
-        ## 内容主旨
-        围绕以上选题，结合账号定位给出可执行观点，避免空泛结论。
+            ## 分镜脚本
+            | 镜头 | 时间 | 画面/场景 | 镜头运动 | 字幕 | 配图提示 |
+            | --- | --- | --- | --- | --- | --- |
+            | 1 | 0-3秒 | 标题相关的强视觉画面，制造悬念 | 快速推进 | 先抛出反常识问题 | 主视觉图，突出冲突 |
+            | 2 | 3-8秒 | 展示事件背景或人物/地点 | 平移或轻推 | 交代事情发生了什么 | 新闻场景/数据图 |
+            | 3 | 8-15秒 | 展示第一个关键观点 | 切近景 | 观点一：说清原因 | 对应观点插图 |
+            | 4 | 15-25秒 | 展示第二个关键观点 | 切换节奏 | 观点二：给出影响 | 对应影响插图 |
+            | 5 | 25-35秒 | 总结和互动 | 定格或慢推 | 你怎么看？评论区聊聊 | 总结型封面图 |
 
-        ## 结构建议
-        1. 3秒钩子/开头冲突
-        2. 关键观点（2-3条）
-        3. 行动建议或结尾互动
+            ## 剪映制作提示
+            - 节奏：前 3 秒必须有强字幕，后面每 4-6 秒换一张图。
+            - 字幕：用短句，不要整段堆字。
+            - 配乐：选择轻快但不抢口播的背景音乐。
 
-        ## 参考摘要
-        {description}
-        """
-    ).strip()
+            ## 参考资料
+            - 标题：{title}
+            - 链接：{topic_link}
+            - 摘要：{description}
+            """
+        ).strip()
+    else:
+        body = textwrap.dedent(
+            f"""
+            ## 开头
+            这件事的重点不是“{title}”本身，而是它背后和读者有关的变化。先用一句具体场景把读者带进去，再说明为什么值得收藏/转发。
+
+            ## 核心内容
+            1. 先讲清楚发生了什么：{description}
+            2. 再解释它为什么重要：结合账号定位，给出可理解的背景和判断。
+            3. 最后给读者可执行建议：去哪看、怎么选、怎么避坑、怎么行动。
+
+            ## 发布建议
+            - 配图 1：开头场景图
+            - 配图 2：核心观点图
+            - 配图 3：总结/清单图
+
+            ## 参考来源
+            - 标题：{title}
+            - 链接：{topic_link}
+            """
+        ).strip()
     return {
         "title": f"{platform['account_name']} | {title}",
-        "hook": "用一个反常识观点开场，提升完播和阅读意愿。",
+        "hook": "先用具体场景或反常识问题开场，让读者知道这条内容和自己有关。",
         "body_markdown": body,
         "cover_text": f"{platform['account_name']} 今日内容",
         "hashtags": hashtags,
@@ -653,9 +682,52 @@ def generate_draft(
     system_prompt = track_cfg.get(
         "system_prompt", "你是内容运营编辑，输出可发布草稿。"
     )
+    post_format = platform_cfg.get("post_format", "generic")
+    if post_format == "short_video_script":
+        format_requirements = textwrap.dedent(
+            """
+            这是给抖音/视频号/快手导入剪映用的素材脚本，必须输出足够细的分镜，不要只写泛泛口播。
+            body_markdown 必须包含这些小节：
+            1. `## 口播稿`：30-60秒口播，开头3秒有强钩子，句子短，适合直接配音。
+            2. `## 分镜脚本`：Markdown 表格，列必须包含：镜头、时间、画面/场景、镜头运动、字幕、配图提示。
+               - 至少 6 个镜头。
+               - 每个镜头都要写清楚画面元素、人物/地点/物件、情绪、镜头运动。
+               - 字幕要短，适合剪映显示。
+               - 配图提示要能直接用于生成插图。
+            3. `## 剪映制作提示`：写明图片顺序、转场、字幕样式、BGM/节奏。
+            4. `## 发布文案`：短视频发布时可直接粘贴的标题文案和互动问题。
+            """
+        ).strip()
+    elif post_format == "graphic_post":
+        format_requirements = textwrap.dedent(
+            """
+            这是给小红书发布的图文笔记，必须像真实笔记，不要写成新闻稿。
+            body_markdown 要求：
+            - 600-1000字，口语化但信息密度高。
+            - 开头给出强场景/痛点，前80字就说明为什么值得收藏。
+            - 至少包含 4 个小标题，结构清楚。
+            - 给出路线/清单/预算/避坑/步骤等可执行信息（按赛道选择）。
+            - 文末要有收藏、评论或提问引导。
+            - 明确写出 3 张配图应该放在哪些段落附近。
+            """
+        ).strip()
+    elif post_format == "long_article":
+        format_requirements = textwrap.dedent(
+            """
+            这是给微信公众号的长图文，必须像可直接发布的成稿。
+            body_markdown 要求：
+            - 900-1500字，观点清晰，有信息增量，不要空泛。
+            - 结构：开头冲突/背景 -> 3-5个小标题分论点 -> 总结/互动。
+            - 每个分论点要有具体事实、判断和读者价值。
+            - 如果涉及足球竞彩，必须理性分析，不承诺收益，不诱导下注。
+            - 明确写出 3 张配图应该放在哪些段落附近。
+            """
+        ).strip()
+    else:
+        format_requirements = "生成可直接发布的中文内容，结构清晰，避免空话。"
     user_prompt = textwrap.dedent(
         f"""
-        请根据以下信息生成一个可发布草稿，并且仅输出 JSON 对象：
+        请根据以下信息生成一个高质量、可直接发布的草稿，并且仅输出 JSON 对象，不要输出 Markdown 代码块：
         {{
           "title": "标题",
           "hook": "开头钩子",
@@ -664,9 +736,20 @@ def generate_draft(
           "hashtags": ["#标签1", "#标签2"]
         }}
 
+        通用质量要求：
+        - 标题要具体，有传播点，不要标题党。
+        - hook 要能放在正文/视频开头直接使用。
+        - 内容必须贴合账号定位和平台语气。
+        - 不要出现“作为AI”“以下是”等提示词痕迹。
+        - 不要只复述新闻，要提炼判断、清单、避坑或可执行建议。
+        - 如果信息不足，合理标注“建议发布前核实”，不要编造具体数据。
+
+        内容形式专项要求：
+        {format_requirements}
+
         账号名: {platform_cfg["account_name"]}
         平台: {platform_cfg["platform"]}
-        内容格式: {platform_cfg.get("post_format", "generic")}
+        内容格式: {post_format}
         发布时段: {platform_cfg.get("publish_time", "20:00")}
         赛道定位: {track_cfg.get("description", "")}
 
