@@ -1229,6 +1229,17 @@ def cache_bust_token(item: dict[str, Any]) -> str:
     return token or str(safe_int(item.get("total_score", 0), default=0))
 
 
+def display_datetime(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = dt.datetime.fromisoformat(raw)
+        return parsed.strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return raw[:16]
+
+
 def split_video_segments(body_markdown: str, limit: int = 8) -> list[str]:
     plain = strip_markdown(body_markdown)
     chunks = [segment.strip() for segment in re.split(r"[。！？!?;\n]+", plain) if segment.strip()]
@@ -2061,12 +2072,13 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     advice = html.escape(str(item.get("publish_advice", "需改")))
     reason = html.escape(str(item.get("quality_reason", "")).strip())
     status = html.escape(str(item.get("status", "")).strip())
+    updated_time = html.escape(display_datetime(item.get("updated_at") or item.get("created_at")))
     body_html = markdown_to_simple_html(content.get("body_markdown", ""))
     post_format = str(item.get("post_format", ""))
 
     metadata_html = (
         f"<div class='meta'><span>{badge} {score}/100 · {advice}</span>"
-        f"<span>Status: {status}</span><span>发布时间: {publish_time}</span></div>"
+        f"<span>Status: {status}</span><span>发布时间: {publish_time}</span><span>更新时间: {updated_time or '无'}</span></div>"
         f"<div class='meta'><span>账号: {account}</span><span>平台: {platform}</span></div>"
         f"<div class='meta'><span>选题: {source_topic}</span>"
         f"<a href='{source_link}' target='_blank' rel='noreferrer'>来源链接</a></div>"
@@ -2113,6 +2125,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     copy_panel = (
         "<div class='copy-panel'>"
         "<h3>发布素材复制区</h3>"
+        "<p class='copy-hint'>提示：公众号/小红书建议优先用“复制带图片位置文案”，再按标记上传图片；剪映用“复制剪映口播稿”+素材包图片。</p>"
         "<div class='copy-actions'>"
         f"<button type='button' data-copy-target='copy-title-{queue_id}' onclick='copyTarget(this)'>复制标题</button>"
         f"<button type='button' data-copy-target='copy-body-{queue_id}' onclick='copyTarget(this)'>复制正文</button>"
@@ -2182,6 +2195,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
             f"{copy_panel}"
             "<div class='video-cover'>"
             f"<div class='cover-text'>{cover_text or title}</div>"
+            f"<div class='updated-time'>更新时间：{updated_time or '无'}</div>"
             f"<div class='video-hook'>{hook_text}</div>"
             "</div>"
             "<div class='timeline'><h3>剪映口播稿</h3>"
@@ -2198,6 +2212,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
             "<div class='phone article'>"
             f"{copy_panel}"
             f"<h1>{title}</h1>"
+            f"<div class='updated-time'>更新时间：{updated_time or '无'}</div>"
             f"<div class='hook'>{hook_text}</div>"
             f"<div class='body'>{body_html}</div>"
             f"<div class='cover'>封面文案：{cover_text}</div>"
@@ -2225,6 +2240,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     }}
     .copy-panel {{ background:#f8fafc; border:1px solid #e5e7eb; border-radius:12px; padding:12px; margin-bottom:14px; }}
     .copy-panel h3 {{ margin:0 0 8px; font-size:14px; }}
+    .copy-hint {{ margin:0 0 10px; color:#64748b; font-size:12px; line-height:1.6; }}
     .copy-actions {{ display:flex; flex-wrap:wrap; gap:8px; }}
     .copy-actions button {{ border:0; background:#2563eb; color:#fff; border-radius:8px; padding:7px 10px; cursor:pointer; font-size:12px; }}
     .download-pack {{ display:inline-flex; align-items:center; background:#059669; color:#fff; border-radius:8px; padding:7px 10px; text-decoration:none; font-size:12px; }}
@@ -2242,6 +2258,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .rich-hook {{ background:#eff6ff; border-left:3px solid #3b82f6; padding:8px 10px; }}
     .rich-cover, .rich-tags {{ color:#64748b; }}
     .article h1 {{ font-size: 21px; line-height: 1.4; margin: 0 0 12px; }}
+    .updated-time {{ color:#64748b; font-size:12px; margin: -4px 0 10px; }}
     .hook {{ background: #eff6ff; border-left: 3px solid #3b82f6; padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }}
     .body p, .body li {{ font-size: 14px; line-height: 1.75; }}
     .cover {{ margin-top: 14px; font-size: 13px; color: #6b7280; }}
@@ -2510,10 +2527,11 @@ def build_accounts_index(
             ill_count = len(item.get("illustration_urls") or item.get("illustration_files") or [])
             material = f"{ill_count} 张图" if ill_count else "待配图"
             status = html.escape(str(item.get("status", "pending_review")))
+            updated = html.escape(display_datetime(item.get("updated_at") or item.get("created_at")) or "-")
             item_rows.append(
                 "<li>"
                 f"<a href='{href}' target='_blank' rel='noreferrer'>{title}</a>"
-                f"<span>{badge}{score}</span><span>{material}</span><span>{status}</span>"
+                f"<span>{badge}{score}</span><span>{material}</span><span>{status}</span><span>{updated}</span>"
                 "</li>"
             )
         if not item_rows:
@@ -2556,7 +2574,7 @@ button{{border:0;background:#2563eb;color:#fff;border-radius:9px;padding:8px 11p
 button.secondary{{background:#64748b;}}
 .run-log{{display:none;white-space:pre-wrap;background:#0f172a;color:#dbeafe;border-radius:10px;padding:10px;font-size:12px;max-height:220px;overflow:auto;}}
 .items{{list-style:none;margin:0;padding:0;display:grid;gap:8px;}}
-    .items li{{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;border-top:1px solid #eef2f7;padding-top:8px;font-size:13px;}}
+    .items li{{display:grid;grid-template-columns:1fr auto auto auto auto;gap:8px;align-items:center;border-top:1px solid #eef2f7;padding-top:8px;font-size:13px;}}
 a{{color:#2563eb;text-decoration:none;}} .items span{{color:#6b7280;white-space:nowrap;}}
 </style>
 <script>
@@ -2627,6 +2645,10 @@ def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], d
         "rejected": sum(1 for item in items if item.get("status") == "rejected"),
         "images": sum(1 for item in items if len(item.get("illustration_urls") or []) > 0),
     }
+    latest_update = max(
+        [display_datetime(item.get("updated_at") or item.get("created_at")) for item in items]
+        or [""]
+    )
     by_account: dict[str, list[dict[str, Any]]] = {}
     for item in items:
         by_account.setdefault(str(item.get("account_name", "")), []).append(item)
@@ -2661,6 +2683,7 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 <div class="stat">已发布<b>{counts['posted']}</b></div>
 <div class="stat">已丢弃<b>{counts['rejected']}</b></div>
 <div class="stat">已配图<b>{counts['images']}</b></div>
+<div class="stat">最近更新<b style="font-size:16px;">{html.escape(latest_update or '-')}</b></div>
 </div>
 <div class="actions">
 <a href="{dashboard_date}/accounts.html">进入账号工作台</a>
