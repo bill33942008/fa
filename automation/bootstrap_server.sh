@@ -6,9 +6,20 @@ FA_ROOT="${FA_ROOT:-/opt/fa}"
 BRANCH="${BRANCH:-cursor/multi-platform-auto-ops-2a43}"
 RAW_BASE="https://raw.githubusercontent.com/bill33942008/fa/${BRANCH}"
 ILLUSTRATION_ID="${ILLUSTRATION_ID:-99d3165d18a2}"
+BOOTSTRAP_VERSION="4"
+TARGET_SCRIPT="$FA_ROOT/automation/bootstrap_server.sh"
+
+# curl | bash runs a stale in-memory copy. Always download latest and re-exec from disk.
+if [[ "${BOOTSTRAP_REEXEC:-}" != "1" ]]; then
+  mkdir -p "$FA_ROOT/automation"
+  curl -fsSL "${RAW_BASE}/automation/bootstrap_server.sh" -o "$TARGET_SCRIPT"
+  chmod +x "$TARGET_SCRIPT"
+  export BOOTSTRAP_REEXEC=1
+  exec "$TARGET_SCRIPT" "$@"
+fi
 
 cd "$FA_ROOT"
-echo "[*] Working in $FA_ROOT"
+echo "[*] bootstrap v${BOOTSTRAP_VERSION} in $FA_ROOT"
 
 restore_config() {
   local target="automation/config.json"
@@ -46,29 +57,38 @@ restore_config() {
 }
 
 update_code() {
-  mkdir -p automation/scripts
   curl -fsSL "${RAW_BASE}/automation/pipeline.py" -o automation/pipeline.py
   curl -fsSL "${RAW_BASE}/automation/config.server.json" -o automation/config.server.json
-  curl -fsSL "${RAW_BASE}/automation/bootstrap_server.sh" -o automation/bootstrap_server.sh
-  chmod +x automation/bootstrap_server.sh
-  echo "[OK] updated pipeline.py and helper files"
+  echo "[OK] updated pipeline.py and config.server.json"
+}
+
+create_venv() {
+  echo "[*] creating virtualenv at $FA_ROOT/.venv"
+  if ! python3 -m venv "$FA_ROOT/.venv" 2>/dev/null; then
+    echo "[*] installing python3-venv..."
+    apt-get update -qq && apt-get install -y python3-venv python3-full
+    python3 -m venv "$FA_ROOT/.venv"
+  fi
+}
+
+venv_is_healthy() {
+  local python_bin="$FA_ROOT/.venv/bin/python"
+  [[ -x "$python_bin" ]] || return 1
+  local prefix
+  prefix="$("$python_bin" -c 'import sys; print(sys.prefix)' 2>/dev/null || true)"
+  [[ "$prefix" == "$FA_ROOT/.venv" ]]
 }
 
 ensure_python() {
   PYTHON="$FA_ROOT/.venv/bin/python"
-  PIP="$FA_ROOT/.venv/bin/pip"
 
-  if [[ ! -x "$PYTHON" ]]; then
-    echo "[*] creating virtualenv at $FA_ROOT/.venv"
-    if ! python3 -m venv "$FA_ROOT/.venv" 2>/dev/null; then
-      echo "[*] installing python3-venv..."
-      apt-get update -qq && apt-get install -y python3-venv python3-full
-      python3 -m venv "$FA_ROOT/.venv"
-    fi
+  if ! venv_is_healthy; then
+    echo "[WARN] repairing broken virtualenv"
+    rm -rf "$FA_ROOT/.venv"
+    create_venv
   fi
 
-  "$PIP" install -q --upgrade pip
-  export PYTHON PIP
+  "$PYTHON" -m pip install -q --upgrade pip
   echo "[OK] using $PYTHON"
 }
 
@@ -82,7 +102,14 @@ install_deps() {
 
   if ! "$PYTHON" -c "import edge_tts" >/dev/null 2>&1; then
     echo "[*] installing edge-tts into .venv..."
-    "$PIP" install -q edge-tts
+    if ! "$PYTHON" -m pip install -q edge-tts; then
+      echo "[WARN] edge-tts install failed, recreating venv and retrying"
+      rm -rf "$FA_ROOT/.venv"
+      create_venv
+      PYTHON="$FA_ROOT/.venv/bin/python"
+      "$PYTHON" -m pip install -q --upgrade pip
+      "$PYTHON" -m pip install -q edge-tts
+    fi
   fi
 }
 
