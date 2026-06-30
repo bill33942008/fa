@@ -216,6 +216,17 @@ def dashscope_model_candidates(cfg: dict[str, Any], defaults: list[str]) -> list
     return uniq
 
 
+def is_dashscope_model_retryable_error(exc: Exception) -> bool:
+    text = str(exc)
+    markers = [
+        "Model.AccessDenied",
+        "Model not exist",
+        '"code":"InvalidParameter"',
+        "InvalidParameter",
+    ]
+    return any(marker in text for marker in markers)
+
+
 def dashscope_extract_task_id(resp: dict[str, Any]) -> str:
     output = resp.get("output", {}) if isinstance(resp, dict) else {}
     if isinstance(output, dict):
@@ -1242,7 +1253,7 @@ def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, 
                     break
                 except Exception as exc:  # pylint: disable=broad-except
                     last_error = exc
-                    if "Model.AccessDenied" in str(exc):
+                    if is_dashscope_model_retryable_error(exc):
                         continue
                     raise
             if created is None:
@@ -1253,7 +1264,9 @@ def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, 
             done = dashscope_poll_task(image_cfg, task_id)
             out_urls = normalize_prediction_urls(done)
         if not out_urls:
-            raise RuntimeError("No image URL returned from cloud provider")
+            raise RuntimeError(
+                f"No image URL returned from cloud provider. raw={json.dumps(done, ensure_ascii=False)[:1200]}"
+            )
         source_url = out_urls[0]
         ext = ".jpg" if image_cfg.get("output_format", "jpg") == "jpg" else f".{image_cfg.get('output_format')}"
         local_file = media_dir / f"{queue_id}_{idx}{ext}"
@@ -1326,7 +1339,7 @@ def render_cloud_video_for_item(config: dict[str, Any], item: dict[str, Any]) ->
                 break
             except Exception as exc:  # pylint: disable=broad-except
                 last_error = exc
-                if "Model.AccessDenied" in str(exc):
+                if is_dashscope_model_retryable_error(exc):
                     continue
                 raise
         if created is None:
@@ -1337,7 +1350,9 @@ def render_cloud_video_for_item(config: dict[str, Any], item: dict[str, Any]) ->
         done = dashscope_poll_task(video_cfg, prediction_id)
         out_urls = normalize_prediction_urls(done)
     if not out_urls:
-        raise RuntimeError(f"No video URL from prediction {prediction_id}")
+        raise RuntimeError(
+            f"No video URL from prediction {prediction_id}. raw={json.dumps(done, ensure_ascii=False)[:1200]}"
+        )
     source_url = out_urls[0]
     media_dir = PREVIEW_DIR / "media" / item_date
     media_dir.mkdir(parents=True, exist_ok=True)
