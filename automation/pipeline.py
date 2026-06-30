@@ -1828,6 +1828,17 @@ def synthesize_tts_segment(
 
 
 def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: dict[str, str]) -> str:
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    raw_title = str(item.get("title", "")).strip() or "未命名草稿"
+    raw_hook = content.get("hook_text", "").strip()
+    raw_body = content.get("body_markdown", "").strip()
+    raw_cover = content.get("cover_text", "").strip()
+    hashtags = item.get("hashtags", [])
+    hashtag_line = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
+    publish_text = "\n\n".join(
+        [part for part in [raw_title, raw_hook, raw_body, raw_cover, hashtag_line] if part]
+    )
+    capcut_text = strip_markdown(raw_body or raw_hook or raw_title)
     title = html.escape(str(item.get("title", "")).strip() or "未命名草稿")
     account = html.escape(str(item.get("account_name", "")).strip())
     platform = html.escape(str(item.get("platform", "")).strip())
@@ -1867,15 +1878,34 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
             ]
     if not isinstance(illustration_urls, list):
         illustration_urls = []
+    copy_panel = (
+        "<div class='copy-panel'>"
+        "<h3>发布素材复制区</h3>"
+        "<div class='copy-actions'>"
+        f"<button type='button' data-copy-target='copy-title-{queue_id}' onclick='copyTarget(this)'>复制标题</button>"
+        f"<button type='button' data-copy-target='copy-body-{queue_id}' onclick='copyTarget(this)'>复制正文</button>"
+        f"<button type='button' data-copy-target='copy-full-{queue_id}' onclick='copyTarget(this)'>复制完整发布文案</button>"
+        f"<button type='button' data-copy-target='copy-capcut-{queue_id}' onclick='copyTarget(this)'>复制剪映口播稿</button>"
+        "</div>"
+        f"<textarea id='copy-title-{queue_id}'>{html.escape(raw_title)}</textarea>"
+        f"<textarea id='copy-body-{queue_id}'>{html.escape(raw_body)}</textarea>"
+        f"<textarea id='copy-full-{queue_id}'>{html.escape(publish_text)}</textarea>"
+        f"<textarea id='copy-capcut-{queue_id}'>{html.escape(capcut_text)}</textarea>"
+        "</div>"
+    )
     gallery_html = ""
     if illustration_urls:
         cards = "".join(
             [
-                f"<div class='ill-card'><img src='{html.escape(str(url))}' loading='lazy' /></div>"
+                (
+                    f"<div class='ill-card'><img src='{html.escape(str(url))}' loading='lazy' />"
+                    f"<div class='ill-actions'><a href='{html.escape(str(url))}' target='_blank' rel='noreferrer'>打开原图</a>"
+                    f"<a href='{html.escape(str(url))}' download>下载</a></div></div>"
+                )
                 for url in illustration_urls
             ]
         )
-        gallery_html = f"<div class='ill-gallery'><h3>文案自动插图</h3><div class='ill-grid'>{cards}</div></div>"
+        gallery_html = f"<div class='ill-gallery'><h3>文案自动插图/剪映素材</h3><div class='ill-grid'>{cards}</div></div>"
 
     if post_format == "short_video_script":
         segments = split_video_segments(content.get("body_markdown", ""))
@@ -1898,6 +1928,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         )
         content_card = (
             "<div class='phone video'>"
+            f"{copy_panel}"
             "<div class='video-cover'>"
             f"<div class='cover-text'>{cover_text or title}</div>"
             f"<div class='video-hook'>{hook_text}</div>"
@@ -1914,6 +1945,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     else:
         content_card = (
             "<div class='phone article'>"
+            f"{copy_panel}"
             f"<h1>{title}</h1>"
             f"<div class='hook'>{hook_text}</div>"
             f"{gallery_html}"
@@ -1938,9 +1970,14 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .meta {{ display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: #4b5563; margin-top: 8px; }}
     .meta a {{ color: #2563eb; text-decoration: none; }}
     .phone {{
-      width: min(430px, 100%); margin: 0 auto; border: 1px solid #e5e7eb;
+      width: min(520px, 100%); margin: 0 auto; border: 1px solid #e5e7eb;
       border-radius: 18px; background: #fff; padding: 16px; box-shadow: inset 0 0 0 1px #f3f4f6;
     }}
+    .copy-panel {{ background:#f8fafc; border:1px solid #e5e7eb; border-radius:12px; padding:12px; margin-bottom:14px; }}
+    .copy-panel h3 {{ margin:0 0 8px; font-size:14px; }}
+    .copy-actions {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .copy-actions button {{ border:0; background:#2563eb; color:#fff; border-radius:8px; padding:7px 10px; cursor:pointer; font-size:12px; }}
+    .copy-panel textarea {{ position:absolute; left:-9999px; top:-9999px; }}
     .article h1 {{ font-size: 21px; line-height: 1.4; margin: 0 0 12px; }}
     .hook {{ background: #eff6ff; border-left: 3px solid #3b82f6; padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }}
     .body p, .body li {{ font-size: 14px; line-height: 1.75; }}
@@ -1968,7 +2005,19 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .ill-gallery h3 {{ margin: 0 0 8px; font-size: 14px; color: #374151; }}
     .ill-grid {{ display: grid; gap: 8px; grid-template-columns: 1fr; }}
     .ill-card img {{ width: 100%; border-radius: 10px; border: 1px solid #e5e7eb; }}
+    .ill-actions {{ display:flex; gap:10px; margin:6px 0 8px; font-size:13px; }}
+    .ill-actions a {{ color:#2563eb; text-decoration:none; }}
   </style>
+  <script>
+    async function copyTarget(btn) {{
+      const el = document.getElementById(btn.dataset.copyTarget);
+      if (!el) return;
+      await navigator.clipboard.writeText(el.value || el.textContent || '');
+      const old = btn.innerText;
+      btn.innerText = '已复制';
+      setTimeout(() => btn.innerText = old, 1300);
+    }}
+  </script>
 </head>
 <body>
   <div class="container">
@@ -2086,6 +2135,9 @@ def build_accounts_index(
             key=lambda item: str(item.get("created_at", "")),
             reverse=True,
         )
+        ready_count = len(items)
+        image_ready = sum(1 for item in items if len(item.get("illustration_urls") or item.get("illustration_files") or []) > 0)
+        best_score = max([safe_int(item.get("total_score", 0), default=0) for item in items] or [0])
         item_rows: list[str] = []
         for item in items[:8]:
             preview_file = Path(str(item.get("preview_file", "")).strip() or "#")
@@ -2109,9 +2161,10 @@ def build_accounts_index(
             f"generate-account --account {shlex.quote(account_name)} --count 3 --sync-feishu"
         )
         cards.append(
-            "<section class='account-card'>"
+            f"<section class='account-card' data-account='{html.escape(account_name)}' data-platform='{html.escape(platform)}'>"
             f"<div class='account-head'><h2>{html.escape(account_name)}</h2><span>{html.escape(platform)}</span></div>"
             f"<p class='position'>定位：{html.escape(track)} · {html.escape(mode)}</p>"
+            f"<div class='stats'><span>候选 {ready_count}</span><span>已配图 {image_ready}</span><span>最高分 {best_score}</span></div>"
             f"<button type='button' onclick=\"runGenerate(this)\" data-account=\"{html.escape(account_name)}\">点击生成3条</button> "
             f"<button type='button' class='secondary' onclick=\"copyText(this)\" data-copy=\"{html.escape(command)}\">复制命令</button>"
             "<pre class='run-log'></pre>"
@@ -2128,11 +2181,15 @@ body{{margin:0;background:#f3f5f9;color:#111827;font-family:-apple-system,BlinkM
 .wrap{{max-width:1160px;margin:0 auto;padding:24px;}}
 .hero{{background:linear-gradient(135deg,#111827,#1d4ed8);color:#fff;border-radius:18px;padding:22px;margin-bottom:18px;}}
 .hero h1{{margin:0 0 8px;font-size:24px;}} .hero p{{margin:0;opacity:.9;line-height:1.7;}}
+.toolbar{{display:flex;gap:10px;align-items:center;margin:0 0 16px;}}
+.toolbar input{{width:min(420px,100%);border:1px solid #dbe3ef;border-radius:10px;padding:10px 12px;font-size:14px;}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:16px;}}
 .account-card{{background:#fff;border-radius:16px;padding:16px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
 .account-head{{display:flex;align-items:center;justify-content:space-between;gap:12px;}}
 .account-head h2{{margin:0;font-size:19px;}} .account-head span{{font-size:12px;background:#eff6ff;color:#1d4ed8;border-radius:999px;padding:4px 9px;}}
 .position{{font-size:13px;color:#4b5563;line-height:1.6;}}
+.stats{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px;}}
+.stats span{{font-size:12px;background:#f1f5f9;color:#334155;border-radius:999px;padding:4px 8px;}}
 button{{border:0;background:#2563eb;color:#fff;border-radius:9px;padding:8px 11px;cursor:pointer;margin-bottom:10px;}}
 button.secondary{{background:#64748b;}}
 .run-log{{display:none;white-space:pre-wrap;background:#0f172a;color:#dbeafe;border-radius:10px;padding:10px;font-size:12px;max-height:220px;overflow:auto;}}
@@ -2150,15 +2207,24 @@ async function runGenerate(btn){{
   try {{
     const resp = await fetch('/generate?count=3&sync_feishu=1&account=' + encodeURIComponent(btn.dataset.account || ''));
     log.textContent = await resp.text();
+    if (resp.ok) log.textContent += '\\n\\n生成完成，刷新页面即可看到新候选内容。';
   }} catch (err) {{
     log.textContent = '生成失败：' + err;
   }} finally {{
     btn.disabled=false;
   }}
 }}
+function filterAccounts(input){{
+  const q = (input.value || '').toLowerCase();
+  document.querySelectorAll('.account-card').forEach(card => {{
+    const hay = ((card.dataset.account || '') + ' ' + (card.dataset.platform || '')).toLowerCase();
+    card.style.display = hay.includes(q) ? '' : 'none';
+  }});
+}}
 </script></head><body><div class="wrap">
 <div class="hero"><h1>按账号生成/选择内容{title_suffix}</h1>
 <p>公众号和小红书输出可直接粘贴的完整图文；抖音/视频号/快手输出剪映可用的口播稿、分镜和配图素材，不再生成视频。</p></div>
+<div class="toolbar"><input placeholder="搜索账号或平台，例如 小红书 / 公众号 / 快手" oninput="filterAccounts(this)" /></div>
 <div class="grid">{''.join(cards)}</div></div></body></html>"""
     target_dir = PREVIEW_DIR / latest_date if latest_date else PREVIEW_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
