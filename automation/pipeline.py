@@ -1408,10 +1408,10 @@ def next_step_for_item(item: dict[str, Any]) -> str:
     if status == "rejected":
         return "已丢弃：无需处理，也可重新生成同账号内容。"
     if status in {"approved", "ready_to_post"}:
-        return "下一步：复制发布文案，按插图标记上传图片，发布后点击“已发布”。"
+        return "复制发布文案，按插图标记上传图片，发布后点击“已发布”。"
     if len(item.get("illustration_urls") or []) == 0:
-        return "下一步：先点击“重新配图”，再筛选是否发布。"
-    return "下一步：检查标题、正文和配图，满意就点击“选用”。"
+        return "先点击“重新配图”，再筛选是否发布。"
+    return "检查标题、正文和配图，满意就点击“选用”。"
 
 
 def split_video_segments(body_markdown: str, limit: int = 8) -> list[str]:
