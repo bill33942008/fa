@@ -1123,6 +1123,54 @@ def markdown_to_simple_html(markdown_text: str) -> str:
     return "\n".join(html_lines)
 
 
+def sanitize_filename_part(text: str, max_len: int = 36) -> str:
+    cleaned = re.sub(r"[\\/:*?\"<>|\r\n\t]+", "_", str(text).strip())
+    cleaned = re.sub(r"\s+", "_", cleaned).strip("._ ")
+    return (cleaned or "untitled")[:max_len]
+
+
+def image_card_html(url: str, label: str) -> str:
+    safe_url = html.escape(str(url))
+    return (
+        "<figure class='inline-image'>"
+        f"<img src='{safe_url}' loading='lazy' />"
+        f"<figcaption>{html.escape(label)}</figcaption>"
+        "<div class='ill-actions'>"
+        f"<a href='{safe_url}' target='_blank' rel='noreferrer'>打开原图</a>"
+        f"<a href='{safe_url}' download>下载</a>"
+        "</div></figure>"
+    )
+
+
+def markdown_to_html_with_inline_images(markdown_text: str, image_urls: list[str]) -> str:
+    lines = markdown_text.splitlines()
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if line.strip():
+            current.append(line)
+            continue
+        if current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    if not blocks:
+        return markdown_to_simple_html(markdown_text)
+
+    image_after: dict[int, list[str]] = {}
+    for idx, url in enumerate(image_urls):
+        block_idx = min(len(blocks) - 1, int((idx + 1) * len(blocks) / (len(image_urls) + 1)))
+        image_after.setdefault(block_idx, []).append(url)
+
+    html_parts: list[str] = []
+    for block_idx, block in enumerate(blocks):
+        html_parts.append(markdown_to_simple_html("\n".join(block)))
+        for image_idx, url in enumerate(image_after.get(block_idx, []), start=1):
+            html_parts.append(image_card_html(url, f"配图 {image_idx}：对应上方段落"))
+    return "\n".join(html_parts)
+
+
 def build_preview_url(config: dict[str, Any], preview_file: Path) -> str:
     preview_cfg = config.get("preview", {})
     public_base_url = str(preview_cfg.get("public_base_url", "")).strip()
@@ -1407,24 +1455,116 @@ def build_asset_pack_for_item(config: dict[str, Any], item: dict[str, Any]) -> d
     item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
     pack_dir = PREVIEW_DIR / "media" / item_date / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
-    pack_file = pack_dir / f"{queue_id}_publish_pack.zip"
+    account_name = str(item.get("account_name", "account")).strip()
+    title = str(item.get("title", "content")).strip()
+    score = safe_int(item.get("total_score", 0), default=0)
+    platform = str(item.get("platform", "")).strip()
+    status = str(item.get("status", "")).strip()
+    pack_name = "_".join(
+        [
+            sanitize_filename_part(account_name, 20),
+            sanitize_filename_part(platform, 16),
+            item_date,
+            f"{score}分",
+            sanitize_filename_part(title, 32),
+            queue_id,
+        ]
+    )
+    pack_file = pack_dir / f"{pack_name}.zip"
     content = extract_content_payload(item)
+    hashtags = item.get("hashtags", [])
+    hashtag_line = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
+    image_files = [Path(str(path)) for path in item.get("illustration_files") or []]
+    image_manifest_lines = ["# 配图对应关系", ""]
+    segments = split_video_segments(content.get("body_markdown", ""), limit=max(3, len(image_files)))
+    if str(item.get("post_format", "")) == "short_video_script":
+        for idx, local_path in enumerate(image_files, start=1):
+            scene = segments[idx - 1] if idx - 1 < len(segments) else str(item.get("title", ""))
+            image_manifest_lines.append(f"- 图片 {idx:02d}: 对应第 {idx} 镜 / {scene}")
+    else:
+        for idx, local_path in enumerate(image_files, start=1):
+            image_manifest_lines.append(f"- 图片 {idx:02d}: 插入正文第 {idx} 个重点段落附近")
+
+    publish_steps = textwrap.dedent(
+        f"""
+        # 发布步骤
+
+        ## 基本信息
+        - 账号：{account_name}
+        - 平台：{platform}
+        - 日期：{item_date}
+        - 评分：{score}
+        - 状态：{status}
+        - Queue ID：{queue_id}
+
+        ## 公众号/小红书发布
+        1. 打开 `01_content/full_publish_text.md`。
+        2. 复制标题和正文到发布后台。
+        3. 按 `02_images/image_manifest.md` 的位置插入图片。
+        4. 复制 `01_content/hashtags.txt` 中的话题/标签。
+        5. 发布前检查封面文案和敏感词。
+
+        ## 剪映素材使用
+        1. 打开 `01_content/capcut_script.txt`，复制为配音/字幕文本。
+        2. 将 `02_images/` 下的图片按编号导入剪映。
+        3. 按 `02_images/image_manifest.md` 对应关系排列画面。
+        4. 导出视频后回到工作台，将内容状态改为“已发布”。
+
+        ## 文件说明
+        - `01_content/`: 可复制文案、标题、正文、剪映口播稿、标签。
+        - `02_images/`: 配图文件和对应关系。
+        - `03_publish_steps/`: 发布步骤说明。
+        - `04_metadata/`: 机器可读元数据。
+        """
+    ).strip()
     with zipfile.ZipFile(pack_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         content_file = str(item.get("content_file", "")).strip()
         if content_file and Path(content_file).exists():
-            zf.write(content_file, "content.md")
+            zf.write(content_file, "01_content/original_markdown.md")
         else:
-            zf.writestr("content.md", content.get("content_markdown", ""))
-        zf.writestr("title.txt", str(item.get("title", "")).strip())
-        zf.writestr("body.md", content.get("body_markdown", ""))
-        zf.writestr("capcut_script.txt", strip_markdown(content.get("body_markdown", "")))
-        hashtags = item.get("hashtags", [])
-        hashtag_line = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
-        zf.writestr("hashtags.txt", hashtag_line)
-        for idx, path in enumerate(item.get("illustration_files") or [], start=1):
-            local_path = Path(str(path))
+            zf.writestr("01_content/original_markdown.md", content.get("content_markdown", ""))
+        full_publish_text = "\n\n".join(
+            [
+                part
+                for part in [
+                    str(item.get("title", "")).strip(),
+                    content.get("hook_text", ""),
+                    content.get("body_markdown", ""),
+                    content.get("cover_text", ""),
+                    hashtag_line,
+                ]
+                if str(part).strip()
+            ]
+        )
+        zf.writestr("01_content/title.txt", str(item.get("title", "")).strip())
+        zf.writestr("01_content/body.md", content.get("body_markdown", ""))
+        zf.writestr("01_content/full_publish_text.md", full_publish_text)
+        zf.writestr("01_content/capcut_script.txt", strip_markdown(content.get("body_markdown", "")))
+        zf.writestr("01_content/hashtags.txt", hashtag_line)
+        zf.writestr("02_images/image_manifest.md", "\n".join(image_manifest_lines))
+        for idx, local_path in enumerate(image_files, start=1):
             if local_path.exists():
-                zf.write(local_path, f"images/{idx:02d}{local_path.suffix or '.jpg'}")
+                suffix = local_path.suffix or ".jpg"
+                zf.write(local_path, f"02_images/{idx:02d}_{sanitize_filename_part(title, 18)}{suffix}")
+        zf.writestr("03_publish_steps/README.md", publish_steps)
+        zf.writestr(
+            "04_metadata/item.json",
+            json.dumps(
+                {
+                    "id": queue_id,
+                    "date": item_date,
+                    "account_name": account_name,
+                    "platform": platform,
+                    "title": title,
+                    "score": score,
+                    "status": status,
+                    "preview_url": item.get("preview_url", ""),
+                    "image_count": len(image_files),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
     item["asset_pack_file"] = str(pack_file)
     item["asset_pack_url"] = build_preview_url(config, pack_file)
     item["updated_at"] = now_local().isoformat()
@@ -1911,6 +2051,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
             ]
     if not isinstance(illustration_urls, list):
         illustration_urls = []
+    body_html = markdown_to_html_with_inline_images(content.get("body_markdown", ""), illustration_urls)
     copy_panel = (
         "<div class='copy-panel'>"
         "<h3>发布素材复制区</h3>"
@@ -1955,19 +2096,22 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         for idx, segment in enumerate(segments):
             start = idx * 4
             end = start + 4
+            segment_image = ""
+            if illustration_urls:
+                segment_image = image_card_html(
+                    str(illustration_urls[idx % len(illustration_urls)]),
+                    f"第 {idx + 1} 镜配图",
+                )
             timeline_rows.append(
                 "<li>"
                 f"<span class='time'>{start:02d}s-{end:02d}s</span>"
                 f"<span class='line'>{html.escape(segment)}</span>"
+                f"{segment_image}"
                 "</li>"
             )
         timeline_html = "\n".join(timeline_rows) if timeline_rows else "<li><span class='line'>暂无分镜</span></li>"
         narration_text = html.escape(strip_markdown(content.get("body_markdown", "")).strip())
-        image_hint = (
-            gallery_html
-            if gallery_html
-            else "<div class='video-missing'>暂未配图，请执行 render-illustrations。配图后可直接下载导入剪映。</div>"
-        )
+        image_hint = "<div class='video-missing'>暂未配图，请执行 render-illustrations。配图后可直接下载导入剪映。</div>" if not illustration_urls else ""
         content_card = (
             "<div class='phone video'>"
             f"{copy_panel}"
@@ -1990,7 +2134,6 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
             f"{copy_panel}"
             f"<h1>{title}</h1>"
             f"<div class='hook'>{hook_text}</div>"
-            f"{gallery_html}"
             f"<div class='body'>{body_html}</div>"
             f"<div class='cover'>封面文案：{cover_text}</div>"
             "</div>"
@@ -2053,6 +2196,9 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .ill-gallery h3 {{ margin: 0 0 8px; font-size: 14px; color: #374151; }}
     .ill-grid {{ display: grid; gap: 8px; grid-template-columns: 1fr; }}
     .ill-card img {{ width: 100%; border-radius: 10px; border: 1px solid #e5e7eb; }}
+    .inline-image {{ margin: 12px 0; }}
+    .inline-image img {{ width: 100%; border-radius: 10px; border: 1px solid #e5e7eb; }}
+    .inline-image figcaption {{ color:#64748b; font-size:12px; margin-top:5px; }}
     .ill-actions {{ display:flex; gap:10px; margin:6px 0 8px; font-size:13px; }}
     .ill-actions a {{ color:#2563eb; text-decoration:none; }}
   </style>
