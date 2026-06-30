@@ -1186,6 +1186,52 @@ def build_cloud_image_prompts(item: dict[str, Any], count: int = 3) -> list[str]
     return prompts
 
 
+def _svg_escape(text: str) -> str:
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def create_placeholder_illustrations_for_item(
+    config: dict[str, Any], item: dict[str, Any], count: int = 3
+) -> dict[str, Any]:
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    media_dir = PREVIEW_DIR / "media" / item_date / "illustrations"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    title = str(item.get("title", "内容插图")).strip()[:36]
+    subtitle = str(item.get("track", "")).strip() or str(item.get("platform", "")).strip()
+    palette = [("#1d4ed8", "#0ea5e9"), ("#7c3aed", "#ec4899"), ("#059669", "#10b981")]
+    files: list[str] = []
+    urls: list[str] = []
+    for idx in range(max(1, count)):
+        c1, c2 = palette[idx % len(palette)]
+        svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0%" stop-color="{c1}"/><stop offset="100%" stop-color="{c2}"/>
+  </linearGradient></defs>
+  <rect width="1024" height="1024" fill="url(#g)"/>
+  <rect x="80" y="80" width="864" height="864" rx="36" fill="rgba(255,255,255,0.15)"/>
+  <text x="120" y="220" font-size="56" font-family="Microsoft YaHei, sans-serif" fill="white">{_svg_escape(title)}</text>
+  <text x="120" y="300" font-size="34" font-family="Microsoft YaHei, sans-serif" fill="white" opacity="0.9">{_svg_escape(subtitle)}</text>
+  <text x="120" y="900" font-size="26" font-family="Microsoft YaHei, sans-serif" fill="white" opacity="0.8">Auto Illustration Placeholder #{idx+1}</text>
+</svg>"""
+        out_file = media_dir / f"{queue_id}_placeholder_{idx+1}.svg"
+        out_file.write_text(svg, encoding="utf-8")
+        files.append(str(out_file))
+        urls.append(build_preview_url(config, out_file))
+
+    item["illustration_files"] = files
+    item["illustration_urls"] = urls
+    item["cloud_image_model"] = "placeholder-svg-fallback"
+    item["updated_at"] = now_local().isoformat()
+    return {"status": "ok", "count": len(files), "urls": urls, "fallback": True}
+
+
 def write_cloud_asset_from_url(url: str, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     blob = http_get_bytes(url, timeout=120)
@@ -1390,9 +1436,19 @@ def render_cloud_illustrations_for_items(
             if result.get("status") == "ok":
                 print(f"[OK] illustrations rendered {item.get('id')} -> {result.get('count', 0)} image(s)")
         except Exception as exc:  # pylint: disable=broad-except
-            item["notes"] = (str(item.get("notes", "")).strip() + f" | 云插图失败: {exc}").strip(" |")
-            item["updated_at"] = now_local().isoformat()
-            print(f"[WARN] cloud illustrations failed {item.get('id')}: {exc}")
+            if bool(image_cfg.get("allow_placeholder_fallback", True)):
+                fallback = create_placeholder_illustrations_for_item(
+                    config, item, count=int(image_cfg.get("images_per_item", 3))
+                )
+                results.append({"id": item.get("id"), **fallback})
+                print(
+                    f"[WARN] cloud illustrations failed {item.get('id')}: {exc} | "
+                    "used placeholder fallback"
+                )
+            else:
+                item["notes"] = (str(item.get("notes", "")).strip() + f" | 云插图失败: {exc}").strip(" |")
+                item["updated_at"] = now_local().isoformat()
+                print(f"[WARN] cloud illustrations failed {item.get('id')}: {exc}")
         if item_delay > 0:
             time.sleep(item_delay)
     return results
@@ -1417,9 +1473,27 @@ def render_cloud_videos_for_items(
             if result.get("status") == "ok":
                 print(f"[OK] cloud video rendered {item.get('id')} -> {result.get('video_file','')}")
         except Exception as exc:  # pylint: disable=broad-except
-            item["notes"] = (str(item.get("notes", "")).strip() + f" | 云视频失败: {exc}").strip(" |")
-            item["updated_at"] = now_local().isoformat()
-            print(f"[WARN] cloud video failed {item.get('id')}: {exc}")
+            if bool(video_cfg.get("allow_server_fallback", True)):
+                try:
+                    fallback = render_sample_video_for_item(config, item)
+                    item["cloud_video_provider"] = "server-ffmpeg-fallback"
+                    item["updated_at"] = now_local().isoformat()
+                    results.append({"id": item.get("id"), **fallback, "fallback": True})
+                    print(
+                        f"[WARN] cloud video failed {item.get('id')}: {exc} | "
+                        "used server fallback video"
+                    )
+                except Exception as fallback_exc:  # pylint: disable=broad-except
+                    item["notes"] = (
+                        str(item.get("notes", "")).strip()
+                        + f" | 云视频失败: {exc} | 服务器兜底失败: {fallback_exc}"
+                    ).strip(" |")
+                    item["updated_at"] = now_local().isoformat()
+                    print(f"[WARN] cloud video + fallback failed {item.get('id')}: {fallback_exc}")
+            else:
+                item["notes"] = (str(item.get("notes", "")).strip() + f" | 云视频失败: {exc}").strip(" |")
+                item["updated_at"] = now_local().isoformat()
+                print(f"[WARN] cloud video failed {item.get('id')}: {exc}")
         if item_delay > 0:
             time.sleep(item_delay)
     return results
