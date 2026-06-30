@@ -111,11 +111,55 @@ def save_json(path: Path, payload: Any) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
-def load_config(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Config not found: {path}\nCopy automation/config.example.json first."
+def apply_server_runtime_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
+    preview = cfg.setdefault("preview", {})
+    if not str(preview.get("public_base_url", "")).strip() or "YOUR_SERVER_IP" in str(
+        preview.get("public_base_url", "")
+    ):
+        preview["public_base_url"] = "http://118.25.178.116:8787"
+    cloud_media = cfg.setdefault("cloud_media", {})
+    cloud_media["enabled"] = True
+    cloud_media.setdefault("image", {})["enabled"] = True
+    cloud_media.setdefault("video", {})["enabled"] = True
+    cfg.setdefault("local_gpu", {})["enabled"] = False
+    sample_video = cfg.setdefault("sample_video", {})
+    sample_video["enabled"] = True
+    if not str(sample_video.get("public_base_url", "")).strip() or "YOUR_SERVER_IP" in str(
+        sample_video.get("public_base_url", "")
+    ):
+        sample_video["public_base_url"] = preview.get("public_base_url", "http://118.25.178.116:8787")
+    return cfg
+
+
+def ensure_config_file(path: Path) -> None:
+    if path.exists():
+        return
+    parent = path.parent
+    candidates = [
+        parent / "config.server.json",
+        parent / "config.example.json",
+    ]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        payload = load_json(candidate, {})
+        if candidate.name == "config.example.json":
+            payload = apply_server_runtime_defaults(payload)
+        save_json(path, payload)
+        print(
+            f"[INFO] Created missing config: {path} "
+            f"(from {candidate.name}). Review Feishu/cloud settings if needed."
         )
+        return
+    raise FileNotFoundError(
+        f"Config not found: {path}\n"
+        "Run: curl -fsSL https://raw.githubusercontent.com/bill33942008/fa/"
+        "cursor/multi-platform-auto-ops-2a43/automation/bootstrap_server.sh | bash"
+    )
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    ensure_config_file(path)
     return load_json(path, {})
 
 
