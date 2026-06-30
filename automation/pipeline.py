@@ -1184,7 +1184,8 @@ def build_preview_url(config: dict[str, Any], preview_file: Path) -> str:
         relative_path = preview_file.relative_to(PREVIEW_DIR)
     except ValueError:
         relative_path = Path(preview_file.name)
-    return f"{public_base_url.rstrip('/')}/{relative_path.as_posix()}"
+    encoded_path = urllib.parse.quote(relative_path.as_posix(), safe="/:@?&=+$,;~")
+    return f"{public_base_url.rstrip('/')}/{encoded_path}"
 
 
 def cache_bust_token(item: dict[str, Any]) -> str:
