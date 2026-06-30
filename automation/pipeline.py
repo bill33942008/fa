@@ -1925,6 +1925,8 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         f"<button type='button' onclick=\"setStatus('{queue_id}','approved',this)\">选用</button>"
         f"<button type='button' onclick=\"setStatus('{queue_id}','posted',this)\">已发布</button>"
         f"<button type='button' class='danger' onclick=\"setStatus('{queue_id}','rejected',this)\">丢弃</button>"
+        f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','images',this)\">重新配图</button>"
+        f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','pack',this)\">重建素材包</button>"
         "<span class='status-result'></span>"
         "</div>"
         f"<textarea id='copy-title-{queue_id}'>{html.escape(raw_title)}</textarea>"
@@ -2021,6 +2023,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .status-actions {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; }}
     .status-actions button {{ border:0; background:#0f766e; color:#fff; border-radius:8px; padding:7px 10px; cursor:pointer; font-size:12px; }}
     .status-actions button.danger {{ background:#dc2626; }}
+    .status-actions button.secondary {{ background:#475569; }}
     .status-result {{ color:#64748b; font-size:12px; }}
     .copy-panel textarea {{ position:absolute; left:-9999px; top:-9999px; }}
     .article h1 {{ font-size: 21px; line-height: 1.4; margin: 0 0 12px; }}
@@ -2067,6 +2070,17 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
       box.innerText = '处理中...';
       const resp = await fetch('/status?id=' + encodeURIComponent(id) + '&status=' + encodeURIComponent(status));
       box.innerText = await resp.text();
+    }}
+    async function runAction(id, action, btn) {{
+      const box = btn.closest('.status-actions').querySelector('.status-result');
+      box.innerText = '处理中...';
+      btn.disabled = true;
+      try {{
+        const resp = await fetch('/action?id=' + encodeURIComponent(id) + '&action=' + encodeURIComponent(action));
+        box.innerText = await resp.text();
+      }} finally {{
+        btn.disabled = false;
+      }}
     }}
   </script>
 </head>
@@ -2218,7 +2232,10 @@ def build_accounts_index(
             f"<div class='account-head'><h2>{html.escape(account_name)}</h2><span>{html.escape(platform)}</span></div>"
             f"<p class='position'>定位：{html.escape(track)} · {html.escape(mode)}</p>"
             f"<div class='stats'><span>候选 {ready_count}</span><span>已配图 {image_ready}</span><span>最高分 {best_score}</span></div>"
-            f"<button type='button' onclick=\"runGenerate(this)\" data-account=\"{html.escape(account_name)}\">点击生成3条</button> "
+            "<div class='generate-row'>"
+            "<input type='number' min='1' max='10' value='3' title='生成条数' />"
+            f"<button type='button' onclick=\"runGenerate(this)\" data-account=\"{html.escape(account_name)}\">点击生成</button>"
+            "</div>"
             f"<button type='button' class='secondary' onclick=\"copyText(this)\" data-copy=\"{html.escape(command)}\">复制命令</button>"
             "<pre class='run-log'></pre>"
             "<ul class='items'>"
@@ -2243,6 +2260,8 @@ body{{margin:0;background:#f3f5f9;color:#111827;font-family:-apple-system,BlinkM
 .position{{font-size:13px;color:#4b5563;line-height:1.6;}}
 .stats{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px;}}
 .stats span{{font-size:12px;background:#f1f5f9;color:#334155;border-radius:999px;padding:4px 8px;}}
+.generate-row{{display:flex;gap:8px;align-items:center;}}
+.generate-row input{{width:64px;border:1px solid #dbe3ef;border-radius:9px;padding:8px;font-size:14px;}}
 button{{border:0;background:#2563eb;color:#fff;border-radius:9px;padding:8px 11px;cursor:pointer;margin-bottom:10px;}}
 button.secondary{{background:#64748b;}}
 .run-log{{display:none;white-space:pre-wrap;background:#0f172a;color:#dbeafe;border-radius:10px;padding:10px;font-size:12px;max-height:220px;overflow:auto;}}
@@ -2255,10 +2274,11 @@ function copyText(btn){{navigator.clipboard.writeText(btn.dataset.copy || '');bt
 async function runGenerate(btn){{
   const card = btn.closest('.account-card');
   const log = card.querySelector('.run-log');
+  const count = card.querySelector('.generate-row input')?.value || '3';
   log.style.display='block'; log.textContent='正在生成，请等待...';
   btn.disabled=true;
   try {{
-    const resp = await fetch('/generate?count=3&sync_feishu=0&account=' + encodeURIComponent(btn.dataset.account || ''));
+    const resp = await fetch('/generate?sync_feishu=0&count=' + encodeURIComponent(count) + '&account=' + encodeURIComponent(btn.dataset.account || ''));
     log.textContent = await resp.text();
     if (resp.ok) log.textContent += '\\n\\n生成完成，刷新页面即可看到新候选内容。';
   }} catch (err) {{
@@ -2283,6 +2303,69 @@ function filterAccounts(input){{
     target_dir.mkdir(parents=True, exist_ok=True)
     index_file = target_dir / "accounts.html"
     index_file.write_text(accounts_html, encoding="utf-8")
+    return {"index_file": str(index_file), "index_url": build_preview_url(config, index_file)}
+
+
+def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], date: str = "") -> dict[str, str]:
+    if date:
+        items = [item for item in queue if item.get("date") == date]
+        dashboard_date = date
+    else:
+        dashboard_date = max([str(item.get("date", "")) for item in queue] or [now_local().strftime("%Y-%m-%d")])
+        items = [item for item in queue if item.get("date") == dashboard_date]
+    counts = {
+        "total": len(items),
+        "pending": sum(1 for item in items if item.get("status") == "pending_review"),
+        "approved": sum(1 for item in items if item.get("status") in {"approved", "ready_to_post"}),
+        "posted": sum(1 for item in items if item.get("status") == "posted"),
+        "rejected": sum(1 for item in items if item.get("status") == "rejected"),
+        "images": sum(1 for item in items if len(item.get("illustration_urls") or []) > 0),
+    }
+    by_account: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        by_account.setdefault(str(item.get("account_name", "")), []).append(item)
+    account_rows = []
+    for account, account_items in sorted(by_account.items()):
+        best = max([safe_int(item.get("total_score", 0), default=0) for item in account_items] or [0])
+        ready = sum(1 for item in account_items if item.get("status") in {"approved", "ready_to_post"})
+        account_rows.append(
+            f"<tr><td>{html.escape(account)}</td><td>{len(account_items)}</td><td>{ready}</td><td>{best}</td></tr>"
+        )
+    dashboard_html = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>发布工作台 {dashboard_date}</title>
+<style>
+body{{margin:0;background:#f3f5f9;color:#111827;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;}}
+.wrap{{max-width:1080px;margin:0 auto;padding:24px;}}
+.hero{{background:linear-gradient(135deg,#0f172a,#0f766e);color:#fff;border-radius:18px;padding:22px;margin-bottom:18px;}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px;}}
+.stat{{background:#fff;border-radius:14px;padding:15px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
+.stat b{{display:block;font-size:26px;margin-top:6px;}}
+.actions{{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;}}
+.actions a{{background:#2563eb;color:#fff;border-radius:10px;padding:10px 13px;text-decoration:none;}}
+.actions a.green{{background:#059669;}}
+.card{{background:#fff;border-radius:14px;padding:16px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
+table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-bottom:1px solid #eef2f7;padding:10px;text-align:left;}} th{{background:#f8fafc;}}
+</style></head><body><div class="wrap">
+<div class="hero"><h1>发布工作台 {dashboard_date}</h1><p>先在账号页生成/筛选内容，单条页里复制文案、下载素材包，发布后点“已发布”。</p></div>
+<div class="grid">
+<div class="stat">总候选<b>{counts['total']}</b></div>
+<div class="stat">待筛选<b>{counts['pending']}</b></div>
+<div class="stat">已选用<b>{counts['approved']}</b></div>
+<div class="stat">已发布<b>{counts['posted']}</b></div>
+<div class="stat">已丢弃<b>{counts['rejected']}</b></div>
+<div class="stat">已配图<b>{counts['images']}</b></div>
+</div>
+<div class="actions">
+<a href="{dashboard_date}/accounts.html">进入账号工作台</a>
+<a href="{dashboard_date}/index.html">查看全部候选</a>
+<a class="green" href="/export-selected?date={dashboard_date}" target="_blank">导出已选清单</a>
+</div>
+<div class="card"><h2>账号概览</h2><table><thead><tr><th>账号</th><th>候选</th><th>已选</th><th>最高分</th></tr></thead><tbody>{''.join(account_rows)}</tbody></table></div>
+</div></body></html>"""
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    index_file = PREVIEW_DIR / "dashboard.html"
+    index_file.write_text(dashboard_html, encoding="utf-8")
     return {"index_file": str(index_file), "index_url": build_preview_url(config, index_file)}
 
 
@@ -2323,7 +2406,8 @@ def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
         )
 
     default_date = dates[0]
-    default_index = PREVIEW_DIR / default_date / "accounts.html"
+    dashboard_index = PREVIEW_DIR / "dashboard.html"
+    default_index = dashboard_index if dashboard_index.exists() else PREVIEW_DIR / default_date / "accounts.html"
     if not default_index.exists():
         default_index = PREVIEW_DIR / default_date / "index.html"
     default_version = str(int(default_index.stat().st_mtime)) if default_index.exists() else "0"
@@ -2381,7 +2465,7 @@ def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
       <div class="header">
         <h1>当前日期：<span id="current-date">{default_date}</span></h1>
       </div>
-      <iframe name="date-content-frame" src="{default_date}/{default_index.name}?v={default_version}"></iframe>
+      <iframe name="date-content-frame" src="{default_index.relative_to(PREVIEW_DIR).as_posix()}?v={default_version}"></iframe>
     </main>
   </div>
 </body>
@@ -3097,6 +3181,9 @@ def command_plan_day(args: argparse.Namespace) -> None:
         print(f"[OK] Accounts index: {accounts_index['index_file']}")
         if accounts_index["index_url"]:
             print(f"[OK] Accounts URL: {accounts_index['index_url']}")
+    dashboard_index = build_dashboard_index(config, queue, date)
+    if dashboard_index["index_file"]:
+        print(f"[OK] Dashboard index: {dashboard_index['index_file']}")
     preview_portal = build_preview_portal(config)
     if preview_portal["portal_file"]:
         print(f"[OK] Preview portal: {preview_portal['portal_file']}")
@@ -3390,6 +3477,7 @@ def command_generate_account(args: argparse.Namespace) -> None:
     date_items = [item for item in queue if item.get("date") == date]
     preview_index = build_preview_index(config, date_items, date)
     accounts_index = build_accounts_index(config, queue, date)
+    build_dashboard_index(config, queue, date)
     preview_portal = build_preview_portal(config)
     save_queue(queue)
 
@@ -3473,6 +3561,7 @@ def command_serve_review(args: argparse.Namespace) -> None:
                         item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
                         build_preview_index(config, [entry for entry in queue if entry.get("date") == item_date], item_date)
                         build_accounts_index(config, queue, item_date)
+                        build_dashboard_index(config, queue, item_date)
                         build_preview_portal(config)
                         break
                     if not found:
@@ -3486,6 +3575,68 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(message.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/action":
+                params = urllib.parse.parse_qs(parsed.query)
+                item_id = (params.get("id") or [""])[0]
+                action = (params.get("action") or [""])[0]
+                if not item_id or action not in {"images", "pack"}:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write("参数错误".encode("utf-8"))
+                    return
+                try:
+                    config = load_config(Path(config_path))
+                    queue = load_queue()
+                    item = next((entry for entry in queue if entry.get("id") == item_id), None)
+                    if item is None:
+                        raise ValueError(f"Queue item not found: {item_id}")
+                    if action == "images":
+                        render_cloud_illustrations_for_items(config, [item])
+                        message = "已重新配图"
+                    else:
+                        build_asset_pack_for_item(config, item)
+                        message = "素材包已重建"
+                    generate_preview_for_item(config, item)
+                    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+                    build_preview_index(config, [entry for entry in queue if entry.get("date") == item_date], item_date)
+                    build_accounts_index(config, queue, item_date)
+                    build_dashboard_index(config, queue, item_date)
+                    build_preview_portal(config)
+                    save_queue(queue)
+                    self.send_response(200)
+                except Exception as exc:  # pylint: disable=broad-except
+                    message = f"操作失败：{exc}"
+                    self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(message.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/export-selected":
+                params = urllib.parse.parse_qs(parsed.query)
+                date = (params.get("date") or [""])[0]
+                account = (params.get("account") or [""])[0]
+                platform = (params.get("platform") or [""])[0]
+                buffer = io.StringIO()
+                status_code = 200
+                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                    try:
+                        command_export_selected(
+                            argparse.Namespace(
+                                config=config_path,
+                                date=date,
+                                account=account,
+                                platform=platform,
+                            )
+                        )
+                    except Exception as exc:  # pylint: disable=broad-except
+                        status_code = 500
+                        print(f"[ERROR] {exc}")
+                self.send_response(status_code)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(buffer.getvalue().encode("utf-8", errors="replace"))
                 return
             if parsed.path == "/":
                 self.path = "/index.html"
@@ -3570,6 +3721,8 @@ def command_preview(args: argparse.Namespace) -> None:
             print(f"[OK] preview url ({item_date}): {preview_index['index_url']}")
         accounts_index = build_accounts_index(config, queue, item_date)
         print(f"[OK] accounts index ({item_date}): {accounts_index['index_file']}")
+        dashboard_index = build_dashboard_index(config, queue, item_date)
+        print(f"[OK] dashboard index ({item_date}): {dashboard_index['index_file']}")
 
     preview_portal = build_preview_portal(config)
     if preview_portal["portal_file"]:
