@@ -36,6 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 import xml.etree.ElementTree as et
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -1401,6 +1402,35 @@ def create_placeholder_illustrations_for_item(
     return {"status": "ok", "count": len(files), "urls": urls, "fallback": True}
 
 
+def build_asset_pack_for_item(config: dict[str, Any], item: dict[str, Any]) -> dict[str, str]:
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    pack_dir = PREVIEW_DIR / "media" / item_date / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    pack_file = pack_dir / f"{queue_id}_publish_pack.zip"
+    content = extract_content_payload(item)
+    with zipfile.ZipFile(pack_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        content_file = str(item.get("content_file", "")).strip()
+        if content_file and Path(content_file).exists():
+            zf.write(content_file, "content.md")
+        else:
+            zf.writestr("content.md", content.get("content_markdown", ""))
+        zf.writestr("title.txt", str(item.get("title", "")).strip())
+        zf.writestr("body.md", content.get("body_markdown", ""))
+        zf.writestr("capcut_script.txt", strip_markdown(content.get("body_markdown", "")))
+        hashtags = item.get("hashtags", [])
+        hashtag_line = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
+        zf.writestr("hashtags.txt", hashtag_line)
+        for idx, path in enumerate(item.get("illustration_files") or [], start=1):
+            local_path = Path(str(path))
+            if local_path.exists():
+                zf.write(local_path, f"images/{idx:02d}{local_path.suffix or '.jpg'}")
+    item["asset_pack_file"] = str(pack_file)
+    item["asset_pack_url"] = build_preview_url(config, pack_file)
+    item["updated_at"] = now_local().isoformat()
+    return {"asset_pack_file": str(pack_file), "asset_pack_url": item["asset_pack_url"]}
+
+
 def write_cloud_asset_from_url(url: str, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     blob = http_get_bytes(url, timeout=120)
@@ -1839,6 +1869,9 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         [part for part in [raw_title, raw_hook, raw_body, raw_cover, hashtag_line] if part]
     )
     capcut_text = strip_markdown(raw_body or raw_hook or raw_title)
+    asset_pack_url = str(item.get("asset_pack_url", "")).strip()
+    if not asset_pack_url:
+        asset_pack_url = build_preview_url(config, PREVIEW_DIR / "media" / str(item.get("date", "")) / "packs" / f"{queue_id}_publish_pack.zip")
     title = html.escape(str(item.get("title", "")).strip() or "未命名草稿")
     account = html.escape(str(item.get("account_name", "")).strip())
     platform = html.escape(str(item.get("platform", "")).strip())
@@ -1886,6 +1919,13 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         f"<button type='button' data-copy-target='copy-body-{queue_id}' onclick='copyTarget(this)'>复制正文</button>"
         f"<button type='button' data-copy-target='copy-full-{queue_id}' onclick='copyTarget(this)'>复制完整发布文案</button>"
         f"<button type='button' data-copy-target='copy-capcut-{queue_id}' onclick='copyTarget(this)'>复制剪映口播稿</button>"
+        f"<a class='download-pack' href='{html.escape(asset_pack_url)}' target='_blank' rel='noreferrer'>下载素材包</a>"
+        "</div>"
+        "<div class='status-actions'>"
+        f"<button type='button' onclick=\"setStatus('{queue_id}','approved',this)\">选用</button>"
+        f"<button type='button' onclick=\"setStatus('{queue_id}','posted',this)\">已发布</button>"
+        f"<button type='button' class='danger' onclick=\"setStatus('{queue_id}','rejected',this)\">丢弃</button>"
+        "<span class='status-result'></span>"
         "</div>"
         f"<textarea id='copy-title-{queue_id}'>{html.escape(raw_title)}</textarea>"
         f"<textarea id='copy-body-{queue_id}'>{html.escape(raw_body)}</textarea>"
@@ -1977,6 +2017,11 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .copy-panel h3 {{ margin:0 0 8px; font-size:14px; }}
     .copy-actions {{ display:flex; flex-wrap:wrap; gap:8px; }}
     .copy-actions button {{ border:0; background:#2563eb; color:#fff; border-radius:8px; padding:7px 10px; cursor:pointer; font-size:12px; }}
+    .download-pack {{ display:inline-flex; align-items:center; background:#059669; color:#fff; border-radius:8px; padding:7px 10px; text-decoration:none; font-size:12px; }}
+    .status-actions {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; }}
+    .status-actions button {{ border:0; background:#0f766e; color:#fff; border-radius:8px; padding:7px 10px; cursor:pointer; font-size:12px; }}
+    .status-actions button.danger {{ background:#dc2626; }}
+    .status-result {{ color:#64748b; font-size:12px; }}
     .copy-panel textarea {{ position:absolute; left:-9999px; top:-9999px; }}
     .article h1 {{ font-size: 21px; line-height: 1.4; margin: 0 0 12px; }}
     .hook {{ background: #eff6ff; border-left: 3px solid #3b82f6; padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }}
@@ -2017,6 +2062,12 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
       btn.innerText = '已复制';
       setTimeout(() => btn.innerText = old, 1300);
     }}
+    async function setStatus(id, status, btn) {{
+      const box = btn.closest('.status-actions').querySelector('.status-result');
+      box.innerText = '处理中...';
+      const resp = await fetch('/status?id=' + encodeURIComponent(id) + '&status=' + encodeURIComponent(status));
+      box.innerText = await resp.text();
+    }}
   </script>
 </head>
 <body>
@@ -2037,6 +2088,7 @@ def generate_preview_for_item(config: dict[str, Any], item: dict[str, Any]) -> N
     preview_cfg = config.get("preview", {})
     if not preview_cfg.get("enabled", True):
         return
+    build_asset_pack_for_item(config, item)
     item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
     queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
     content = extract_content_payload(item)
@@ -2147,10 +2199,11 @@ def build_accounts_index(
             score = safe_int(item.get("total_score", 0), default=0)
             ill_count = len(item.get("illustration_urls") or item.get("illustration_files") or [])
             material = f"{ill_count} 张图" if ill_count else "待配图"
+            status = html.escape(str(item.get("status", "pending_review")))
             item_rows.append(
                 "<li>"
                 f"<a href='{href}' target='_blank' rel='noreferrer'>{title}</a>"
-                f"<span>{badge}{score}</span><span>{material}</span>"
+                f"<span>{badge}{score}</span><span>{material}</span><span>{status}</span>"
                 "</li>"
             )
         if not item_rows:
@@ -2194,7 +2247,7 @@ button{{border:0;background:#2563eb;color:#fff;border-radius:9px;padding:8px 11p
 button.secondary{{background:#64748b;}}
 .run-log{{display:none;white-space:pre-wrap;background:#0f172a;color:#dbeafe;border-radius:10px;padding:10px;font-size:12px;max-height:220px;overflow:auto;}}
 .items{{list-style:none;margin:0;padding:0;display:grid;gap:8px;}}
-.items li{{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;border-top:1px solid #eef2f7;padding-top:8px;font-size:13px;}}
+    .items li{{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;border-top:1px solid #eef2f7;padding-top:8px;font-size:13px;}}
 a{{color:#2563eb;text-decoration:none;}} .items span{{color:#6b7280;white-space:nowrap;}}
 </style>
 <script>
@@ -2205,7 +2258,7 @@ async function runGenerate(btn){{
   log.style.display='block'; log.textContent='正在生成，请等待...';
   btn.disabled=true;
   try {{
-    const resp = await fetch('/generate?count=3&sync_feishu=1&account=' + encodeURIComponent(btn.dataset.account || ''));
+    const resp = await fetch('/generate?count=3&sync_feishu=0&account=' + encodeURIComponent(btn.dataset.account || ''));
     log.textContent = await resp.text();
     if (resp.ok) log.textContent += '\\n\\n生成完成，刷新页面即可看到新候选内容。';
   }} catch (err) {{
@@ -3395,6 +3448,45 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 self.end_headers()
                 self.wfile.write(payload.encode("utf-8", errors="replace"))
                 return
+            if parsed.path == "/status":
+                params = urllib.parse.parse_qs(parsed.query)
+                item_id = (params.get("id") or [""])[0]
+                status = (params.get("status") or [""])[0]
+                allowed = {"pending_review", "approved", "ready_to_post", "posted", "rejected"}
+                if not item_id or status not in allowed:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write("参数错误".encode("utf-8"))
+                    return
+                try:
+                    config = load_config(Path(config_path))
+                    queue = load_queue()
+                    found = False
+                    for item in queue:
+                        if item.get("id") != item_id:
+                            continue
+                        item["status"] = status
+                        item["updated_at"] = now_local().isoformat()
+                        generate_preview_for_item(config, item)
+                        found = True
+                        item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+                        build_preview_index(config, [entry for entry in queue if entry.get("date") == item_date], item_date)
+                        build_accounts_index(config, queue, item_date)
+                        build_preview_portal(config)
+                        break
+                    if not found:
+                        raise ValueError(f"Queue item not found: {item_id}")
+                    save_queue(queue)
+                    message = f"已更新为 {status}"
+                    self.send_response(200)
+                except Exception as exc:  # pylint: disable=broad-except
+                    message = f"更新失败：{exc}"
+                    self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(message.encode("utf-8", errors="replace"))
+                return
             if parsed.path == "/":
                 self.path = "/index.html"
             return super().do_GET()
@@ -3402,6 +3494,47 @@ def command_serve_review(args: argparse.Namespace) -> None:
     server = http.server.ThreadingHTTPServer((host, port), ReviewHandler)
     print(f"[OK] Review server running: http://{host}:{port}")
     server.serve_forever()
+
+
+def command_export_selected(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    selected = filter_queue_items(
+        queue,
+        date=str(args.date or "").strip(),
+        account=str(args.account or "").strip(),
+        platform=str(args.platform or "").strip(),
+        include_blocked=True,
+    )
+    selected = [item for item in selected if item.get("status") in {"approved", "ready_to_post", "posted"}]
+    if not selected:
+        print("No selected/publishable items matched filters.")
+        return
+    export_date = str(args.date or now_local().strftime("%Y-%m-%d"))
+    out_file = OUTBOX_DIR / export_date / "selected_publish_list.md"
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"# 已选发布内容清单 {export_date}", ""]
+    for item in selected:
+        content = extract_content_payload(item)
+        lines.extend(
+            [
+                f"## {item.get('account_name', '')} / {item.get('platform', '')} / {item.get('id', '')}",
+                "",
+                f"- 状态：{item.get('status', '')}",
+                f"- 预览：{item.get('preview_url', '')}",
+                f"- 素材包：{item.get('asset_pack_url', '')}",
+                "",
+                f"### 标题\n{item.get('title', '')}",
+                "",
+                f"### 正文\n{content.get('body_markdown', '')}",
+                "",
+                f"### 配图\n" + "\n".join([f"- {url}" for url in item.get("illustration_urls", [])]),
+                "",
+            ]
+        )
+    out_file.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[OK] exported selected list: {out_file}")
 
 
 def command_preview(args: argparse.Namespace) -> None:
@@ -3733,6 +3866,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--host", default="0.0.0.0", help="Bind host")
     p_serve.add_argument("--port", type=int, default=8787, help="Bind port")
     p_serve.set_defaults(func=command_serve_review)
+
+    p_export_selected = sub.add_parser("export-selected", help="Export approved/posted content list")
+    p_export_selected.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_export_selected.add_argument("--account", default="", help="Account filter")
+    p_export_selected.add_argument("--platform", default="", help="Exact platform filter")
+    p_export_selected.set_defaults(func=command_export_selected)
 
     p_preview = sub.add_parser("preview", help="Generate visual preview HTML pages")
     p_preview.add_argument("--id", default="", help="Queue item ID")
