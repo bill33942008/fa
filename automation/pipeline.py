@@ -30,6 +30,7 @@ import smtplib
 import ssl
 import subprocess
 import tempfile
+import threading
 import textwrap
 import time
 import urllib.error
@@ -2369,11 +2370,6 @@ def build_accounts_index(
             )
         if not item_rows:
             item_rows.append("<li><span>暂无候选内容，先运行生成命令。</span></li>")
-        command = (
-            "cd /opt/fa && source /etc/profile.d/content_ops_env.sh && "
-            f"/opt/fa/.venv/bin/python automation/pipeline.py --config automation/config.json "
-            f"generate-account --account {shlex.quote(account_name)} --count 3 --sync-feishu"
-        )
         cards.append(
             f"<section class='account-card' data-account='{html.escape(account_name)}' data-platform='{html.escape(platform)}'>"
             f"<div class='account-head'><h2>{html.escape(account_name)}</h2><span>{html.escape(platform)}</span></div>"
@@ -2383,7 +2379,6 @@ def build_accounts_index(
             "<input type='number' min='1' max='10' value='3' title='生成条数' />"
             f"<button type='button' onclick=\"runGenerate(this)\" data-account=\"{html.escape(account_name)}\">点击生成</button>"
             "</div>"
-            f"<button type='button' class='secondary' onclick=\"copyText(this)\" data-copy=\"{html.escape(command)}\">复制命令</button>"
             "<pre class='run-log'></pre>"
             "<ul class='items'>"
             f"{''.join(item_rows)}"
@@ -2417,21 +2412,37 @@ button.secondary{{background:#64748b;}}
 a{{color:#2563eb;text-decoration:none;}} .items span{{color:#6b7280;white-space:nowrap;}}
 </style>
 <script>
-function copyText(btn){{navigator.clipboard.writeText(btn.dataset.copy || '');btn.innerText='已复制命令';setTimeout(()=>btn.innerText='复制生成命令',1400);}}
 async function runGenerate(btn){{
   const card = btn.closest('.account-card');
   const log = card.querySelector('.run-log');
   const count = card.querySelector('.generate-row input')?.value || '3';
-  log.style.display='block'; log.textContent='正在生成，请等待...';
+  log.style.display='block'; log.textContent='正在创建生成任务...';
   btn.disabled=true;
   try {{
-    const resp = await fetch('/generate?sync_feishu=0&count=' + encodeURIComponent(count) + '&account=' + encodeURIComponent(btn.dataset.account || ''));
-    log.textContent = await resp.text();
-    if (resp.ok) log.textContent += '\\n\\n生成完成，刷新页面即可看到新候选内容。';
+    const resp = await fetch('/generate?async=1&sync_feishu=0&count=' + encodeURIComponent(count) + '&account=' + encodeURIComponent(btn.dataset.account || ''));
+    const payload = await resp.json();
+    if (!resp.ok) throw new Error(payload.error || '创建任务失败');
+    await pollJob(payload.job_id, log);
   }} catch (err) {{
     log.textContent = '生成失败：' + err;
   }} finally {{
     btn.disabled=false;
+  }}
+}}
+async function pollJob(jobId, log){{
+  while (true) {{
+    const resp = await fetch('/job-status?id=' + encodeURIComponent(jobId));
+    const payload = await resp.json();
+    log.textContent = (payload.lines || []).join('\\n');
+    if (payload.status === 'done') {{
+      log.textContent += '\\n\\n生成完成，刷新页面即可看到新候选内容。';
+      return;
+    }}
+    if (payload.status === 'failed') {{
+      log.textContent += '\\n\\n生成失败，请看上方错误。';
+      return;
+    }}
+    await new Promise(resolve => setTimeout(resolve, 1500));
   }}
 }}
 function filterAccounts(input){{
@@ -3642,6 +3653,68 @@ def command_serve_review(args: argparse.Namespace) -> None:
     config_path = str(args.config)
     host = str(args.host)
     port = int(args.port)
+    jobs: dict[str, dict[str, Any]] = {}
+    jobs_lock = threading.Lock()
+
+    class JobLogWriter:
+        def __init__(self, job_id: str) -> None:
+            self.job_id = job_id
+            self._buffer = ""
+
+        def write(self, text: str) -> int:
+            self._buffer += text
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                if line.strip():
+                    with jobs_lock:
+                        jobs[self.job_id].setdefault("lines", []).append(line)
+            return len(text)
+
+        def flush(self) -> None:
+            if self._buffer.strip():
+                with jobs_lock:
+                    jobs[self.job_id].setdefault("lines", []).append(self._buffer.strip())
+            self._buffer = ""
+
+    def start_generation_job(account: str, platform: str, count: int, sync_feishu: bool) -> str:
+        job_id = uuid.uuid4().hex[:10]
+        with jobs_lock:
+            jobs[job_id] = {
+                "status": "running",
+                "lines": [
+                    f"[START] 账号={account or '全部'} 平台={platform or '全部'} 数量={count}",
+                    "[STEP] 收集选题 -> 生成文案 -> DashScope配图 -> 重建预览/素材包",
+                ],
+                "created_at": now_local().isoformat(),
+            }
+
+        def runner() -> None:
+            writer = JobLogWriter(job_id)
+            try:
+                with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+                    command_generate_account(
+                        argparse.Namespace(
+                            config=config_path,
+                            account=account,
+                            platform=platform,
+                            date=None,
+                            count=count,
+                            render_images=True,
+                            sync_feishu=sync_feishu,
+                        )
+                    )
+                writer.flush()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "done"
+                    jobs[job_id].setdefault("lines", []).append("[DONE] 生成完成")
+            except Exception as exc:  # pylint: disable=broad-except
+                writer.flush()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "failed"
+                    jobs[job_id].setdefault("lines", []).append(f"[ERROR] {exc}")
+
+        threading.Thread(target=runner, daemon=True).start()
+        return job_id
 
     class ReviewHandler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *handler_args: Any, **handler_kwargs: Any) -> None:
@@ -3659,6 +3732,19 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 platform = (params.get("platform") or [""])[0]
                 count = safe_int((params.get("count") or ["3"])[0], default=3)
                 sync_feishu = (params.get("sync_feishu") or ["1"])[0] not in {"0", "false", "False"}
+                async_mode = (params.get("async") or ["0"])[0] in {"1", "true", "True"}
+                if async_mode:
+                    try:
+                        job_id = start_generation_job(account, platform, count, sync_feishu)
+                        payload = {"job_id": job_id, "status": "running"}
+                        self.send_response(200)
+                    except Exception as exc:  # pylint: disable=broad-except
+                        payload = {"error": str(exc)}
+                        self.send_response(500)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+                    return
                 buffer = io.StringIO()
                 status = 200
                 with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
@@ -3682,6 +3768,17 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(payload.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/job-status":
+                params = urllib.parse.parse_qs(parsed.query)
+                job_id = (params.get("id") or [""])[0]
+                with jobs_lock:
+                    payload = dict(jobs.get(job_id) or {"status": "missing", "lines": ["任务不存在或服务已重启"]})
+                    payload["lines"] = list(payload.get("lines", []))[-120:]
+                self.send_response(200 if payload.get("status") != "missing" else 404)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
                 return
             if parsed.path == "/status":
                 params = urllib.parse.parse_qs(parsed.query)
