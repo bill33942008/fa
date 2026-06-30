@@ -391,15 +391,30 @@ def replicate_poll_prediction(cfg: dict[str, Any], prediction_id: str) -> dict[s
 
 
 def normalize_prediction_urls(output: Any) -> list[str]:
+    if output is None:
+        return []
     if isinstance(output, str) and output.startswith("http"):
         return [output]
     if isinstance(output, list):
-        return [str(x) for x in output if isinstance(x, str) and x.startswith("http")]
+        urls: list[str] = []
+        for item in output:
+            urls.extend(normalize_prediction_urls(item))
+        return urls
     if isinstance(output, dict):
         urls: list[str] = []
+        for key in ("url", "image", "video_url", "file_url"):
+            value = output.get(key)
+            if isinstance(value, str) and value.startswith("http"):
+                urls.append(value)
         for value in output.values():
             urls.extend(normalize_prediction_urls(value))
-        return urls
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for url in urls:
+            if url not in seen:
+                seen.add(url)
+                ordered.append(url)
+        return ordered
     return []
 
 
@@ -1445,6 +1460,10 @@ def render_cloud_illustrations_for_items(
                     f"[WARN] cloud illustrations failed {item.get('id')}: {exc} | "
                     "used placeholder fallback"
                 )
+                print(
+                    f"[OK] illustrations fallback {item.get('id')} -> "
+                    f"{fallback.get('count', 0)} image(s)"
+                )
             else:
                 item["notes"] = (str(item.get("notes", "")).strip() + f" | 云插图失败: {exc}").strip(" |")
                 item["updated_at"] = now_local().isoformat()
@@ -1482,6 +1501,10 @@ def render_cloud_videos_for_items(
                     print(
                         f"[WARN] cloud video failed {item.get('id')}: {exc} | "
                         "used server fallback video"
+                    )
+                    print(
+                        f"[OK] cloud video fallback {item.get('id')} -> "
+                        f"{fallback.get('video_file', '')}"
                     )
                 except Exception as fallback_exc:  # pylint: disable=broad-except
                     item["notes"] = (
