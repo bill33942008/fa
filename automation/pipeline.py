@@ -1172,6 +1172,37 @@ def markdown_to_html_with_inline_images(markdown_text: str, image_urls: list[str
     return "\n".join(html_parts)
 
 
+def markdown_with_image_markers(markdown_text: str, image_count: int) -> str:
+    if image_count <= 0:
+        return markdown_text
+    lines = markdown_text.splitlines()
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if line.strip():
+            current.append(line)
+            continue
+        if current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    if not blocks:
+        return markdown_text
+
+    markers_after: dict[int, list[int]] = {}
+    for idx in range(image_count):
+        block_idx = min(len(blocks) - 1, int((idx + 1) * len(blocks) / (image_count + 1)))
+        markers_after.setdefault(block_idx, []).append(idx + 1)
+
+    parts: list[str] = []
+    for block_idx, block in enumerate(blocks):
+        parts.append("\n".join(block))
+        for image_idx in markers_after.get(block_idx, []):
+            parts.append(f"【插入配图{image_idx:02d}：对应上方段落】")
+    return "\n\n".join(parts)
+
+
 def build_preview_url(config: dict[str, Any], preview_file: Path) -> str:
     preview_cfg = config.get("preview", {})
     public_base_url = str(preview_cfg.get("public_base_url", "")).strip()
@@ -1531,7 +1562,7 @@ def build_asset_pack_for_item(config: dict[str, Any], item: dict[str, Any]) -> d
                 for part in [
                     str(item.get("title", "")).strip(),
                     content.get("hook_text", ""),
-                    content.get("body_markdown", ""),
+                    markdown_with_image_markers(content.get("body_markdown", ""), len(image_files)),
                     content.get("cover_text", ""),
                     hashtag_line,
                 ]
@@ -2054,6 +2085,19 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     if not isinstance(illustration_urls, list):
         illustration_urls = []
     body_html = markdown_to_html_with_inline_images(content.get("body_markdown", ""), illustration_urls)
+    marker_publish_text = "\n\n".join(
+        [
+            part
+            for part in [
+                raw_title,
+                raw_hook,
+                markdown_with_image_markers(raw_body, len(illustration_urls)),
+                raw_cover,
+                hashtag_line,
+            ]
+            if part
+        ]
+    )
     rich_publish_html = (
         "<article class='rich-article'>"
         f"<h1>{title}</h1>"
@@ -2070,6 +2114,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         f"<button type='button' data-copy-target='copy-title-{queue_id}' onclick='copyTarget(this)'>复制标题</button>"
         f"<button type='button' data-copy-target='copy-body-{queue_id}' onclick='copyTarget(this)'>复制正文</button>"
         f"<button type='button' data-copy-target='copy-full-{queue_id}' onclick='copyTarget(this)'>复制完整发布文案</button>"
+        f"<button type='button' data-copy-target='copy-marker-{queue_id}' onclick='copyTarget(this)'>复制带图片位置文案</button>"
         f"<button type='button' data-rich-target='rich-copy-{queue_id}' onclick='copyRichTarget(this)'>复制公众号图文（含图片）</button>"
         f"<button type='button' data-copy-target='copy-capcut-{queue_id}' onclick='copyTarget(this)'>复制剪映口播稿</button>"
         f"<a class='download-pack' href='{html.escape(asset_pack_url)}' target='_blank' rel='noreferrer'>下载素材包</a>"
@@ -2085,6 +2130,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         f"<textarea id='copy-title-{queue_id}'>{html.escape(raw_title)}</textarea>"
         f"<textarea id='copy-body-{queue_id}'>{html.escape(raw_body)}</textarea>"
         f"<textarea id='copy-full-{queue_id}'>{html.escape(publish_text)}</textarea>"
+        f"<textarea id='copy-marker-{queue_id}'>{html.escape(marker_publish_text)}</textarea>"
         f"<textarea id='copy-capcut-{queue_id}'>{html.escape(capcut_text)}</textarea>"
         "<details class='rich-copy-details'>"
         "<summary>公众号富文本复制区（按钮失败时，展开后框选整块 Ctrl+C）</summary>"
@@ -2264,8 +2310,26 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
       if (!el) return;
       const old = btn.innerText;
       try {{
-        const html = el.innerHTML;
-        const text = el.innerText || el.textContent || '';
+        const clone = el.cloneNode(true);
+        const imgs = Array.from(clone.querySelectorAll('img'));
+        for (const img of imgs) {{
+          try {{
+            const absoluteUrl = new URL(img.getAttribute('src'), window.location.href).toString();
+            const resp = await fetch(absoluteUrl, {{cache: 'no-store'}});
+            const blob = await resp.blob();
+            const dataUrl = await new Promise((resolve, reject) => {{
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result);
+              reader.onerror = reject;
+              reader.readAsDataURL(blob);
+            }});
+            img.setAttribute('src', dataUrl);
+          }} catch (err) {{
+            // Keep original src if conversion fails; manual upload remains available via素材包.
+          }}
+        }}
+        const html = clone.innerHTML;
+        const text = clone.innerText || clone.textContent || '';
         if (navigator.clipboard && window.ClipboardItem && window.isSecureContext) {{
           await navigator.clipboard.write([
             new ClipboardItem({{
