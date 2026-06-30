@@ -3556,7 +3556,7 @@ def build_queue_summary(queue: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def send_email_digest(config: dict[str, Any], body: str) -> bool:
+def send_email_digest(config: dict[str, Any], body: str, subject: str | None = None) -> bool:
     email_cfg = config.get("notification", {}).get("email", {})
     if not email_cfg.get("enabled", False):
         print("[INFO] Email digest disabled.")
@@ -3567,7 +3567,7 @@ def send_email_digest(config: dict[str, Any], body: str) -> bool:
         raise ValueError("SMTP password env var is missing.")
 
     msg = MIMEText(body, _subtype="plain", _charset="utf-8")
-    msg["Subject"] = f"[ContentOps] Queue Digest {now_local().strftime('%Y-%m-%d')}"
+    msg["Subject"] = subject or f"[ContentOps] Queue Digest {now_local().strftime('%Y-%m-%d')}"
     msg["From"] = email_cfg["sender"]
     msg["To"] = ", ".join(email_cfg.get("receivers", []))
 
@@ -3721,7 +3721,11 @@ def send_publish_reminder_notifications(config: dict[str, Any], body: str) -> li
     except Exception as exc:  # pylint: disable=broad-except
         results.append(f"feishu:failed:{exc}")
     try:
-        if send_email_digest(config, body):
+        if send_email_digest(
+            config,
+            body,
+            subject=f"[ContentOps] 发布提醒 {now_local().strftime('%Y-%m-%d %H:%M')}",
+        ):
             results.append("email:ok")
     except Exception as exc:  # pylint: disable=broad-except
         results.append(f"email:failed:{exc}")
@@ -4718,6 +4722,15 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 lines.append(f"- 工作目录：{BASE_DIR.parent}")
                 lines.append(f"- DeepSeek Key：{'已配置' if os.getenv('DEEPSEEK_API_KEY') else '未配置'}")
                 lines.append(f"- DashScope Key：{'已配置' if os.getenv('DASHSCOPE_API_KEY') else '未配置'}")
+                try:
+                    health_config = load_config(Path(config_path))
+                    email_cfg = health_config.get("notification", {}).get("email", {})
+                    lines.append(f"- 邮件提醒：{'已启用' if email_cfg.get('enabled') else '未启用'}")
+                    lines.append(f"- 发件邮箱：{email_cfg.get('sender', '-')}")
+                    lines.append(f"- 收件邮箱：{', '.join(email_cfg.get('receivers', [])) or '-'}")
+                    lines.append(f"- SMTP授权码：{'已配置' if os.getenv(email_cfg.get('password_env', 'SMTP_PASSWORD')) else '未配置'}")
+                except Exception as exc:  # pylint: disable=broad-except
+                    lines.append(f"- 邮件配置检查失败：{exc}")
                 try:
                     cron = subprocess.run(
                         ["crontab", "-l"],
