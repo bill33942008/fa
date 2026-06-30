@@ -1707,6 +1707,53 @@ def build_asset_pack_for_item(config: dict[str, Any], item: dict[str, Any]) -> d
     return {"asset_pack_file": str(pack_file), "asset_pack_url": item["asset_pack_url"]}
 
 
+def build_bulk_asset_pack(
+    config: dict[str, Any],
+    queue: list[dict[str, Any]],
+    *,
+    date: str = "",
+    status: str = "all",
+) -> dict[str, str]:
+    target_date = date or max([str(item.get("date", "")) for item in queue] or [now_local().strftime("%Y-%m-%d")])
+    selected = [item for item in queue if item.get("date") == target_date]
+    if status == "selected":
+        selected = [
+            item
+            for item in selected
+            if item.get("status") in {"approved", "ready_to_post", "posted"}
+        ]
+    elif status and status != "all":
+        selected = [item for item in selected if item.get("status") == status]
+    if not selected:
+        raise ValueError("No items matched bulk asset pack filters.")
+
+    bulk_dir = PREVIEW_DIR / "media" / target_date / "bulk"
+    bulk_dir.mkdir(parents=True, exist_ok=True)
+    suffix = "selected" if status == "selected" else status or "all"
+    bulk_file = bulk_dir / f"{target_date}_{sanitize_filename_part(suffix, 20)}_asset_packs.zip"
+    with zipfile.ZipFile(bulk_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        manifest_lines = [f"# 批量素材包 {target_date}", ""]
+        for item in selected:
+            build_asset_pack_for_item(config, item)
+            pack_path = Path(str(item.get("asset_pack_file", "")))
+            folder = "_".join(
+                [
+                    sanitize_filename_part(item.get("account_name", ""), 16),
+                    sanitize_filename_part(item.get("platform", ""), 14),
+                    sanitize_filename_part(item.get("title", ""), 28),
+                    str(item.get("id", "")),
+                ]
+            )
+            manifest_lines.append(
+                f"- {item.get('account_name', '')} / {platform_label(item.get('platform'))} / "
+                f"{status_label(item.get('status'))} / {item.get('title', '')}"
+            )
+            if pack_path.exists():
+                zf.write(pack_path, f"{folder}/{pack_path.name}")
+        zf.writestr("README.md", "\n".join(manifest_lines))
+    return {"bulk_pack_file": str(bulk_file), "bulk_pack_url": build_preview_url(config, bulk_file)}
+
+
 def write_cloud_asset_from_url(url: str, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     blob = http_get_bytes(url, timeout=120)
@@ -2879,6 +2926,8 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 <a href="{dashboard_date}/accounts.html">进入账号工作台</a>
 <a href="{dashboard_date}/index.html">查看全部候选</a>
 <a class="green" href="/export-selected?date={dashboard_date}" target="_blank">导出已选清单</a>
+<a class="green" href="/download-packs?date={dashboard_date}&status=all" target="_blank">下载今日全部素材包</a>
+<a class="green" href="/download-packs?date={dashboard_date}&status=selected" target="_blank">下载已选素材包</a>
 <a href="/daily-log" target="_blank">查看每日自动生成日志</a>
 </div>
 <div class="card"><h2>今日优先处理</h2><table><thead><tr><th>账号</th><th>平台</th><th>内容</th><th>状态</th><th>评分</th><th>更新时间</th><th>下一步</th></tr></thead><tbody>{''.join(priority_rows) or '<tr><td colspan="7">暂无待处理内容</td></tr>'}</tbody></table></div>
@@ -4268,6 +4317,31 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 self.end_headers()
                 self.wfile.write(payload.encode("utf-8", errors="replace"))
                 return
+            if parsed.path == "/download-packs":
+                params = urllib.parse.parse_qs(parsed.query)
+                date = (params.get("date") or [""])[0]
+                status = (params.get("status") or ["all"])[0]
+                try:
+                    config = load_config(Path(config_path))
+                    queue = load_queue()
+                    result = build_bulk_asset_pack(config, queue, date=date, status=status)
+                    pack_path = Path(result["bulk_pack_file"])
+                    payload = pack_path.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.send_header(
+                        "Content-Disposition",
+                        f"attachment; filename*=UTF-8''{urllib.parse.quote(pack_path.name)}",
+                    )
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                except Exception as exc:  # pylint: disable=broad-except
+                    self.send_response(500)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(f"批量打包失败：{exc}".encode("utf-8", errors="replace"))
+                return
             if parsed.path == "/":
                 self.path = "/index.html"
             return super().do_GET()
@@ -4317,6 +4391,21 @@ def command_export_selected(args: argparse.Namespace) -> None:
         )
     out_file.write_text("\n".join(lines), encoding="utf-8")
     print(f"[OK] exported selected list: {out_file}")
+
+
+def command_export_packs(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    result = build_bulk_asset_pack(
+        config,
+        queue,
+        date=str(args.date or "").strip(),
+        status=str(args.status or "all").strip(),
+    )
+    print(f"[OK] bulk asset pack: {result['bulk_pack_file']}")
+    if result.get("bulk_pack_url"):
+        print(f"[OK] bulk asset pack URL: {result['bulk_pack_url']}")
 
 
 def command_preview(args: argparse.Namespace) -> None:
@@ -4656,6 +4745,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_export_selected.add_argument("--account", default="", help="Account filter")
     p_export_selected.add_argument("--platform", default="", help="Exact platform filter")
     p_export_selected.set_defaults(func=command_export_selected)
+
+    p_export_packs = sub.add_parser("export-packs", help="Export a bulk ZIP of asset packs")
+    p_export_packs.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_export_packs.add_argument(
+        "--status",
+        default="all",
+        choices=["all", "selected", "pending_review", "approved", "ready_to_post", "posted", "rejected"],
+        help="Which items to include",
+    )
+    p_export_packs.set_defaults(func=command_export_packs)
 
     p_preview = sub.add_parser("preview", help="Generate visual preview HTML pages")
     p_preview.add_argument("--id", default="", help="Queue item ID")
