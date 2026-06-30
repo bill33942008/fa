@@ -1137,10 +1137,7 @@ def image_card_html(url: str, label: str) -> str:
         "<figure class='inline-image'>"
         f"<img src='{safe_url}' loading='lazy' />"
         f"<figcaption>{html.escape(label)}</figcaption>"
-        "<div class='ill-actions'>"
-        f"<a href='{safe_url}' target='_blank' rel='noreferrer'>打开原图</a>"
-        f"<a href='{safe_url}' download>下载</a>"
-        "</div></figure>"
+        "</figure>"
     )
 
 
@@ -2230,8 +2227,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
             [
                 (
                     f"<div class='ill-card'><img src='{html.escape(str(url))}' loading='lazy' />"
-                    f"<div class='ill-actions'><a href='{html.escape(str(url))}' target='_blank' rel='noreferrer'>打开原图</a>"
-                    f"<a href='{html.escape(str(url))}' download>下载</a></div></div>"
+                    "</div>"
                 )
                 for url in illustration_urls
             ]
@@ -2361,8 +2357,6 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .inline-image figcaption {{ color:#64748b; font-size:12px; margin-top:5px; }}
     .image-marker {{ background:#fef3c7; border:1px solid #f59e0b; color:#92400e; border-radius:8px; padding:7px 9px; font-size:13px; font-weight:600; }}
     .rich-copy-area .image-marker {{ background:#fff7ed; color:#9a3412; }}
-    .ill-actions {{ display:flex; gap:10px; margin:6px 0 8px; font-size:13px; }}
-    .ill-actions a {{ color:#2563eb; text-decoration:none; }}
   </style>
   <script>
     async function copyToClipboard(text) {{
