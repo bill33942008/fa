@@ -54,27 +54,50 @@ update_code() {
   echo "[OK] updated pipeline.py and helper files"
 }
 
+ensure_python() {
+  PYTHON="$FA_ROOT/.venv/bin/python"
+  PIP="$FA_ROOT/.venv/bin/pip"
+
+  if [[ ! -x "$PYTHON" ]]; then
+    echo "[*] creating virtualenv at $FA_ROOT/.venv"
+    if ! python3 -m venv "$FA_ROOT/.venv" 2>/dev/null; then
+      echo "[*] installing python3-venv..."
+      apt-get update -qq && apt-get install -y python3-venv python3-full
+      python3 -m venv "$FA_ROOT/.venv"
+    fi
+  fi
+
+  "$PIP" install -q --upgrade pip
+  export PYTHON PIP
+  echo "[OK] using $PYTHON"
+}
+
 install_deps() {
+  ensure_python
+
   if ! command -v ffmpeg >/dev/null 2>&1; then
     echo "[*] installing ffmpeg..."
     apt-get update -qq && apt-get install -y ffmpeg
   fi
-  if ! python3 -c "import edge_tts" >/dev/null 2>&1; then
-    echo "[*] installing edge-tts..."
-    python3 -m pip install -q edge-tts
+
+  if ! "$PYTHON" -c "import edge_tts" >/dev/null 2>&1; then
+    echo "[*] installing edge-tts into .venv..."
+    "$PIP" install -q edge-tts
   fi
 }
 
 run_renders() {
+  ensure_python
+
   if [[ -f /etc/profile.d/content_ops_env.sh ]]; then
     # shellcheck disable=SC1091
     source /etc/profile.d/content_ops_env.sh
   fi
 
-  python3 automation/pipeline.py --config automation/config.json \
+  "$PYTHON" automation/pipeline.py --config automation/config.json \
     render-illustrations --id "$ILLUSTRATION_ID" --sync-feishu
 
-  python3 automation/pipeline.py --config automation/config.json \
+  "$PYTHON" automation/pipeline.py --config automation/config.json \
     render-cloud-videos --limit 1 --only-pending --sync-feishu
 }
 

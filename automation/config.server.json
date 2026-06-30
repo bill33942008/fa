@@ -122,7 +122,7 @@
       "server_port": 22,
       "remote_media_dir": "/opt/fa/automation/previews/media",
       "remote_pipeline_dir": "/opt/fa",
-      "remote_python": "/usr/bin/python3",
+      "remote_python": "/opt/fa/.venv/bin/python",
       "remote_config": "/opt/fa/automation/config.json",
       "ssh_identity_file": ""
     }
