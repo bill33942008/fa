@@ -1133,6 +1133,7 @@ def sanitize_filename_part(text: str, max_len: int = 36) -> str:
 def image_card_html(url: str, label: str) -> str:
     safe_url = html.escape(str(url))
     return (
+        f"<p class='image-marker'>【插入{html.escape(label)}】</p>"
         "<figure class='inline-image'>"
         f"<img src='{safe_url}' loading='lazy' />"
         f"<figcaption>{html.escape(label)}</figcaption>"
@@ -1165,10 +1166,12 @@ def markdown_to_html_with_inline_images(markdown_text: str, image_urls: list[str
         image_after.setdefault(block_idx, []).append(url)
 
     html_parts: list[str] = []
+    rendered_image_idx = 0
     for block_idx, block in enumerate(blocks):
         html_parts.append(markdown_to_simple_html("\n".join(block)))
-        for image_idx, url in enumerate(image_after.get(block_idx, []), start=1):
-            html_parts.append(image_card_html(url, f"配图 {image_idx}：对应上方段落"))
+        for url in image_after.get(block_idx, []):
+            rendered_image_idx += 1
+            html_parts.append(image_card_html(url, f"配图{rendered_image_idx:02d}：对应上方段落"))
     return "\n".join(html_parts)
 
 
@@ -2268,6 +2271,8 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .inline-image {{ margin: 12px 0; }}
     .inline-image img {{ width: 100%; border-radius: 10px; border: 1px solid #e5e7eb; }}
     .inline-image figcaption {{ color:#64748b; font-size:12px; margin-top:5px; }}
+    .image-marker {{ background:#fef3c7; border:1px solid #f59e0b; color:#92400e; border-radius:8px; padding:7px 9px; font-size:13px; font-weight:600; }}
+    .rich-copy-area .image-marker {{ background:#fff7ed; color:#9a3412; }}
     .ill-actions {{ display:flex; gap:10px; margin:6px 0 8px; font-size:13px; }}
     .ill-actions a {{ color:#2563eb; text-decoration:none; }}
   </style>
