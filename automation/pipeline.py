@@ -2908,6 +2908,20 @@ def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], d
         f"<span class='pill'>{html.escape(platform_label(platform))}: {count}</span>"
         for platform, count in sorted(platform_counts.items())
     )
+    bulk_all_url = ""
+    bulk_selected_url = ""
+    try:
+        bulk_all_url = build_bulk_asset_pack(config, queue, date=dashboard_date, status="all").get(
+            "bulk_pack_url", ""
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] build all bulk pack failed: {exc}")
+    try:
+        bulk_selected_url = build_bulk_asset_pack(
+            config, queue, date=dashboard_date, status="selected"
+        ).get("bulk_pack_url", "")
+    except Exception:
+        bulk_selected_url = f"/download-packs?date={dashboard_date}&status=selected"
     dashboard_html = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>发布工作台 {dashboard_date}</title>
@@ -2941,8 +2955,8 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 <a href="{dashboard_date}/accounts.html">进入账号工作台</a>
 <a href="{dashboard_date}/index.html">查看全部候选</a>
 <a class="green" href="/export-selected?date={dashboard_date}" target="_blank">导出已选清单</a>
-<a class="green" href="/download-packs?date={dashboard_date}&status=all" target="_blank">下载今日全部素材包</a>
-<a class="green" href="/download-packs?date={dashboard_date}&status=selected" target="_blank">下载已选素材包</a>
+<a class="green" href="{html.escape(bulk_all_url or f'/download-packs?date={dashboard_date}&status=all')}" target="_blank">下载今日全部素材包</a>
+<a class="green" href="{html.escape(bulk_selected_url)}" target="_blank">下载已选素材包</a>
 <a href="/daily-log" target="_blank">查看每日自动生成日志</a>
 </div>
 <div class="card"><h2>今日优先处理</h2><table><thead><tr><th>账号</th><th>平台</th><th>内容</th><th>状态</th><th>评分</th><th>更新时间</th><th>下一步</th></tr></thead><tbody>{''.join(priority_rows) or '<tr><td colspan="7">暂无待处理内容</td></tr>'}</tbody></table></div>
