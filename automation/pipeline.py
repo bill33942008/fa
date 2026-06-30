@@ -1592,6 +1592,85 @@ def build_queue_item(
     }
 
 
+def platform_config_for_item(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    account_name = str(item.get("account_name", "")).strip()
+    platform = str(item.get("platform", "")).strip()
+    for platform_cfg in config.get("platforms", []):
+        if (
+            str(platform_cfg.get("account_name", "")).strip() == account_name
+            and str(platform_cfg.get("platform", "")).strip() == platform
+        ):
+            return platform_cfg
+    for platform_cfg in config.get("platforms", []):
+        if str(platform_cfg.get("account_name", "")).strip() == account_name:
+            return platform_cfg
+    raise ValueError(f"Platform config not found for {account_name}/{platform}")
+
+
+def rewrite_queue_item_draft(
+    config: dict[str, Any], item: dict[str, Any], *, render_images: bool = False
+) -> dict[str, Any]:
+    platform_cfg = platform_config_for_item(config, item)
+    track_name = str(item.get("track") or platform_cfg.get("track", "")).strip()
+    track_cfg = config.get("tracks", {}).get(track_name, {})
+    if not track_cfg:
+        raise ValueError(f"Track config not found: {track_name}")
+    topic = {
+        "title": item.get("source_topic") or item.get("title") or "原选题",
+        "link": item.get("source_link") or "",
+        "description": item.get("body_preview") or item.get("quality_reason") or "",
+    }
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    draft = generate_draft(config, platform_cfg, track_cfg, topic)
+    quality = evaluate_draft_quality(config, platform_cfg, track_cfg, topic, draft)
+    output_dir = OUTBOX_DIR / item_date / platform_cfg["platform"]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / f"{queue_id}.md"
+    markdown = render_markdown(queue_id, platform_cfg, topic, draft, quality=quality)
+    output_file.write_text(markdown, encoding="utf-8")
+
+    item.update(
+        {
+            "platform": platform_cfg["platform"],
+            "account_id": platform_account_id(platform_cfg),
+            "account_name": platform_cfg["account_name"],
+            "track": track_name,
+            "publish_time": platform_cfg.get("publish_time"),
+            "auto_publish": bool(platform_cfg.get("auto_publish", False)),
+            "post_format": platform_cfg.get("post_format", item.get("post_format", "generic")),
+            "title": draft.get("title", ""),
+            "hashtags": draft.get("hashtags", []),
+            "source_topic": topic.get("title"),
+            "source_link": topic.get("link"),
+            "content_file": str(output_file),
+            "hook_text": str(draft.get("hook", "")).strip(),
+            "body_markdown": str(draft.get("body_markdown", "")).strip(),
+            "cover_text": str(draft.get("cover_text", "")).strip(),
+            "body_preview": strip_markdown(str(draft.get("body_markdown", "")))[:320],
+            "content_markdown": markdown[:8000],
+            "updated_at": now_local().isoformat(),
+            "notes": (str(item.get("notes", "")).strip() + " | 已重写文案").strip(" |"),
+            "hook_score": quality["hook_score"],
+            "structure_score": quality["structure_score"],
+            "platform_fit_score": quality["platform_fit_score"],
+            "commercial_score": quality["commercial_score"],
+            "compliance_score": quality["compliance_score"],
+            "total_score": quality["total_score"],
+            "quality_level": quality["quality_level"],
+            "quality_badge": quality["quality_badge"],
+            "publish_advice": quality["publish_advice"],
+            "quality_reason": quality["reason"],
+        }
+    )
+    if render_images:
+        item["illustration_files"] = []
+        item["illustration_urls"] = []
+        render_cloud_illustrations_for_items(config, [item])
+    generate_preview_for_item(config, item)
+    return {"status": "ok", "id": queue_id, "title": item.get("title", ""), "score": item.get("total_score", 0)}
+
+
 def build_video_script_text(item: dict[str, Any]) -> str:
     content = extract_content_payload(item)
     hook = content.get("hook_text", "").strip()
@@ -2376,6 +2455,8 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         f"<button type='button' onclick=\"setStatus('{queue_id}','approved',this)\">选用</button>"
         f"<button type='button' onclick=\"setStatus('{queue_id}','posted',this)\">已发布</button>"
         f"<button type='button' class='danger' onclick=\"setStatus('{queue_id}','rejected',this)\">丢弃</button>"
+        f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','draft',this)\">重写文案</button>"
+        f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','draft_images',this)\">重写文案+配图</button>"
         f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','images',this)\">重新配图</button>"
         f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','pack',this)\">重建素材包</button>"
         "<span class='status-result'></span>"
@@ -4358,7 +4439,7 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 params = urllib.parse.parse_qs(parsed.query)
                 item_id = (params.get("id") or [""])[0]
                 action = (params.get("action") or [""])[0]
-                if not item_id or action not in {"images", "pack"}:
+                if not item_id or action not in {"images", "pack", "draft", "draft_images"}:
                     self.send_response(400)
                     self.send_header("Content-Type", "text/plain; charset=utf-8")
                     self.end_headers()
@@ -4370,7 +4451,13 @@ def command_serve_review(args: argparse.Namespace) -> None:
                     item = next((entry for entry in queue if entry.get("id") == item_id), None)
                     if item is None:
                         raise ValueError(f"Queue item not found: {item_id}")
-                    if action == "images":
+                    if action == "draft":
+                        result = rewrite_queue_item_draft(config, item, render_images=False)
+                        message = f"文案已重写：{result.get('score')}分"
+                    elif action == "draft_images":
+                        result = rewrite_queue_item_draft(config, item, render_images=True)
+                        message = f"文案和配图已重写：{result.get('score')}分"
+                    elif action == "images":
                         render_cloud_illustrations_for_items(config, [item])
                         message = "已重新配图"
                     else:
