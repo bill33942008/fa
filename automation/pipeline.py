@@ -3636,7 +3636,13 @@ def pick_reminder_item(queue: list[dict[str, Any]], platform_cfg: dict[str, Any]
     )[0]
 
 
-def build_publish_reminders(config: dict[str, Any], queue: list[dict[str, Any]], *, window_minutes: int = 20) -> list[dict[str, Any]]:
+def build_publish_reminders(
+    config: dict[str, Any],
+    queue: list[dict[str, Any]],
+    *,
+    window_minutes: int = 20,
+    include_all: bool = False,
+) -> list[dict[str, Any]]:
     now = now_local()
     date = now.strftime("%Y-%m-%d")
     reminders: list[dict[str, Any]] = []
@@ -3645,7 +3651,7 @@ def build_publish_reminders(config: dict[str, Any], queue: list[dict[str, Any]],
         if publish_at is None:
             continue
         delta_minutes = (publish_at - now).total_seconds() / 60.0
-        if delta_minutes < -5 or delta_minutes > window_minutes:
+        if not include_all and (delta_minutes < -5 or delta_minutes > window_minutes):
             continue
         item = pick_reminder_item(queue, platform_cfg, date)
         reminders.append(
@@ -4288,6 +4294,7 @@ def command_publish_reminders(args: argparse.Namespace) -> None:
         config,
         queue,
         window_minutes=max(1, int(args.window_minutes)),
+        include_all=bool(getattr(args, "all", False)),
     )
     if not reminders:
         msg = f"{now_local().strftime('%Y-%m-%d %H:%M:%S')} [INFO] no publish reminders due"
@@ -5176,6 +5183,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_remind = sub.add_parser("publish-reminders", help="Send publish-time reminders")
     p_remind.add_argument("--window-minutes", type=int, default=20, help="Upcoming publish window")
     p_remind.add_argument("--force", action="store_true", help="Send even if already sent")
+    p_remind.add_argument("--all", action="store_true", help="Include all configured accounts for manual test")
     p_remind.set_defaults(func=command_publish_reminders)
 
     p_sync = sub.add_parser("sync-feishu", help="Sync queue to Feishu Bitable")
