@@ -1285,9 +1285,35 @@ STATUS_LABELS = {
 }
 
 
+PLATFORM_LABELS = {
+    "wechat_official": "公众号",
+    "xiaohongshu": "小红书",
+    "douyin": "抖音",
+    "wechat_channels": "视频号",
+    "kuaishou": "快手",
+}
+
+
+POST_FORMAT_LABELS = {
+    "long_article": "长图文",
+    "graphic_post": "图文笔记",
+    "short_video_script": "剪映素材",
+}
+
+
 def status_label(status: Any) -> str:
     raw = str(status or "").strip()
     return STATUS_LABELS.get(raw, raw or "未知")
+
+
+def platform_label(platform: Any) -> str:
+    raw = str(platform or "").strip()
+    return PLATFORM_LABELS.get(raw, raw or "未知平台")
+
+
+def post_format_label(post_format: Any) -> str:
+    raw = str(post_format or "").strip()
+    return POST_FORMAT_LABELS.get(raw, raw or "内容")
 
 
 def next_step_for_item(item: dict[str, Any]) -> str:
@@ -2568,6 +2594,7 @@ def build_accounts_index(
         platform = str(platform_cfg.get("platform", "")).strip()
         post_format = str(platform_cfg.get("post_format", "")).strip()
         track = str(platform_cfg.get("track", "")).strip()
+        publish_time = str(platform_cfg.get("publish_time", "")).strip()
         mode = "公众号/小红书完整图文" if post_format != "short_video_script" else "剪映图文素材包"
         items = sorted(
             grouped.get(account_id, [])
@@ -2604,8 +2631,8 @@ def build_accounts_index(
             item_rows.append("<li><span>暂无候选内容，先运行生成命令。</span></li>")
         cards.append(
             f"<section class='account-card' data-account='{html.escape(account_name)}' data-platform='{html.escape(platform)}'>"
-            f"<div class='account-head'><h2>{html.escape(account_name)}</h2><span>{html.escape(platform)}</span></div>"
-            f"<p class='position'>定位：{html.escape(track)} · {html.escape(mode)}</p>"
+            f"<div class='account-head'><h2>{html.escape(account_name)}</h2><span>{html.escape(platform_label(platform))}</span></div>"
+            f"<p class='position'>定位：{html.escape(track)} · {html.escape(mode)} · 发布时间：{html.escape(publish_time or '-')}</p>"
             f"<div class='stats'><span>候选 {ready_count}</span><span>已配图 {image_ready}</span><span>最高分 {best_score}</span></div>"
             "<div class='generate-row'>"
             "<input type='number' min='1' max='10' value='3' title='生成条数' />"
@@ -2735,6 +2762,12 @@ def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], d
     by_account: dict[str, list[dict[str, Any]]] = {}
     for item in items:
         by_account.setdefault(str(item.get("account_name", "")), []).append(item)
+    platform_cfg_by_account = {
+        str(cfg.get("account_name", "")): cfg for cfg in config.get("platforms", [])
+    }
+    platform_counts: dict[str, int] = {}
+    for item in items:
+        platform_counts[str(item.get("platform", ""))] = platform_counts.get(str(item.get("platform", "")), 0) + 1
     priority_items = sorted(
         [
             item
@@ -2760,6 +2793,7 @@ def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], d
         priority_rows.append(
             "<tr>"
             f"<td>{html.escape(str(item.get('account_name', '')))}</td>"
+            f"<td>{html.escape(platform_label(item.get('platform')))}</td>"
             f"<td><a href='{html.escape(href)}'>{html.escape(str(item.get('title', ''))[:52])}</a></td>"
             f"<td>{html.escape(status_label(item.get('status')))}</td>"
             f"<td>{safe_int(item.get('total_score', 0), default=0)}</td>"
@@ -2768,17 +2802,47 @@ def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], d
         )
     account_rows = []
     coverage_rows = []
+    schedule_rows = []
     for account, account_items in sorted(by_account.items()):
+        first_item = account_items[0] if account_items else {}
+        platform_cfg = platform_cfg_by_account.get(account, {})
+        platform = platform_cfg.get("platform") or first_item.get("platform", "")
+        publish_time = platform_cfg.get("publish_time") or first_item.get("publish_time", "")
+        post_format = platform_cfg.get("post_format") or first_item.get("post_format", "")
         best = max([safe_int(item.get("total_score", 0), default=0) for item in account_items] or [0])
         ready = sum(1 for item in account_items if item.get("status") in {"approved", "ready_to_post"})
         posted = sum(1 for item in account_items if item.get("status") == "posted")
         suggestion = "已覆盖" if ready or posted else "建议先选 1 条"
         account_rows.append(
-            f"<tr><td>{html.escape(account)}</td><td>{len(account_items)}</td><td>{ready}</td><td>{best}</td></tr>"
+            "<tr>"
+            f"<td>{html.escape(account)}</td>"
+            f"<td>{html.escape(platform_label(platform))}</td>"
+            f"<td>{html.escape(str(publish_time) or '-')}</td>"
+            f"<td>{html.escape(post_format_label(post_format))}</td>"
+            f"<td>{len(account_items)}</td><td>{ready}</td><td>{best}</td>"
+            "</tr>"
         )
         coverage_rows.append(
-            f"<tr><td>{html.escape(account)}</td><td>{ready}</td><td>{posted}</td><td>{html.escape(suggestion)}</td></tr>"
+            f"<tr><td>{html.escape(account)}</td><td>{html.escape(platform_label(platform))}</td><td>{ready}</td><td>{posted}</td><td>{html.escape(suggestion)}</td></tr>"
         )
+        schedule_rows.append(
+            (
+                str(publish_time) or "99:99",
+                "<tr>"
+                f"<td>{html.escape(str(publish_time) or '-')}</td>"
+                f"<td>{html.escape(account)}</td>"
+                f"<td>{html.escape(platform_label(platform))}</td>"
+                f"<td>{html.escape(post_format_label(post_format))}</td>"
+                f"<td>{len(account_items)}</td>"
+                f"<td>{ready or posted}</td>"
+                "</tr>",
+            )
+        )
+    schedule_html = "".join(row for _, row in sorted(schedule_rows, key=lambda item: item[0]))
+    platform_stats = "".join(
+        f"<span class='pill'>{html.escape(platform_label(platform))}: {count}</span>"
+        for platform, count in sorted(platform_counts.items())
+    )
     dashboard_html = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>发布工作台 {dashboard_date}</title>
@@ -2789,6 +2853,8 @@ body{{margin:0;background:#f3f5f9;color:#111827;font-family:-apple-system,BlinkM
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px;}}
 .stat{{background:#fff;border-radius:14px;padding:15px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
 .stat b{{display:block;font-size:26px;margin-top:6px;}}
+.pill-row{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 18px;}}
+.pill{{background:#e0f2fe;color:#075985;border-radius:999px;padding:7px 10px;font-size:13px;}}
 .actions{{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px;}}
 .actions a{{background:#2563eb;color:#fff;border-radius:10px;padding:10px 13px;text-decoration:none;}}
 .actions a.green{{background:#059669;}}
@@ -2805,17 +2871,20 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 <div class="stat">已配图<b>{counts['images']}</b></div>
 <div class="stat">最近更新<b style="font-size:16px;">{html.escape(latest_update or '-')}</b></div>
 </div>
+<div class="pill-row">{platform_stats}</div>
 <div class="actions">
 <a href="{dashboard_date}/accounts.html">进入账号工作台</a>
 <a href="{dashboard_date}/index.html">查看全部候选</a>
 <a class="green" href="/export-selected?date={dashboard_date}" target="_blank">导出已选清单</a>
 <a href="/daily-log" target="_blank">查看每日自动生成日志</a>
 </div>
-<div class="card"><h2>今日优先处理</h2><table><thead><tr><th>账号</th><th>内容</th><th>状态</th><th>评分</th><th>下一步</th></tr></thead><tbody>{''.join(priority_rows) or '<tr><td colspan="5">暂无待处理内容</td></tr>'}</tbody></table></div>
+<div class="card"><h2>今日优先处理</h2><table><thead><tr><th>账号</th><th>平台</th><th>内容</th><th>状态</th><th>评分</th><th>下一步</th></tr></thead><tbody>{''.join(priority_rows) or '<tr><td colspan="6">暂无待处理内容</td></tr>'}</tbody></table></div>
 <br />
-<div class="card"><h2>账号发布覆盖</h2><table><thead><tr><th>账号</th><th>已选</th><th>已发布</th><th>建议</th></tr></thead><tbody>{''.join(coverage_rows)}</tbody></table></div>
+<div class="card"><h2>今日发布排期</h2><table><thead><tr><th>时间</th><th>账号</th><th>平台</th><th>形式</th><th>候选</th><th>是否已覆盖</th></tr></thead><tbody>{schedule_html}</tbody></table></div>
 <br />
-<div class="card"><h2>账号概览</h2><table><thead><tr><th>账号</th><th>候选</th><th>已选</th><th>最高分</th></tr></thead><tbody>{''.join(account_rows)}</tbody></table></div>
+<div class="card"><h2>账号发布覆盖</h2><table><thead><tr><th>账号</th><th>平台</th><th>已选</th><th>已发布</th><th>建议</th></tr></thead><tbody>{''.join(coverage_rows)}</tbody></table></div>
+<br />
+<div class="card"><h2>账号概览</h2><table><thead><tr><th>账号</th><th>平台</th><th>发布时间</th><th>内容形式</th><th>候选</th><th>已选</th><th>最高分</th></tr></thead><tbody>{''.join(account_rows)}</tbody></table></div>
 </div></body></html>"""
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
     index_file = PREVIEW_DIR / "dashboard.html"
