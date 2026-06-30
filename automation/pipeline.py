@@ -4344,7 +4344,7 @@ def command_serve_review(args: argparse.Namespace) -> None:
                     if not found:
                         raise ValueError(f"Queue item not found: {item_id}")
                     save_queue(queue)
-                    message = f"已更新为 {status}"
+                    message = f"已更新为 {status_label(status)}"
                     self.send_response(200)
                 except Exception as exc:  # pylint: disable=broad-except
                     message = f"更新失败：{exc}"
