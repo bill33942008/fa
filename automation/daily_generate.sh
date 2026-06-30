@@ -30,11 +30,17 @@ fi
   trap 'rm -f "$BEFORE_FILE" "$AFTER_FILE"' EXIT
 
   "$PYTHON" - <<'PY' > "$BEFORE_FILE"
-import json
+import collections, json
 from pathlib import Path
 path = Path("automation/state/publish_queue.json")
 queue = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
-print(len(queue))
+today = max([str(item.get("date", "")) for item in queue] or [""])
+items = [item for item in queue if item.get("date") == today]
+print(json.dumps({
+    "total": len(queue),
+    "today": today,
+    "accounts": collections.Counter(item.get("account_name", "") for item in items),
+}, ensure_ascii=False))
 PY
 
   echo "$START_TS [START] daily generate count=$COUNT" | tee -a "$SUMMARY_LOG" "$DETAIL_LOG"
@@ -52,19 +58,32 @@ queue = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
 today = max([str(item.get("date", "")) for item in queue] or [""])
 items = [item for item in queue if item.get("date") == today]
 counts = collections.Counter(item.get("account_name", "") for item in items)
-print(len(queue))
-print(today)
-for account, count in sorted(counts.items()):
-    print(f"{account}: {count}")
+print(json.dumps({
+    "total": len(queue),
+    "today": today,
+    "accounts": counts,
+}, ensure_ascii=False))
 PY
 
-  BEFORE_COUNT="$(sed -n '1p' "$BEFORE_FILE")"
-  AFTER_COUNT="$(sed -n '1p' "$AFTER_FILE")"
-  TODAY="$(sed -n '2p' "$AFTER_FILE")"
-  ADDED=$((AFTER_COUNT - BEFORE_COUNT))
-  {
-    echo "$(date '+%F %T') [$STATUS] daily generate finished date=$TODAY added=$ADDED total=$AFTER_COUNT"
-    sed '1,2d' "$AFTER_FILE" | sed 's/^/  - /'
-  } | tee -a "$SUMMARY_LOG"
+  "$PYTHON" - "$BEFORE_FILE" "$AFTER_FILE" "$STATUS" <<'PY' | tee -a "$SUMMARY_LOG"
+import json, sys
+from datetime import datetime
+before = json.loads(open(sys.argv[1], encoding="utf-8").read())
+after = json.loads(open(sys.argv[2], encoding="utf-8").read())
+status = sys.argv[3]
+before_accounts = before.get("accounts", {})
+after_accounts = after.get("accounts", {})
+all_accounts = sorted(set(before_accounts) | set(after_accounts))
+added = int(after.get("total", 0)) - int(before.get("total", 0))
+print(f"{datetime.now().strftime('%F %T')} [{status}] daily generate finished date={after.get('today','')} added={added} total={after.get('total',0)}")
+print("  本次新增：")
+for account in all_accounts:
+    delta = int(after_accounts.get(account, 0)) - int(before_accounts.get(account, 0))
+    if delta:
+        print(f"  - {account}: +{delta}")
+print("  当天累计：")
+for account in all_accounts:
+    print(f"  - {account}: {after_accounts.get(account, 0)}")
+PY
   [[ "$STATUS" == "SUCCESS" ]]
 ) 9>"$LOCK_FILE"
