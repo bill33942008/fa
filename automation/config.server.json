@@ -20,7 +20,7 @@
       "sender": "bot@example.com",
       "password_env": "SMTP_PASSWORD",
       "receivers": [
-        "you@example.com"
+        "124151121@qq.com"
       ]
     }
   },

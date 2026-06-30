@@ -52,6 +52,8 @@ PREVIEW_DIR = BASE_DIR / "previews"
 QUEUE_FILE = STATE_DIR / "publish_queue.json"
 FEISHU_MAPPING_FILE = STATE_DIR / "feishu_record_mapping.json"
 VIDEO_JOBS_DIR = STATE_DIR / "video_jobs"
+REMINDER_STATE_FILE = STATE_DIR / "publish_reminder_state.json"
+REMINDER_LOG_FILE = BASE_DIR / "publish_reminders.log"
 
 FEISHU_FIELD_DEFINITIONS: dict[str, dict[str, Any]] = {
     "QueueID": {"type": 1},
@@ -3124,6 +3126,7 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 <a class="green" href="{html.escape(bulk_all_url or f'/download-packs?date={dashboard_date}&status=all')}" target="_blank">下载今日全部素材包</a>
 <a class="green" href="{html.escape(bulk_selected_url)}" target="_blank">下载已选素材包</a>
 <a href="/daily-log" target="_blank">查看每日自动生成日志</a>
+<a href="/reminders" target="_blank">发布提醒记录</a>
 </div>
 <div class="card"><h2>今日优先处理</h2><table><thead><tr><th>账号</th><th>平台</th><th>内容</th><th>状态</th><th>评分</th><th>更新时间</th><th>下一步</th></tr></thead><tbody>{''.join(priority_rows) or '<tr><td colspan="7">暂无待处理内容</td></tr>'}</tbody></table></div>
 <br />
@@ -3593,6 +3596,132 @@ def send_feishu_webhook(config: dict[str, Any], body: str) -> bool:
         raise ValueError(f"Feishu webhook failed: {response}")
     print("[OK] feishu notification sent")
     return True
+
+
+def parse_publish_time_today(raw_time: Any) -> dt.datetime | None:
+    text = str(raw_time or "").strip()
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    now = now_local()
+    return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def pick_reminder_item(queue: list[dict[str, Any]], platform_cfg: dict[str, Any], date: str) -> dict[str, Any] | None:
+    account = str(platform_cfg.get("account_name", "")).strip()
+    platform = str(platform_cfg.get("platform", "")).strip()
+    candidates = [
+        item
+        for item in queue
+        if item.get("date") == date
+        and item.get("account_name") == account
+        and item.get("platform") == platform
+        and item.get("status") in {"approved", "ready_to_post", "pending_review"}
+        and item.get("publish_advice") != "禁发"
+    ]
+    if not candidates:
+        return None
+    status_rank = {"approved": 0, "ready_to_post": 1, "pending_review": 2}
+    return sorted(
+        candidates,
+        key=lambda item: (
+            status_rank.get(str(item.get("status", "")), 9),
+            -safe_int(item.get("total_score", 0), default=0),
+            str(item.get("updated_at", "")),
+        ),
+    )[0]
+
+
+def build_publish_reminders(config: dict[str, Any], queue: list[dict[str, Any]], *, window_minutes: int = 20) -> list[dict[str, Any]]:
+    now = now_local()
+    date = now.strftime("%Y-%m-%d")
+    reminders: list[dict[str, Any]] = []
+    for platform_cfg in config.get("platforms", []):
+        publish_at = parse_publish_time_today(platform_cfg.get("publish_time"))
+        if publish_at is None:
+            continue
+        delta_minutes = (publish_at - now).total_seconds() / 60.0
+        if delta_minutes < -5 or delta_minutes > window_minutes:
+            continue
+        item = pick_reminder_item(queue, platform_cfg, date)
+        reminders.append(
+            {
+                "date": date,
+                "account_name": platform_cfg.get("account_name", ""),
+                "platform": platform_cfg.get("platform", ""),
+                "platform_label": platform_label(platform_cfg.get("platform", "")),
+                "publish_time": platform_cfg.get("publish_time", ""),
+                "minutes_until": round(delta_minutes, 1),
+                "item_id": item.get("id") if item else "",
+                "title": item.get("title") if item else "暂无可发布内容",
+                "status": status_label(item.get("status")) if item else "无内容",
+                "score": item.get("total_score") if item else "",
+                "preview_url": item.get("preview_url", "") if item else "",
+                "asset_pack_url": item.get("asset_pack_url", "") if item else "",
+                "next_step": next_step_for_item(item) if item else "请先进入账号工作台生成或选用内容。",
+            }
+        )
+    return reminders
+
+
+def reminder_key(reminder: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(reminder.get("date", "")),
+            str(reminder.get("account_name", "")),
+            str(reminder.get("platform", "")),
+            str(reminder.get("publish_time", "")),
+            str(reminder.get("item_id", "")),
+        ]
+    )
+
+
+def format_publish_reminders(reminders: list[dict[str, Any]]) -> str:
+    lines = [
+        f"发布提醒 {now_local().strftime('%Y-%m-%d %H:%M')}",
+        "",
+    ]
+    for reminder in reminders:
+        lines.extend(
+            [
+                f"账号：{reminder.get('account_name')}（{reminder.get('platform_label')}）",
+                f"发布时间：{reminder.get('publish_time')}（约 {reminder.get('minutes_until')} 分钟后）",
+                f"内容：{reminder.get('title')}",
+                f"状态/评分：{reminder.get('status')} / {reminder.get('score')}",
+                f"下一步：{reminder.get('next_step')}",
+                f"预览：{reminder.get('preview_url')}",
+                f"素材包：{reminder.get('asset_pack_url')}",
+                "",
+            ]
+        )
+    return "\n".join(lines).strip()
+
+
+def append_reminder_log(message: str) -> None:
+    REMINDER_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with REMINDER_LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(message.rstrip() + "\n\n")
+
+
+def send_publish_reminder_notifications(config: dict[str, Any], body: str) -> list[str]:
+    results: list[str] = []
+    try:
+        if send_feishu_webhook(config, body):
+            results.append("feishu:ok")
+    except Exception as exc:  # pylint: disable=broad-except
+        results.append(f"feishu:failed:{exc}")
+    try:
+        if send_email_digest(config, body):
+            results.append("email:ok")
+    except Exception as exc:  # pylint: disable=broad-except
+        results.append(f"email:failed:{exc}")
+    if not results:
+        results.append("no_channel_enabled")
+    return results
 
 
 def get_feishu_tenant_access_token(bitable_cfg: dict[str, Any]) -> str:
@@ -4151,6 +4280,48 @@ def command_email_digest(args: argparse.Namespace) -> None:
     send_email_digest(config, build_queue_summary(queue))
 
 
+def command_publish_reminders(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    reminders = build_publish_reminders(
+        config,
+        queue,
+        window_minutes=max(1, int(args.window_minutes)),
+    )
+    if not reminders:
+        msg = f"{now_local().strftime('%Y-%m-%d %H:%M:%S')} [INFO] no publish reminders due"
+        print(msg)
+        append_reminder_log(msg)
+        return
+
+    state = load_json(REMINDER_STATE_FILE, {})
+    pending: list[dict[str, Any]] = []
+    for reminder in reminders:
+        key = reminder_key(reminder)
+        if not args.force and state.get(key):
+            continue
+        pending.append(reminder)
+
+    if not pending:
+        msg = f"{now_local().strftime('%Y-%m-%d %H:%M:%S')} [INFO] reminders already sent"
+        print(msg)
+        append_reminder_log(msg)
+        return
+
+    body = format_publish_reminders(pending)
+    results = send_publish_reminder_notifications(config, body)
+    log_body = (
+        f"{now_local().strftime('%Y-%m-%d %H:%M:%S')} [REMINDER] "
+        f"count={len(pending)} results={'; '.join(results)}\n{body}"
+    )
+    print(log_body)
+    append_reminder_log(log_body)
+    for reminder in pending:
+        state[reminder_key(reminder)] = now_local().isoformat()
+    save_json(REMINDER_STATE_FILE, state)
+
+
 def command_sync_feishu(args: argparse.Namespace) -> None:
     ensure_dirs()
     config = load_config(Path(args.config))
@@ -4522,6 +4693,18 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 self.end_headers()
                 self.wfile.write(payload.encode("utf-8", errors="replace"))
                 return
+            if parsed.path == "/reminders":
+                parts = ["# 发布提醒记录", ""]
+                if REMINDER_LOG_FILE.exists():
+                    parts.extend(REMINDER_LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-160:])
+                else:
+                    parts.append("暂无发布提醒。")
+                payload = "\n".join(parts)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(payload.encode("utf-8", errors="replace"))
+                return
             if parsed.path == "/health":
                 lines: list[str] = ["# 系统健康检查", ""]
                 lines.append(f"- 检查时间：{now_local().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -4573,6 +4756,12 @@ def command_serve_review(args: argparse.Namespace) -> None:
                     lines.extend(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:])
                 else:
                     lines.append("暂无自动生成日志。")
+
+                lines.extend(["", "## 最近发布提醒"])
+                if REMINDER_LOG_FILE.exists():
+                    lines.extend(REMINDER_LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-30:])
+                else:
+                    lines.append("暂无发布提醒。")
 
                 lines.extend(["", "## 关键文件"])
                 for path in [
@@ -4983,6 +5172,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mail = sub.add_parser("email-digest", help="Send digest email summary")
     p_mail.set_defaults(func=command_email_digest)
+
+    p_remind = sub.add_parser("publish-reminders", help="Send publish-time reminders")
+    p_remind.add_argument("--window-minutes", type=int, default=20, help="Upcoming publish window")
+    p_remind.add_argument("--force", action="store_true", help="Send even if already sent")
+    p_remind.set_defaults(func=command_publish_reminders)
 
     p_sync = sub.add_parser("sync-feishu", help="Sync queue to Feishu Bitable")
     p_sync.set_defaults(func=command_sync_feishu)
