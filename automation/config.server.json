@@ -14,10 +14,10 @@
       "webhook_url": ""
     },
     "email": {
-      "enabled": false,
-      "smtp_host": "smtp.example.com",
+      "enabled": true,
+      "smtp_host": "smtp.qq.com",
       "smtp_port": 465,
-      "sender": "bot@example.com",
+      "sender": "124151121@qq.com",
       "password_env": "SMTP_PASSWORD",
       "receivers": [
         "124151121@qq.com"
