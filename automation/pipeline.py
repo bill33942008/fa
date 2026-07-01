@@ -491,7 +491,7 @@ def fetch_rss(url: str) -> list[dict[str, Any]]:
     for item in root.findall(".//item"):
         title = (item.findtext("title") or "").strip()
         link = (item.findtext("link") or "").strip()
-        description = (item.findtext("description") or "").strip()
+        description = rss_item_description(item)
         pub_date_raw = (item.findtext("pubDate") or "").strip()
         pub_dt = parse_datetime(pub_date_raw)
         items.append(
@@ -504,6 +504,28 @@ def fetch_rss(url: str) -> list[dict[str, Any]]:
             }
         )
     return items
+
+
+def clean_rss_text(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def rss_item_description(item: et.Element) -> str:
+    candidates: list[str] = []
+    for tag in (
+        "description",
+        "{http://purl.org/rss/1.0/modules/content/}encoded",
+        "summary",
+    ):
+        value = (item.findtext(tag) or "").strip()
+        if value:
+            candidates.append(clean_rss_text(value))
+    return max(candidates, key=len, default="")
 
 
 def score_topic(topic: dict[str, Any], keywords: list[str]) -> float:
@@ -997,6 +1019,18 @@ def generate_draft(
         ).strip()
     else:
         format_requirements = "生成可直接发布的中文内容，结构清晰，避免空话。"
+    topic_title = str(topic.get("title", "")).strip()
+    topic_description = str(topic.get("description", "")).strip()
+    source_plain = strip_markdown(f"{topic_title} {topic_description}".strip())
+    thin_source_note = ""
+    if len(source_plain) < 200:
+        thin_source_note = textwrap.dedent(
+            """
+            来源摘要较短，请从选题标题识别具体比赛/球队/赛事背景，写成针对该热点的赛前分析文章。
+            标题必须体现具体对阵或赛事，不要写成泛泛的「信息核实清单」。
+            未在来源中明确写出的伤停、首发、比分、赔率，一律标注「待官方确认」。
+            """
+        ).strip()
     user_prompt = textwrap.dedent(
         f"""
         请根据以下信息生成一个高质量、可直接发布的草稿，并且仅输出 JSON 对象，不要输出 Markdown 代码块：
@@ -1023,6 +1057,7 @@ def generate_draft(
 
         内容形式专项要求：
         {format_requirements}
+        {thin_source_note}
 
         账号名: {platform_cfg["account_name"]}
         平台: {platform_cfg["platform"]}
@@ -1085,43 +1120,18 @@ def sanitize_draft_for_accuracy(
     draft["title"] = title
     source_text = f"{topic.get('title', '')} {topic.get('description', '')}".strip()
     source_plain = strip_markdown(source_text)
-    if len(source_plain) < 260:
-        draft["title"] = "足球赛前信息核实清单：先看伤停、阵容和盘口变化"
-        draft["hook"] = "足球内容最怕拿旧赛果当热点，也最怕把未确认消息写成确定事实。今天这条先按赛前核实清单处理。"
-        draft["body_markdown"] = textwrap.dedent(
-            f"""
-            ## 选题来源
-            {source_plain}
-
-            ## 为什么这条只能做赛前核实
-            当前来源标题/摘要信息较短，只能确认这是与足球赛前形势、伤病或赛程相关的选题；不能确认具体首发、缺阵名单、比分过程、进球人和赔率细节。
-
-            ## 发布前必须核实的 4 件事
-            1. 官方赛程：确认比赛时间、对阵双方和赛事名称。
-            2. 官方名单：确认首发、替补、停赛和伤病。
-            3. 赛前发布会：确认主教练是否提到轮换、体能或战术调整。
-            4. 盘口变化：只描述趋势，不把盘口当成确定结果。
-
-            ## 可以写的分析角度
-            - 如果核心球员缺阵，重点看球队进攻组织和定位球质量是否受影响。
-            - 如果近期赛程密集，重点看下半场体能、换人深度和防线稳定性。
-            - 如果盘口临场波动较大，重点提醒读者等待首发公布后再判断。
-
-            ## 竞彩表达边界
-            本文只做赛前信息整理和风险提醒，不承诺收益，不诱导下注。任何具体判断都应以赛前官方名单和即时数据为准。
-
-            ## 配图建议
-            - 配图1：赛前更衣室/战术板，表达“赛前核实”。
-            - 配图2：伤停与首发核对清单。
-            - 配图3：盘口变化/赛程密集的风险提示图。
-            """
-        ).strip()
-        draft["cover_text"] = "赛前先核实，再谈判断"
-        return draft
+    topic_title = str(topic.get("title", "")).strip()
+    thin_source = len(source_plain) < 200
+    generic_titles = {
+        "足球赛前信息核实清单：先看伤停、阵容和盘口变化",
+        "足球赛前信息核实清单",
+    }
+    if not title.strip() or title.strip() in generic_titles:
+        draft["title"] = f"{topic_title}：赛前看点与理性分析" if topic_title else title
     caution = textwrap.dedent(
         f"""
         ## 赛前信息边界
-        本文只基于当前选题来源做赛前分析。来源标题/摘要为：{source_text}
+        本文基于当前选题来源做赛前分析。来源：{source_text or topic_title}
 
         发布前必须二次核实：
         - 官方首发名单和替补名单
@@ -1131,6 +1141,16 @@ def sanitize_draft_for_accuracy(
         未在来源中明确出现的球员姓名、进球人、比分过程、具体伤停原因，不能当作确定事实发布。
         """
     ).strip()
+    if thin_source:
+        caution = textwrap.dedent(
+            f"""
+            ## 赛前信息边界
+            来源摘要较短，正文主要依据选题标题「{topic_title}」展开分析。
+            具体首发、伤停、赔率细节发布前请二次核实；未确认信息请标注「待官方确认」。
+
+            原始来源：{source_text or topic_title}
+            """
+        ).strip()
     body = replace_markdown_sections_by_keywords(
         body,
         ["伤病名单", "伤停名单", "伤停", "首发", "阵容深度", "预计阵容", "谁来填补"],
