@@ -2,7 +2,7 @@
 set -euo pipefail
 
 FA_ROOT="${FA_ROOT:-/opt/fa}"
-COUNT="${DAILY_GENERATE_COUNT:-2}"
+COUNT="${DAILY_GENERATE_COUNT:-1}"
 LOCK_FILE="/tmp/fa_daily_generate.lock"
 SUMMARY_LOG="$FA_ROOT/automation/daily_generate_summary.log"
 DETAIL_LOG="$FA_ROOT/automation/daily_generate.log"

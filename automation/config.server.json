@@ -170,22 +170,56 @@
   },
   "tracks": {
     "football": {
-      "description": "football tactical analysis with data interpretation for竞彩关注人群",
+      "description": "time-sensitive football match preview, fixtures, injuries, tactical and odds analysis for竞彩关注人群",
       "keywords": [
         "竞彩",
         "足球",
+        "今日",
+        "明日",
+        "赛程",
+        "赛前",
+        "前瞻",
         "战术",
         "伤停",
+        "首发",
         "盘口",
         "xG",
         "欧赔",
         "联赛"
       ],
-      "rss_sources": [
-        "https://news.google.com/rss/search?q=%E7%AB%9E%E5%BD%A9+%E8%B6%B3%E7%90%83&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=%E8%8B%B1%E8%B6%85+%E8%B5%9B%E5%89%8D+%E5%88%86%E6%9E%90&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      "topic_boost_keywords": [
+        "今日",
+        "明日",
+        "今晚",
+        "赛程",
+        "赛前",
+        "前瞻",
+        "伤停",
+        "首发",
+        "阵容",
+        "赔率",
+        "盘口"
       ],
-      "system_prompt": "你是专业足球数据分析编辑，必须输出理性分析，不得承诺收益，不得诱导下注。"
+      "topic_exclude_keywords": [
+        "回放",
+        "录像",
+        "集锦",
+        "进球集锦",
+        "全场回放",
+        "赛果",
+        "战报",
+        "夺冠回顾",
+        "历史",
+        "巴西2-1日本",
+        "巴西 2-1 日本"
+      ],
+      "rss_sources": [
+        "https://news.google.com/rss/search?q=%E4%BB%8A%E6%97%A5+%E8%B6%B3%E7%90%83+%E8%B5%9B%E7%A8%8B+%E8%B5%9B%E5%89%8D+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E7%AB%9E%E5%BD%A9+%E8%B6%B3%E7%90%83+%E4%BC%A4%E5%81%9C+%E9%A6%96%E5%8F%91+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E8%B6%B3%E7%90%83+%E5%89%8D%E7%9E%BB+%E8%B5%94%E7%8E%87+%E7%9B%98%E5%8F%A3+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=football+fixtures+today+preview+injury+news+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      ],
+      "system_prompt": "你是专业足球赛前数据分析编辑，只做时效性强的赛前/赛程/伤停/阵容/盘口分析。必须核实来源，不得编造比分、进球人、伤停、首发和赔率；来源未明确写出的事实必须用“待官方确认/需赛前核实”表述。必须理性分析，不得承诺收益，不得诱导下注。"
     },
     "child_education": {
       "description": "practical parenting and child education short-form content",

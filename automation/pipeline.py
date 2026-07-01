@@ -521,10 +521,17 @@ def score_topic(topic: dict[str, Any], keywords: list[str]) -> float:
     return round(score, 3)
 
 
+def topic_contains_any(topic: dict[str, Any], keywords: list[str]) -> bool:
+    text = f"{topic.get('title', '')} {topic.get('description', '')}".lower()
+    return any(str(keyword).lower() in text for keyword in keywords if str(keyword).strip())
+
+
 def collect_track_topics(
     track_name: str, track_cfg: dict[str, Any], per_track_limit: int
 ) -> list[dict[str, Any]]:
     keywords = track_cfg.get("keywords", [])
+    boost_keywords = [str(x) for x in track_cfg.get("topic_boost_keywords", [])]
+    exclude_keywords = [str(x) for x in track_cfg.get("topic_exclude_keywords", [])]
     all_items: list[dict[str, Any]] = []
     seen_titles: set[str] = set()
 
@@ -533,6 +540,8 @@ def collect_track_topics(
             title = item.get("title", "").strip()
             if not title:
                 continue
+            if exclude_keywords and topic_contains_any(item, exclude_keywords):
+                continue
             title_key = re.sub(r"\s+", " ", title.lower())
             if title_key in seen_titles:
                 continue
@@ -540,6 +549,8 @@ def collect_track_topics(
             item["track"] = track_name
             item["source"] = source
             item["score"] = score_topic(item, keywords)
+            if boost_keywords and topic_contains_any(item, boost_keywords):
+                item["score"] = round(float(item["score"]) + 8.0, 3)
             all_items.append(item)
 
     all_items.sort(
@@ -745,6 +756,9 @@ def generate_draft(
         - 不要出现“作为AI”“以下是”等提示词痕迹。
         - 不要只复述新闻，要提炼判断、清单、避坑或可执行建议。
         - 如果信息不足，合理标注“建议发布前核实”，不要编造具体数据。
+        - 严禁编造来源没有明确给出的事实，包括人名、比分、进球人、伤停、首发、赔率、时间地点。
+        - 足球内容优先做赛前/今日赛程/伤停/阵容/盘口分析；不要拿旧赛果或历史回放当今日热点。
+        - 如果选题看起来是赛后战报/旧比赛复盘，必须转成“风险提示/信息核实”角度，不能编造进球过程。
 
         内容形式专项要求：
         {format_requirements}
