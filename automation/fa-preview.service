@@ -1,0 +1,15 @@
+[Unit]
+Description=FA content preview server (serve-review)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/fa
+Environment=FA_ROOT=/opt/fa
+EnvironmentFile=-/etc/profile.d/content_ops_env.sh
+ExecStart=/opt/fa/.venv/bin/python /opt/fa/automation/pipeline.py --config /opt/fa/automation/config.json serve-review --host 0.0.0.0 --port 8787
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

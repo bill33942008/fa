@@ -275,10 +275,25 @@ Feishu fields for sample outputs:
 - SampleVideoURL
 - SampleAudioFile
 
-Serve previews via HTTP:
+Serve previews via the interactive review server (required for 点击生成 / 自由生成 / 素材下载 APIs):
 
 ```bash
-python3 -m http.server 8787 --directory automation/previews
+python3 automation/pipeline.py --config automation/config.json serve-review --host 0.0.0.0 --port 8787
+```
+
+Or:
+
+```bash
+bash automation/serve_preview.sh
+```
+
+Do **not** use `python3 -m http.server` for production — it only serves static files and
+breaks `/generate`, `/job-status`, `/download-packs`, `/health`, etc.
+
+Keep it running in background (example with nohup):
+
+```bash
+nohup bash automation/serve_preview.sh >> /opt/fa/automation/preview_server.log 2>&1 &
 ```
 
 If `preview.public_base_url` is set (for example `http://YOUR_SERVER_IP:8787`), Feishu
@@ -287,6 +302,7 @@ records will include direct clickable links in `PreviewURL`.
 Portal entry (left date list, right date content):
 
 - `http://YOUR_SERVER_IP:8787/index.html`
+- `http://YOUR_SERVER_IP:8787/dashboard.html`
 
 You can sync on demand:
 

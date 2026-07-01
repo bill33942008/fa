@@ -56,14 +56,21 @@ Current target matrix:
    python3 automation/pipeline.py --config automation/config.json preview --date 2026-07-03 --sync-feishu
    ```
 
-   Serve preview pages:
+   Serve preview pages (must use `serve-review` for click-to-generate / approve / download APIs):
 
    ```bash
-   python3 -m http.server 8787 --directory automation/previews
+   python3 automation/pipeline.py --config automation/config.json serve-review --host 0.0.0.0 --port 8787
+   ```
+
+   Or on server:
+
+   ```bash
+   bash automation/serve_preview.sh
    ```
 
    Portal layout (left dates, right content):
    - `http://YOUR_SERVER_IP:8787/index.html`
+   - Dashboard: `http://YOUR_SERVER_IP:8787/dashboard.html`
 
    Render voiced video samples (subtitle + TTS):
 

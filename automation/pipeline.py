@@ -3089,6 +3089,14 @@ button.secondary{{background:#64748b;}}
 a{{color:#2563eb;text-decoration:none;}} .items span{{color:#6b7280;white-space:nowrap;}}
 </style>
 <script>
+async function parseJsonResponse(resp) {{
+  const text = await resp.text();
+  try {{
+    return JSON.parse(text);
+  }} catch (err) {{
+    throw new Error('预览 API 不可用：8787 端口当前可能是静态 http.server。请改用 serve-review 启动。');
+  }}
+}}
 async function runGenerate(btn){{
   const card = btn.closest('.account-card');
   const log = card.querySelector('.run-log');
@@ -3097,7 +3105,7 @@ async function runGenerate(btn){{
   btn.disabled=true;
   try {{
     const resp = await fetch('/generate?async=1&sync_feishu=0&count=' + encodeURIComponent(count) + '&account=' + encodeURIComponent(btn.dataset.account || ''));
-    const payload = await resp.json();
+    const payload = await parseJsonResponse(resp);
     if (!resp.ok) throw new Error(payload.error || '创建任务失败');
     await pollJob(payload.job_id, log);
   }} catch (err) {{
@@ -3109,7 +3117,7 @@ async function runGenerate(btn){{
 async function pollJob(jobId, log){{
   while (true) {{
     const resp = await fetch('/job-status?id=' + encodeURIComponent(jobId));
-    const payload = await resp.json();
+    const payload = await parseJsonResponse(resp);
     log.textContent = (payload.lines || []).join('\\n');
     if (payload.status === 'done') {{
       log.textContent += '\\n\\n生成完成，刷新页面即可看到新候选内容。';
@@ -3378,6 +3386,14 @@ a{color:#2563eb;text-decoration:none;}
 <pre id="log"></pre>
 </div></div>
 <script>
+async function parseJsonResponse(resp) {
+  const text = await resp.text();
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error('预览 API 不可用：8787 端口当前可能是静态 http.server。请改用 serve-review 启动。');
+  }
+}
 async function generateFree(){
   const idea = document.getElementById('idea').value.trim();
   const type = document.getElementById('content-type').value;
@@ -3388,7 +3404,7 @@ async function generateFree(){
   const params = new URLSearchParams({idea, type, render_images: renderImages});
   try {
     const resp = await fetch('/free-generate?' + params.toString());
-    const payload = await resp.json();
+    const payload = await parseJsonResponse(resp);
     if (!resp.ok) throw new Error(payload.error || '创建任务失败');
     await pollJob(payload.job_id, log);
   } catch (err) {
@@ -3398,7 +3414,7 @@ async function generateFree(){
 async function pollJob(jobId, log){
   while (true) {
     const resp = await fetch('/job-status?id=' + encodeURIComponent(jobId));
-    const payload = await resp.json();
+    const payload = await parseJsonResponse(resp);
     log.textContent = (payload.lines || []).join('\\n');
     if (payload.status === 'done') {
       log.textContent += '\\n\\n生成完成，请打开上方日志中的预览链接。';
@@ -3525,7 +3541,10 @@ def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
 
 
 def ensure_binary(binary_name: str) -> str:
-    path = shutil.which(binary_name)
+    candidate = Path(str(binary_name).strip())
+    if candidate.is_file():
+        return str(candidate)
+    path = shutil.which(str(binary_name))
     if not path:
         raise ValueError(
             f"Required binary not found: {binary_name}. "
@@ -4133,7 +4152,11 @@ def sync_queue_to_feishu_bitable(config: dict[str, Any], queue: list[dict[str, A
     app_token = bitable_cfg.get("app_token", "").strip()
     table_id = bitable_cfg.get("table_id", "").strip()
     if not app_token or not table_id:
-        raise ValueError("Feishu Bitable enabled but app_token/table_id is missing.")
+        print(
+            "[WARN] Feishu Bitable enabled but app_token/table_id is missing. "
+            "Fill feishu_bitable.app_token and feishu_bitable.table_id in config.json."
+        )
+        return False
 
     token = get_feishu_tenant_access_token(bitable_cfg)
     if bitable_cfg.get("auto_create_fields", True):
