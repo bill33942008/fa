@@ -777,8 +777,72 @@ def generate_draft(
 
     generated = llm_generate(config.get("llm", {}), system_prompt, user_prompt)
     if generated:
-        return generated
-    return fallback_draft(platform_cfg, track_cfg, topic)
+        return sanitize_draft_for_accuracy(generated, platform_cfg, track_cfg, topic)
+    return sanitize_draft_for_accuracy(fallback_draft(platform_cfg, track_cfg, topic), platform_cfg, track_cfg, topic)
+
+
+def replace_markdown_sections_by_keywords(markdown_text: str, keywords: list[str], replacement: str) -> str:
+    lines = markdown_text.splitlines()
+    result: list[str] = []
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        if line.startswith("## ") and any(keyword in line for keyword in keywords):
+            result.append(replacement.strip())
+            idx += 1
+            while idx < len(lines) and not lines[idx].startswith("## "):
+                idx += 1
+            continue
+        result.append(line)
+        idx += 1
+    return "\n".join(result)
+
+
+def sanitize_draft_for_accuracy(
+    draft: dict[str, Any],
+    platform_cfg: dict[str, Any],
+    track_cfg: dict[str, Any],
+    topic: dict[str, Any],
+) -> dict[str, Any]:
+    description = str(track_cfg.get("description", "")).lower()
+    system_prompt = str(track_cfg.get("system_prompt", ""))
+    if "football" not in description and "足球" not in system_prompt:
+        return draft
+
+    body = str(draft.get("body_markdown", ""))
+    source_text = f"{topic.get('title', '')} {topic.get('description', '')}".strip()
+    caution = textwrap.dedent(
+        f"""
+        ## 赛前信息边界
+        本文只基于当前选题来源做赛前分析。来源标题/摘要为：{source_text}
+
+        发布前必须二次核实：
+        - 官方首发名单和替补名单
+        - 赛前发布会与俱乐部伤停更新
+        - 盘口/赔率的最新变化
+
+        未在来源中明确出现的球员姓名、进球人、比分过程、具体伤停原因，不能当作确定事实发布。
+        """
+    ).strip()
+    body = replace_markdown_sections_by_keywords(
+        body,
+        ["伤病名单", "伤停名单", "伤停", "首发", "阵容深度", "预计阵容", "谁来填补"],
+        caution,
+    )
+    body = replace_markdown_sections_by_keywords(
+        body,
+        ["进球", "比分", "战报", "赛果", "绝杀", "破门", "扳平"],
+        textwrap.dedent(
+            """
+            ## 比赛事实核实
+            如果本文涉及比分、进球或赛果，请以官方赛果和权威数据源为准。当前自动稿不直接给出进球人和具体进球过程，避免误报。
+            """
+        ).strip(),
+    )
+    if "## 赛前信息边界" not in body:
+        body = f"{body}\n\n{caution}"
+    draft["body_markdown"] = body
+    return draft
 
 
 def clamp_score(value: Any, minimum: int = 0, maximum: int = 20) -> int:
