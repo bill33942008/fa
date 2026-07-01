@@ -2155,25 +2155,119 @@ def build_cloud_image_prompts(item: dict[str, Any], count: int = 3) -> list[str]
 
 
 def generate_svg_illustration(track: str, title: str, scene: str, idx: int) -> str:
-    """Generate a styled SVG illustration as fallback when cloud image API fails."""
+    """Generate a richer SVG illustration as fallback when cloud image API fails."""
     import hashlib
     colors = {
-        "football": {"bg": "#1a365d", "accent": "#48bb78", "text": "#fff"},
-        "child_education": {"bg": "#fef3c7", "accent": "#f59e0b", "text": "#92400e"},
-        "travel": {"bg": "#e0f2fe", "accent": "#0ea5e9", "text": "#0c4a6e"},
-        "ai_funny": {"bg": "#fce7f3", "accent": "#ec4899", "text": "#9d174d"},
+        "football": {"bg": "#0f172a", "accent1": "#3b82f6", "accent2": "#10b981", "text": "#f1f5f9", "muted": "#64748b"},
+        "child_education": {"bg": "#fefce8", "accent1": "#f59e0b", "accent2": "#10b981", "text": "#713f12", "muted": "#a16207"},
+        "travel": {"bg": "#f0f9ff", "accent1": "#0ea5e9", "accent2": "#f97316", "text": "#0c4a6e", "muted": "#0369a1"},
+        "ai_funny": {"bg": "#fdf2f8", "accent1": "#ec4899", "accent2": "#8b5cf6", "text": "#831843", "muted": "#be185d"},
     }
-    c = colors.get(track, {"bg": "#f8fafc", "accent": "#6366f1", "text": "#1e293b"})
-    preview = html.escape(scene[:80])
+    c = colors.get(track, {"bg": "#f8fafc", "accent1": "#6366f1", "accent2": "#a855f7", "text": "#1e293b", "muted": "#64748b"})
+    preview = html.escape(scene[:120])
     title_esc = html.escape(title[:60])
     seed_hash = hashlib.md5(f"{title}{scene}{idx}".encode()).hexdigest()[:8]
+
+    scene_lower = scene.lower()
+    # Decide decorative elements based on scene keywords
+    has_field = any(w in scene_lower for w in ["pitch", "field", "stadium", "球场", "赛场", "体育场"])
+    has_players = any(w in scene_lower for w in ["player", "footballer", "球员", "前锋", "后卫", "门将"])
+    has_tactics = any(w in scene_lower for w in ["tactic", "formation", "阵型", "战术", "对位", "lineup"])
+    has_landscape = any(w in scene_lower for w in ["landscape", "mountain", "beach", "风景", "山", "海", "城市", "古城"])
+    has_map = any(w in scene_lower for w in ["map", "route", "路线", "行程", "地图", "itinerary"])
+    has_kids = any(w in scene_lower for w in ["kid", "child", "parent", "孩子", "儿童", "亲子", "家长", "育儿"])
+    has_humor = any(w in scene_lower for w in ["comedy", "funny", "搞笑", "段子", "笑话", "幽默"])
+
+    decorations = ""
+    if track == "football" or has_field or has_players or has_tactics:
+        # Football scene decorations
+        decorations = f'''
+  <!-- Pitch background -->
+  <rect x="60" y="80" width="600" height="340" rx="16" fill="{c["accent1"]}" opacity="0.08"/>
+  <rect x="100" y="140" width="520" height="220" rx="8" fill="none" stroke="{c["accent1"]}" stroke-width="1.5" opacity="0.2"/>
+  <line x1="360" y1="140" x2="360" y2="360" stroke="{c["accent1"]}" stroke-width="1.5" opacity="0.2"/>
+  <circle cx="360" cy="250" r="40" fill="none" stroke="{c["accent1"]}" stroke-width="1.5" opacity="0.2"/>
+  <circle cx="360" cy="250" r="6" fill="{c["accent1"]}" opacity="0.3"/>
+  <!-- Goal areas -->
+  <rect x="100" y="210" width="50" height="80" rx="4" fill="none" stroke="{c["accent2"]}" stroke-width="2" opacity="0.25"/>
+  <rect x="570" y="210" width="50" height="80" rx="4" fill="none" stroke="{c["accent2"]}" stroke-width="2" opacity="0.25"/>
+  <!-- Players as dots -->
+  <circle cx="200" cy="200" r="8" fill="{c["accent2"]}" opacity="0.4"/><circle cx="230" cy="230" r="8" fill="{c["accent2"]}" opacity="0.4"/>
+  <circle cx="250" cy="180" r="8" fill="{c["accent2"]}" opacity="0.4"/><circle cx="280" cy="220" r="8" fill="{c["accent2"]}" opacity="0.4"/>
+  <circle cx="420" cy="200" r="8" fill="{c["accent1"]}" opacity="0.4"/><circle cx="450" cy="230" r="8" fill="{c["accent1"]}" opacity="0.4"/>
+  <circle cx="470" cy="180" r="8" fill="{c["accent1"]}" opacity="0.4"/><circle cx="500" cy="220" r="8" fill="{c["accent1"]}" opacity="0.4"/>
+  <!-- Ball -->
+  <circle cx="360" cy="280" r="10" fill="none" stroke="{c["accent1"]}" stroke-width="2" opacity="0.5"/>
+  <path d="M360 270 L360 290 M350 280 L370 280 M353 273 L367 287 M353 287 L367 273" stroke="{c["accent1"]}" stroke-width="1" opacity="0.4"/>'''
+    elif track == "travel" or has_landscape or has_map:
+        decorations = f'''
+  <!-- Mountain scene -->
+  <polygon points="100,420 200,180 300,420" fill="{c["accent1"]}" opacity="0.1"/>
+  <polygon points="250,420 380,140 510,420" fill="{c["accent2"]}" opacity="0.08"/>
+  <polygon points="400,420 500,200 600,420" fill="{c["accent1"]}" opacity="0.06"/>
+  <circle cx="480" cy="160" r="30" fill="{c["accent2"]}" opacity="0.12"/>
+  <circle cx="480" cy="160" r="22" fill="{c["accent2"]}" opacity="0.08"/>
+  <!-- Route dotted line -->
+  <path d="M120,380 Q220,340 320,360 Q420,380 520,340 Q600,320 660,360" fill="none" stroke="{c["accent1"]}" stroke-width="2" stroke-dasharray="6,4" opacity="0.3"/>
+  <!-- Pins -->
+  <circle cx="120" cy="380" r="8" fill="{c["accent2"]}" opacity="0.4"/>
+  <circle cx="320" cy="360" r="8" fill="{c["accent2"]}" opacity="0.4"/>
+  <circle cx="520" cy="340" r="8" fill="{c["accent2"]}" opacity="0.4"/>'''
+    elif track == "child_education" or has_kids:
+        decorations = f'''
+  <!-- Books/learning scene -->
+  <rect x="160" y="220" width="80" height="100" rx="4" fill="{c["accent1"]}" opacity="0.12"/>
+  <rect x="180" y="240" width="60" height="8" rx="2" fill="{c["accent2"]}" opacity="0.2"/>
+  <rect x="180" y="260" width="50" height="8" rx="2" fill="{c["accent2"]}" opacity="0.15"/>
+  <rect x="180" y="280" width="55" height="8" rx="2" fill="{c["accent2"]}" opacity="0.1"/>
+  <rect x="280" y="200" width="90" height="120" rx="4" fill="{c["accent1"]}" opacity="0.08"/>
+  <rect x="300" y="220" width="60" height="8" rx="2" fill="{c["accent2"]}" opacity="0.15"/>
+  <rect x="300" y="240" width="50" height="8" rx="2" fill="{c["accent2"]}" opacity="0.12"/>
+  <!-- Star stickers -->
+  <polygon points="420,210 425,225 440,225 428,233 432,248 420,240 408,248 412,233 400,225 415,225" fill="{c["accent2"]}" opacity="0.2"/>
+  <polygon points="460,260 464,270 475,270 466,276 469,287 460,280 451,287 454,276 445,270 456,270" fill="{c["accent1"]}" opacity="0.15"/>
+  <!-- Heart -->
+  <path d="M500,240 C500,230 510,220 520,230 C530,220 540,230 540,240 C540,255 520,270 520,270 C520,270 500,255 500,240Z" fill="{c["accent2"]}" opacity="0.12"/>'''
+    elif track == "ai_funny" or has_humor:
+        decorations = f'''
+  <!-- Comedy stage -->
+  <rect x="100" y="300" width="520" height="100" rx="8" fill="{c["accent1"]}" opacity="0.06"/>
+  <rect x="100" y="300" width="520" height="8" rx="4" fill="{c["accent2"]}" opacity="0.15"/>
+  <!-- Spotlights -->
+  <polygon points="200,80 160,300 240,300" fill="{c["accent2"]}" opacity="0.04"/>
+  <polygon points="520,80 480,300 560,300" fill="{c["accent1"]}" opacity="0.04"/>
+  <!-- Speech bubbles -->
+  <ellipse cx="280" cy="190" rx="70" ry="40" fill="{c["accent1"]}" opacity="0.1"/>
+  <ellipse cx="440" cy="170" rx="60" ry="35" fill="{c["accent2"]}" opacity="0.08"/>
+  <polygon points="340,225 360,250 370,220" fill="{c["accent1"]}" opacity="0.1"/>
+  <!-- Confetti dots -->
+  <circle cx="150" cy="150" r="4" fill="{c["accent2"]}" opacity="0.3"/>
+  <circle cx="200" cy="120" r="3" fill="{c["accent1"]}" opacity="0.25"/>
+  <circle cx="450" cy="130" r="4" fill="{c["accent2"]}" opacity="0.2"/>
+  <circle cx="550" cy="160" r="3" fill="{c["accent1"]}" opacity="0.3"/>
+  <circle cx="580" cy="200" r="5" fill="{c["accent2"]}" opacity="0.15"/>'''
+    else:
+        # Generic decorative elements
+        decorations = f'''
+  <circle cx="200" cy="200" r="80" fill="{c["accent1"]}" opacity="0.06"/>
+  <circle cx="520" cy="280" r="60" fill="{c["accent2"]}" opacity="0.05"/>
+  <rect x="300" y="150" width="120" height="160" rx="12" fill="{c["accent1"]}" opacity="0.04"/>
+  <line x1="180" y1="120" x2="540" y2="360" stroke="{c["accent1"]}" stroke-width="2" opacity="0.08" stroke-dasharray="8,4"/>
+  <line x1="180" y1="360" x2="540" y2="120" stroke="{c["accent2"]}" stroke-width="2" opacity="0.06" stroke-dasharray="8,4"/>'''
+
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="720" height="480" viewBox="0 0 720 480">
-  <rect width="720" height="480" fill="{c["bg"]}"/>
-  <rect x="40" y="40" width="640" height="400" rx="20" fill="{c["accent"]}" opacity="0.15"/>
-  <text x="360" y="120" text-anchor="middle" font-family="sans-serif" font-size="28" fill="{c["text"]}" font-weight="bold">{title_esc}</text>
-  <text x="360" y="180" text-anchor="middle" font-family="sans-serif" font-size="16" fill="{c["text"]}" opacity="0.7">配图 #{idx + 1}</text>
-  <line x1="200" y1="210" x2="520" y2="210" stroke="{c["accent"]}" stroke-width="2" opacity="0.3"/>
-  <text x="360" y="260" text-anchor="middle" font-family="sans-serif" font-size="14" fill="{c["text"]}">{preview}</text>
+  <defs>
+    <linearGradient id="bg-grad-{seed_hash}" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="{c["bg"]}"/>
+      <stop offset="100%" stop-color="{c["bg"]}" stop-opacity="0.95"/>
+    </linearGradient>
+  </defs>
+  <rect width="720" height="480" fill="url(#bg-grad-{seed_hash})"/>
+  {decorations}
+  <!-- Title overlay box -->
+  <rect x="60" y="380" width="600" height="70" rx="12" fill="{c["bg"]}" opacity="0.85"/>
+  <text x="360" y="412" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="18" fill="{c["text"]}" font-weight="700">{title_esc}</text>
+  <text x="360" y="436" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="12" fill="{c["muted"]}">配图 #{idx + 1} · {seed_hash}</text>
 </svg>'''
 
 
@@ -2194,25 +2288,15 @@ def create_placeholder_illustrations_for_item(
     item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
     media_dir = PREVIEW_DIR / "media" / item_date / "illustrations"
     media_dir.mkdir(parents=True, exist_ok=True)
-    title = str(item.get("title", "内容插图")).strip()[:36]
-    subtitle = str(item.get("track", "")).strip() or str(item.get("platform", "")).strip()
-    palette = [("#1d4ed8", "#0ea5e9"), ("#7c3aed", "#ec4899"), ("#059669", "#10b981")]
+    title = str(item.get("title", "内容插图")).strip()
+    track = str(item.get("track", ""))
     files: list[str] = []
     urls: list[str] = []
-    for idx in range(max(1, count)):
-        c1, c2 = palette[idx % len(palette)]
-        svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-    <stop offset="0%" stop-color="{c1}"/><stop offset="100%" stop-color="{c2}"/>
-  </linearGradient></defs>
-  <rect width="1024" height="1024" fill="url(#g)"/>
-  <rect x="80" y="80" width="864" height="864" rx="36" fill="rgba(255,255,255,0.15)"/>
-  <text x="120" y="220" font-size="56" font-family="Microsoft YaHei, sans-serif" fill="white">{_svg_escape(title)}</text>
-  <text x="120" y="300" font-size="34" font-family="Microsoft YaHei, sans-serif" fill="white" opacity="0.9">{_svg_escape(subtitle)}</text>
-  <text x="120" y="900" font-size="26" font-family="Microsoft YaHei, sans-serif" fill="white" opacity="0.8">Auto Illustration Placeholder #{idx+1}</text>
-</svg>"""
-        out_file = media_dir / f"{queue_id}_placeholder_{idx+1}.svg"
-        out_file.write_text(svg, encoding="utf-8")
+    prompts = build_cloud_image_prompts(item, count=count)
+    for idx, prompt in enumerate(prompts, start=1):
+        svg_content = generate_svg_illustration(track, title, prompt, idx)
+        out_file = media_dir / f"{queue_id}_placeholder_{idx}.svg"
+        out_file.write_text(svg_content, encoding="utf-8")
         files.append(str(out_file))
         urls.append(build_preview_url(config, out_file))
 
