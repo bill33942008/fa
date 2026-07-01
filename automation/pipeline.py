@@ -1,0 +1,7440 @@
+#!/usr/bin/env python3
+"""
+Automated multi-platform content pipeline.
+
+Capabilities:
+- Collect topic candidates from RSS sources
+- Generate platform-specific drafts with an LLM (or deterministic fallback)
+- Create and maintain a review/publishing queue
+- Support semi-automated publishing workflow
+- Sync queue status to Feishu Bitable
+- Push daily reminders to Feishu webhook / email
+- Auto-submit WeChat Official Account drafts (official API path)
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import email.utils
+import html
+import http.server
+import io
+import json
+import os
+import re
+import shlex
+import shutil
+import smtplib
+import ssl
+import subprocess
+import tempfile
+import threading
+import textwrap
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+import zipfile
+import xml.etree.ElementTree as et
+from email.mime.text import MIMEText
+from pathlib import Path
+from typing import Any
+
+
+BASE_DIR = Path(__file__).resolve().parent
+STATE_DIR = BASE_DIR / "state"
+DATA_DIR = BASE_DIR / "data"
+OUTBOX_DIR = BASE_DIR / "outbox"
+PREVIEW_DIR = BASE_DIR / "previews"
+QUEUE_FILE = STATE_DIR / "publish_queue.json"
+FEISHU_MAPPING_FILE = STATE_DIR / "feishu_record_mapping.json"
+VIDEO_JOBS_DIR = STATE_DIR / "video_jobs"
+REMINDER_STATE_FILE = STATE_DIR / "publish_reminder_state.json"
+REMINDER_LOG_FILE = BASE_DIR / "publish_reminders.log"
+
+FEISHU_FIELD_DEFINITIONS: dict[str, dict[str, Any]] = {
+    "QueueID": {"type": 1},
+    "Date": {"type": 1},
+    "Platform": {"type": 1},
+    "Account": {"type": 1},
+    "Track": {"type": 1},
+    "Status": {"type": 1},
+    "PublishTime": {"type": 1},
+    "Title": {"type": 1},
+    "Hashtags": {"type": 1},
+    "SourceTopic": {"type": 1},
+    "SourceLink": {"type": 1},
+    "ContentFile": {"type": 1},
+    "PreviewFile": {"type": 1},
+    "PreviewURL": {"type": 1},
+    "SampleVideoFile": {"type": 1},
+    "SampleVideoURL": {"type": 1},
+    "SampleAudioFile": {"type": 1},
+    "IllustrationFiles": {"type": 1},
+    "IllustrationURLs": {"type": 1},
+    "CloudVideoProvider": {"type": 1},
+    "CloudImageModel": {"type": 1},
+    "CloudVideoModel": {"type": 1},
+    "CloudVideoPredictionID": {"type": 1},
+    "HookText": {"type": 1},
+    "BodyPreview": {"type": 1},
+    "ContentMarkdown": {"type": 1},
+    "CoverText": {"type": 1},
+    "PostURL": {"type": 1},
+    "UpdatedAt": {"type": 1},
+    "Notes": {"type": 1},
+    "HookScore": {"type": 2, "property": {"formatter": "0"}},
+    "StructureScore": {"type": 2, "property": {"formatter": "0"}},
+    "PlatformFitScore": {"type": 2, "property": {"formatter": "0"}},
+    "CommercialScore": {"type": 2, "property": {"formatter": "0"}},
+    "ComplianceScore": {"type": 2, "property": {"formatter": "0"}},
+    "TotalScore": {"type": 2, "property": {"formatter": "0"}},
+    "QualityLevel": {"type": 1},
+    "QualityBadge": {"type": 1},
+    "PublishAdvice": {"type": 1},
+    "QualityReason": {"type": 1},
+}
+
+
+def ensure_dirs() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def apply_server_runtime_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
+    preview = cfg.setdefault("preview", {})
+    if not str(preview.get("public_base_url", "")).strip() or "YOUR_SERVER_IP" in str(
+        preview.get("public_base_url", "")
+    ):
+        preview["public_base_url"] = "http://118.25.178.116:8787"
+    cloud_media = cfg.setdefault("cloud_media", {})
+    cloud_media["enabled"] = True
+    cloud_media.setdefault("image", {})["enabled"] = True
+    cloud_media.setdefault("video", {})["enabled"] = True
+    cfg.setdefault("local_gpu", {})["enabled"] = False
+    sample_video = cfg.setdefault("sample_video", {})
+    sample_video["enabled"] = True
+    if not str(sample_video.get("public_base_url", "")).strip() or "YOUR_SERVER_IP" in str(
+        sample_video.get("public_base_url", "")
+    ):
+        sample_video["public_base_url"] = preview.get("public_base_url", "http://118.25.178.116:8787")
+    return cfg
+
+
+def ensure_config_file(path: Path) -> None:
+    if path.exists():
+        return
+    parent = path.parent
+    candidates = [
+        parent / "config.server.json",
+        parent / "config.example.json",
+    ]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        payload = load_json(candidate, {})
+        if candidate.name == "config.example.json":
+            payload = apply_server_runtime_defaults(payload)
+        save_json(path, payload)
+        print(
+            f"[INFO] Created missing config: {path} "
+            f"(from {candidate.name}). Review Feishu/cloud settings if needed."
+        )
+        return
+    raise FileNotFoundError(
+        f"Config not found: {path}\n"
+        "Run: curl -fsSL https://raw.githubusercontent.com/bill33942008/fa/"
+        "refs/heads/cursor/multi-platform-auto-ops-2a43/automation/bootstrap_server.sh | bash"
+    )
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    ensure_config_file(path)
+    return load_json(path, {})
+
+
+def now_local() -> dt.datetime:
+    return dt.datetime.now().astimezone()
+
+
+def parse_datetime(raw: str | None) -> dt.datetime | None:
+    if not raw:
+        return None
+    try:
+        return email.utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def http_post_json(
+    url: str, payload: dict[str, Any], headers: dict[str, str] | None = None, timeout: int = 30
+) -> dict[str, Any]:
+    merged_headers = {"Content-Type": "application/json"}
+    if headers:
+        merged_headers.update(headers)
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers=merged_headers, method="POST")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def http_get_json(
+    url: str, headers: dict[str, str] | None = None, timeout: int = 30
+) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers=headers or {}, method="GET")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def http_get_bytes(url: str, headers: dict[str, str] | None = None, timeout: int = 60) -> bytes:
+    request = urllib.request.Request(url, headers=headers or {}, method="GET")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def cloud_media_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("cloud_media", {}).get("enabled", False))
+
+
+def dashscope_headers(cfg: dict[str, Any], *, async_mode: bool = False) -> dict[str, str]:
+    key_env = str(cfg.get("api_key_env", "DASHSCOPE_API_KEY")).strip()
+    key = os.getenv(key_env, "")
+    if not key:
+        raise ValueError(f"Missing DashScope API key env: {key_env}")
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    if async_mode:
+        headers["X-DashScope-Async"] = "enable"
+    return headers
+
+
+def dashscope_base_url(cfg: dict[str, Any]) -> str:
+    return str(cfg.get("base_url", "https://dashscope.aliyuncs.com/api/v1")).rstrip("/")
+
+
+def dashscope_create_task(cfg: dict[str, Any], endpoint_path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    url = f"{dashscope_base_url(cfg)}{endpoint_path}"
+    try:
+        return http_post_json(
+            url,
+            payload,
+            headers=dashscope_headers(cfg, async_mode=True),
+            timeout=int(cfg.get("request_timeout_seconds", 60)),
+        )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(f"DashScope create task HTTP {exc.code}: {detail}") from exc
+
+
+def dashscope_model_candidates(cfg: dict[str, Any], defaults: list[str]) -> list[str]:
+    first = str(cfg.get("model", "")).strip()
+    user_candidates = cfg.get("model_candidates", [])
+    candidates: list[str] = []
+    if first:
+        candidates.append(first)
+    if isinstance(user_candidates, list):
+        for model in user_candidates:
+            m = str(model).strip()
+            if m:
+                candidates.append(m)
+    for model in defaults:
+        m = str(model).strip()
+        if m:
+            candidates.append(m)
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for model in candidates:
+        if model in seen:
+            continue
+        seen.add(model)
+        uniq.append(model)
+    return uniq
+
+
+def is_dashscope_model_retryable_error(exc: Exception) -> bool:
+    text = str(exc)
+    markers = [
+        "Model.AccessDenied",
+        "Model not exist",
+        '"code":"InvalidParameter"',
+        "InvalidParameter",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def dashscope_extract_task_id(resp: dict[str, Any]) -> str:
+    output = resp.get("output", {}) if isinstance(resp, dict) else {}
+    if isinstance(output, dict):
+        for key in ("task_id", "taskId", "id"):
+            value = str(output.get(key, "")).strip()
+            if value:
+                return value
+    for key in ("task_id", "taskId", "id"):
+        value = str(resp.get(key, "")).strip() if isinstance(resp, dict) else ""
+        if value:
+            return value
+    return ""
+
+
+def dashscope_poll_task(cfg: dict[str, Any], task_id: str) -> dict[str, Any]:
+    timeout_seconds = int(cfg.get("timeout_seconds", 1200))
+    poll_interval = float(cfg.get("poll_interval_seconds", 5))
+    started = now_local().timestamp()
+    url = f"{dashscope_base_url(cfg)}/tasks/{task_id}"
+    while True:
+        try:
+            status = http_get_json(url, headers=dashscope_headers(cfg), timeout=30)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            if exc.code in {429, 503, 502}:
+                print("[WARN] DashScope busy/rate-limit, backing off.")
+                time.sleep(max(2.0, poll_interval * 2))
+                continue
+            raise RuntimeError(f"DashScope poll HTTP {exc.code}: {detail}") from exc
+        output = status.get("output", {}) if isinstance(status, dict) else {}
+        task_status = str(output.get("task_status", output.get("status", ""))).upper()
+        if task_status in {"SUCCEEDED", "SUCCESS", "COMPLETED"}:
+            return status
+        if task_status in {"FAILED", "CANCELED", "CANCELLED"}:
+            raise RuntimeError(f"DashScope task failed: {status}")
+        if now_local().timestamp() - started > timeout_seconds:
+            raise TimeoutError(f"DashScope task timeout after {timeout_seconds}s: {task_id}")
+        time.sleep(poll_interval)
+
+
+def replicate_headers(cfg: dict[str, Any]) -> dict[str, str]:
+    token_env = str(cfg.get("api_token_env", "REPLICATE_API_TOKEN")).strip()
+    token = os.getenv(token_env, "")
+    if not token:
+        raise ValueError(f"Missing Replicate token env: {token_env}")
+    return {
+        "Authorization": f"Token {token}",
+        "Content-Type": "application/json",
+    }
+
+
+def resolve_replicate_version(cfg: dict[str, Any]) -> str:
+    cached = str(cfg.get("_resolved_version", "")).strip()
+    if cached:
+        return cached
+    explicit_version = str(cfg.get("version", "")).strip()
+    if explicit_version:
+        cfg["_resolved_version"] = explicit_version
+        return explicit_version
+    model = str(cfg.get("model", "")).strip()
+    if not model:
+        raise ValueError("cloud_media.*.model or cloud_media.*.version is required")
+    if "/" not in model:
+        # If user already passed a version-like value, allow it.
+        cfg["_resolved_version"] = model
+        return model
+    try:
+        meta = http_get_json(
+            f"https://api.replicate.com/v1/models/{model}",
+            headers=replicate_headers(cfg),
+            timeout=30,
+        )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(
+            f"Replicate model metadata HTTP {exc.code}: {detail}. "
+            "If you see Cloudflare 1010, the current server egress IP is blocked by Replicate."
+        ) from exc
+    latest = meta.get("latest_version", {}) if isinstance(meta, dict) else {}
+    version = str(latest.get("id", "")).strip()
+    if not version:
+        raise ValueError(f"Cannot resolve latest Replicate version for model: {model}")
+    cfg["_resolved_version"] = version
+    return version
+
+
+def replicate_create_prediction(cfg: dict[str, Any], payload_input: dict[str, Any]) -> dict[str, Any]:
+    version = resolve_replicate_version(cfg)
+    payload = {"version": version, "input": payload_input}
+    try:
+        return http_post_json(
+            "https://api.replicate.com/v1/predictions",
+            payload,
+            headers=replicate_headers(cfg),
+            timeout=int(cfg.get("request_timeout_seconds", 60)),
+        )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(f"Replicate create prediction HTTP {exc.code}: {detail}") from exc
+
+
+def replicate_create_prediction_with_retries(
+    cfg: dict[str, Any], payload_input: dict[str, Any]
+) -> dict[str, Any]:
+    max_retries = int(cfg.get("max_retries", 4))
+    base_sleep = float(cfg.get("retry_backoff_seconds", 2))
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return replicate_create_prediction(cfg, payload_input)
+        except Exception as exc:  # pylint: disable=broad-except
+            last_error = exc
+            text = str(exc)
+            retryable = "HTTP 429" in text or "HTTP 503" in text or "HTTP 502" in text
+            if not retryable or attempt >= max_retries:
+                raise
+            sleep_seconds = base_sleep * (2**attempt)
+            print(f"[WARN] Replicate busy/rate-limit, retry in {sleep_seconds:.1f}s")
+            time.sleep(sleep_seconds)
+    raise RuntimeError(f"Replicate create prediction failed: {last_error}")
+
+
+def replicate_create_prediction_candidates(
+    cfg: dict[str, Any], input_candidates: list[dict[str, Any]]
+) -> dict[str, Any]:
+    errors: list[str] = []
+    for idx, payload_input in enumerate(input_candidates, start=1):
+        try:
+            return replicate_create_prediction_with_retries(cfg, payload_input)
+        except Exception as exc:  # pylint: disable=broad-except
+            errors.append(f"candidate#{idx}: {exc}")
+    raise RuntimeError("All Replicate input candidates failed: " + " | ".join(errors[:3]))
+
+
+def replicate_poll_prediction(cfg: dict[str, Any], prediction_id: str) -> dict[str, Any]:
+    headers = replicate_headers(cfg)
+    timeout_seconds = int(cfg.get("timeout_seconds", 900))
+    poll_interval = float(cfg.get("poll_interval_seconds", 3))
+    started = now_local().timestamp()
+    while True:
+        try:
+            status = http_get_json(
+                f"https://api.replicate.com/v1/predictions/{prediction_id}",
+                headers=headers,
+                timeout=30,
+            )
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            if exc.code == 429:
+                print("[WARN] Replicate poll hit 429, backing off.")
+                time.sleep(max(2.0, poll_interval * 2))
+                continue
+            raise RuntimeError(f"Replicate poll HTTP {exc.code}: {detail}") from exc
+        state = str(status.get("status", "")).lower()
+        if state == "succeeded":
+            return status
+        if state in {"failed", "canceled"}:
+            raise RuntimeError(f"Replicate prediction failed: {status.get('error', status)}")
+        if now_local().timestamp() - started > timeout_seconds:
+            raise TimeoutError(f"Replicate prediction timeout after {timeout_seconds}s: {prediction_id}")
+        time.sleep(poll_interval)
+
+
+def normalize_prediction_urls(output: Any) -> list[str]:
+    if output is None:
+        return []
+    if isinstance(output, str) and output.startswith("http"):
+        return [output]
+    if isinstance(output, list):
+        urls: list[str] = []
+        for item in output:
+            urls.extend(normalize_prediction_urls(item))
+        return urls
+    if isinstance(output, dict):
+        urls: list[str] = []
+        for key in ("url", "image", "video_url", "file_url"):
+            value = output.get(key)
+            if isinstance(value, str) and value.startswith("http"):
+                urls.append(value)
+        for value in output.values():
+            urls.extend(normalize_prediction_urls(value))
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for url in urls:
+            if url not in seen:
+                seen.add(url)
+                ordered.append(url)
+        return ordered
+    return []
+
+
+def fetch_rss(url: str) -> list[dict[str, Any]]:
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (ContentAutomationBot/1.0)"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            xml_bytes = response.read()
+    except urllib.error.URLError as exc:
+        print(f"[WARN] RSS fetch failed: {url} -> {exc}")
+        return []
+
+    try:
+        root = et.fromstring(xml_bytes)
+    except et.ParseError as exc:
+        print(f"[WARN] RSS parse failed: {url} -> {exc}")
+        return []
+
+    items: list[dict[str, Any]] = []
+    for item in root.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        description = rss_item_description(item)
+        pub_date_raw = (item.findtext("pubDate") or "").strip()
+        pub_dt = parse_datetime(pub_date_raw)
+        items.append(
+            {
+                "title": title,
+                "link": link,
+                "description": description,
+                "pub_date_raw": pub_date_raw,
+                "pub_date_iso": pub_dt.isoformat() if pub_dt else None,
+            }
+        )
+    return items
+
+
+def clean_rss_text(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def rss_item_description(item: et.Element) -> str:
+    candidates: list[str] = []
+    for tag in (
+        "description",
+        "{http://purl.org/rss/1.0/modules/content/}encoded",
+        "summary",
+    ):
+        value = (item.findtext(tag) or "").strip()
+        if value:
+            candidates.append(clean_rss_text(value))
+    return max(candidates, key=len, default="")
+
+
+def score_topic(topic: dict[str, Any], keywords: list[str]) -> float:
+    text = f"{topic.get('title', '')} {topic.get('description', '')}".lower()
+    score = 0.0
+    for kw in keywords:
+        if kw.lower() in text:
+            score += 2.0
+    raw = topic.get("pub_date_raw")
+    pub_dt = parse_datetime(raw)
+    if pub_dt is not None:
+        delta_hours = (now_local() - pub_dt.astimezone()).total_seconds() / 3600.0
+        freshness = max(0.0, 72.0 - delta_hours)
+        score += freshness / 18.0
+    return round(score, 3)
+
+
+def topic_contains_any(topic: dict[str, Any], keywords: list[str]) -> bool:
+    text = f"{topic.get('title', '')} {topic.get('description', '')}".lower()
+    return any(str(keyword).lower() in text for keyword in keywords if str(keyword).strip())
+
+
+def topic_age_hours(topic: dict[str, Any]) -> float | None:
+    raw = topic.get("pub_date_raw")
+    pub_dt = parse_datetime(raw)
+    if pub_dt is None:
+        return None
+    return (now_local() - pub_dt.astimezone()).total_seconds() / 3600.0
+
+
+FOOTBALL_POST_MATCH_MARKERS = [
+    "full time",
+    "full-time",
+    "match report",
+    "match recap",
+    "post-match",
+    "postmatch",
+    "highlights",
+    "scoreline",
+    "final score",
+    " beats ",
+    " beat ",
+    " defeats ",
+    " defeat ",
+    " wins ",
+    " win ",
+    "victory",
+    "thrashed",
+    "hammered",
+    "held to a draw",
+    "held to",
+    "round-up",
+    "round up",
+    "recap",
+    "result",
+    "post match",
+    "赛果",
+    "战报",
+    "完场",
+    "全场比赛",
+    "进球",
+    "破门",
+    "扳平",
+    "绝杀",
+    "险胜",
+    "不敌",
+    "大胜",
+    "惨败",
+    "逆转",
+    "淘汰",
+    "出局",
+    "夺冠",
+    "赛后",
+    "录像",
+    "集锦",
+    "oust",
+    "storm into",
+    "breeze past",
+    "advances",
+    "advance to",
+    "advance ",
+    "books ",
+    "book potential",
+    "blank ",
+    "sets record to lead",
+    "sets up ",
+]
+
+
+FOOTBALL_RELEVANCE_MARKERS = [
+    "football",
+    "soccer",
+    "premier league",
+    "la liga",
+    "serie a",
+    "bundesliga",
+    "ligue 1",
+    "champions league",
+    "europa league",
+    "world cup",
+    "mls",
+    "usmnt",
+    "qualifier",
+    "group stage",
+    "last 16",
+    "last-16",
+    "knockout",
+    "足球",
+    "英超",
+    "西甲",
+    "德甲",
+    "意甲",
+    "法甲",
+    "欧冠",
+    "世界杯",
+    "国家队",
+    "england",
+    "germany",
+    "spain",
+    "italy",
+    "brazil",
+    "mexico",
+    "france",
+    "norway",
+    "sweden",
+    "usa",
+    "u.s.",
+    "netherlands",
+    "portugal",
+    "argentina",
+    "tuchel",
+    "haaland",
+    "mbappe",
+    " vs ",
+    " v ",
+]
+
+
+NON_FOOTBALL_MARKERS = [
+    "wimbledon",
+    "tennis",
+    "formula 1",
+    "formula one",
+    " f1 ",
+    "grand prix",
+    "golf",
+    " nba ",
+    "lakers",
+    "lebron",
+    "ryder cup",
+    "boxing",
+    "heavyweight",
+    " ufc",
+    "cricket",
+    "horse racing",
+    "magic weekend",
+    "super league",
+    "sky sports racing",
+    "open championship",
+    "final qualifying",
+    "snooker",
+    "斯诺克",
+    "billiard",
+    "台球",
+    "world grand prix",
+    "players championship",
+    "tour championship",
+]
+
+
+def is_football_relevant_topic(topic: dict[str, Any], source: str = "") -> bool:
+    if topic_contains_any(topic, NON_FOOTBALL_MARKERS):
+        return False
+    source_lower = str(source).lower()
+    if "soccer" in source_lower or "/football/" in source_lower:
+        return True
+    return topic_contains_any(topic, FOOTBALL_RELEVANCE_MARKERS)
+
+
+def normalize_topic_key(topic: dict[str, Any]) -> str:
+    link = str(topic.get("link", "")).strip().lower()
+    if link:
+        return link.split("#", 1)[0]
+    title = re.sub(r"\s+", " ", str(topic.get("title", "")).strip().lower())
+    return title
+
+
+def is_football_post_match_topic(topic: dict[str, Any], track_cfg: dict[str, Any]) -> bool:
+    title = str(topic.get("title", "")).strip()
+    preview_markers = [str(x) for x in track_cfg.get("topic_boost_keywords", [])]
+    has_preview_signal = bool(preview_markers) and topic_contains_any(topic, preview_markers)
+    has_post_match_signal = topic_contains_any(topic, FOOTBALL_POST_MATCH_MARKERS)
+    has_score_title = bool(re.search(r"\b\d+\s*[-–]\s*\d+\b", title))
+    if has_preview_signal and not has_post_match_signal:
+        return False
+    if has_post_match_signal:
+        return True
+    return has_score_title and not has_preview_signal
+
+
+def used_topic_keys(
+    queue: list[dict[str, Any]], *, track_name: str = "", days: int = 14
+) -> set[str]:
+    cutoff = now_local() - dt.timedelta(days=max(1, days))
+    keys: set[str] = set()
+    for item in queue:
+        if track_name and str(item.get("track", "")).strip() != track_name:
+            continue
+        created_raw = str(item.get("created_at", "")).strip()
+        created_dt = None
+        if created_raw:
+            try:
+                created_dt = dt.datetime.fromisoformat(created_raw)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=now_local().tzinfo)
+            except ValueError:
+                created_dt = None
+        if created_dt is not None and created_dt.astimezone() < cutoff.astimezone():
+            continue
+        link = str(item.get("source_link", "")).strip().lower()
+        if link:
+            keys.add(link.split("#", 1)[0])
+        title = re.sub(r"\s+", " ", str(item.get("source_topic", "")).strip().lower())
+        if title:
+            keys.add(title)
+    return keys
+
+
+def select_topics_for_generation(
+    topics: list[dict[str, Any]],
+    queue: list[dict[str, Any]],
+    *,
+    track_name: str,
+    count: int,
+) -> list[dict[str, Any]]:
+    if not topics or count <= 0:
+        return []
+    used = used_topic_keys(queue, track_name=track_name)
+    fresh = [topic for topic in topics if normalize_topic_key(topic) not in used]
+    pool = list(fresh or topics)
+    if not fresh:
+        print(
+            f"[WARN] {track_name}: all {len(topics)} candidate topics were used recently; "
+            "reusing ranked list"
+        )
+    selected: list[dict[str, Any]] = []
+    for _ in range(count):
+        if not pool:
+            pool = list(topics)
+        selected.append(pool.pop(0))
+    return selected
+
+
+def collect_track_topics(
+    track_name: str, track_cfg: dict[str, Any], per_track_limit: int
+) -> list[dict[str, Any]]:
+    keywords = track_cfg.get("keywords", [])
+    boost_keywords = [str(x) for x in track_cfg.get("topic_boost_keywords", [])]
+    exclude_keywords = [str(x) for x in track_cfg.get("topic_exclude_keywords", [])]
+    require_any_keywords = bool(track_cfg.get("topic_require_any_keywords", False))
+    require_keywords = [
+        str(x)
+        for x in track_cfg.get(
+            "topic_require_keywords", track_cfg.get("topic_boost_keywords", [])
+        )
+        if str(x).strip()
+    ]
+    football_only = bool(track_cfg.get("topic_football_only", track_name == "football"))
+    non_football_exclude = [
+        str(x) for x in track_cfg.get("topic_non_football_exclude_keywords", NON_FOOTBALL_MARKERS)
+    ]
+    max_age_hours = float(track_cfg.get("max_topic_age_hours", 72))
+    require_pub_date = bool(track_cfg.get("require_pub_date", False))
+    filter_post_match = bool(track_cfg.get("filter_post_match_topics", track_name == "football"))
+    all_items: list[dict[str, Any]] = []
+    seen_titles: set[str] = set()
+
+    for source in track_cfg.get("rss_sources", []):
+        for item in fetch_rss(source):
+            title = item.get("title", "").strip()
+            if not title:
+                continue
+            age_hours = topic_age_hours(item)
+            if require_pub_date and age_hours is None:
+                continue
+            if age_hours is not None and age_hours > max_age_hours:
+                continue
+            if exclude_keywords and topic_contains_any(item, exclude_keywords):
+                continue
+            if require_any_keywords and require_keywords and not topic_contains_any(
+                item, require_keywords
+            ):
+                continue
+            if filter_post_match and is_football_post_match_topic(item, track_cfg):
+                continue
+            if football_only and not is_football_relevant_topic(item, source):
+                continue
+            if non_football_exclude and topic_contains_any(item, non_football_exclude):
+                continue
+            title_key = re.sub(r"\s+", " ", title.lower())
+            if title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
+            item["track"] = track_name
+            item["source"] = source
+            item["score"] = score_topic(item, keywords)
+            if boost_keywords and topic_contains_any(item, boost_keywords):
+                item["score"] = round(float(item["score"]) + 8.0, 3)
+            if track_name == "football" and "when:1d" not in source and "when%3A1d" not in source:
+                item["score"] = round(float(item["score"]) - 4.0, 3)
+            if age_hours is not None:
+                freshness_bonus = max(0.0, (max_age_hours - age_hours) / max(max_age_hours, 1.0))
+                item["score"] = round(float(item["score"]) + freshness_bonus * 6.0, 3)
+            all_items.append(item)
+
+    all_items.sort(
+        key=lambda i: (float(i.get("score", 0.0)), i.get("pub_date_iso") or ""),
+        reverse=True,
+    )
+    return all_items[:per_track_limit]
+
+
+def extract_json_object(text: str) -> dict[str, Any] | None:
+    text = text.strip()
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+
+
+def llm_generate(
+    llm_cfg: dict[str, Any], system_prompt: str, user_prompt: str,
+    *,
+    model_override: str | None = None,
+    use_reasoning: bool = False,
+    reasoning_effort: str | None = None,
+) -> dict[str, Any] | None:
+    if not llm_cfg.get("enabled", False):
+        return None
+    api_key = os.getenv(llm_cfg.get("api_key_env", "OPENAI_API_KEY"), "")
+    if not api_key:
+        print("[WARN] LLM key not found, fallback mode enabled.")
+        return None
+
+    endpoint = llm_cfg.get("base_url", "").strip()
+    if not endpoint:
+        print("[WARN] LLM base_url missing, fallback mode enabled.")
+        return None
+
+    payload: dict[str, Any] = {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    }
+
+    if use_reasoning:
+        payload["model"] = model_override or llm_cfg.get("reasoning_model", "deepseek-reasoner")
+        payload["max_tokens"] = llm_cfg.get("reasoning_max_tokens", 4000)
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        reasoning_key = os.getenv(llm_cfg.get("reasoning_api_key_env", "DEEPSEEK_REASONER_API_KEY"), "")
+        if reasoning_key:
+            api_key = reasoning_key
+    else:
+        payload["model"] = model_override or llm_cfg.get("model", "gpt-4.1-mini")
+        payload["temperature"] = llm_cfg.get("temperature", 0.7)
+        payload["max_tokens"] = llm_cfg.get("max_tokens", 1400)
+
+    timeout = llm_cfg.get("reasoning_timeout", 120) if use_reasoning else llm_cfg.get("timeout", 35)
+
+    try:
+        raw = http_post_json(
+            endpoint,
+            payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=timeout,
+        )
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
+        print(f"[WARN] LLM request failed, fallback mode enabled: {exc}")
+        return None
+
+    try:
+        content = raw["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        print("[WARN] Unexpected LLM response shape, fallback mode enabled.")
+        return None
+
+    return extract_json_object(content)
+
+
+def fallback_draft(
+    platform: dict[str, Any], track: dict[str, Any], topic: dict[str, Any]
+) -> dict[str, Any]:
+    title = topic.get("title", "今日主题")
+    topic_link = topic.get("link", "")
+    description = topic.get("description", "无摘要，建议补充自己的观察。")
+    keywords = track.get("keywords", [])[:5]
+    hashtags = [f"#{k}" for k in keywords]
+    if platform.get("post_format") == "short_video_script":
+        body = textwrap.dedent(
+            f"""
+            ## 口播稿
+            先用一个具体冲突开场：为什么“{title}”值得今天讲？用普通人能听懂的话解释背景，再给出 2-3 个关键观点，最后用一个提问收尾，引导评论。
+
+            ## 分镜脚本
+            | 镜头 | 时间 | 画面/场景 | 镜头运动 | 字幕 | 配图提示 |
+            | --- | --- | --- | --- | --- | --- |
+            | 1 | 0-3秒 | 标题相关的强视觉画面，制造悬念 | 快速推进 | 先抛出反常识问题 | 主视觉图，突出冲突 |
+            | 2 | 3-8秒 | 展示事件背景或人物/地点 | 平移或轻推 | 交代事情发生了什么 | 新闻场景/数据图 |
+            | 3 | 8-15秒 | 展示第一个关键观点 | 切近景 | 观点一：说清原因 | 对应观点插图 |
+            | 4 | 15-25秒 | 展示第二个关键观点 | 切换节奏 | 观点二：给出影响 | 对应影响插图 |
+            | 5 | 25-35秒 | 总结和互动 | 定格或慢推 | 你怎么看？评论区聊聊 | 总结型封面图 |
+
+            ## 剪映制作提示
+            - 节奏：前 3 秒必须有强字幕，后面每 4-6 秒换一张图。
+            - 字幕：用短句，不要整段堆字。
+            - 配乐：选择轻快但不抢口播的背景音乐。
+
+            ## 参考资料
+            - 标题：{title}
+            - 链接：{topic_link}
+            - 摘要：{description}
+            """
+        ).strip()
+    else:
+        body = textwrap.dedent(
+            f"""
+            ## 开头
+            这件事的重点不是“{title}”本身，而是它背后和读者有关的变化。先用一句具体场景把读者带进去，再说明为什么值得收藏/转发。
+
+            ## 核心内容
+            1. 先讲清楚发生了什么：{description}
+            2. 再解释它为什么重要：结合账号定位，给出可理解的背景和判断。
+            3. 最后给读者可执行建议：去哪看、怎么选、怎么避坑、怎么行动。
+
+            ## 发布建议
+            - 配图 1：开头场景图
+            - 配图 2：核心观点图
+            - 配图 3：总结/清单图
+
+            ## 参考来源
+            - 标题：{title}
+            - 链接：{topic_link}
+            """
+        ).strip()
+    return {
+        "title": f"{platform['account_name']} | {title}",
+        "hook": "先用具体场景或反常识问题开场，让读者知道这条内容和自己有关。",
+        "body_markdown": body,
+        "cover_text": f"{platform['account_name']} 今日内容",
+        "hashtags": hashtags,
+    }
+
+
+def generate_draft(
+    config: dict[str, Any],
+    platform_cfg: dict[str, Any],
+    track_cfg: dict[str, Any],
+    topic: dict[str, Any],
+    *,
+    match_knowledge: str = "",
+    use_reasoning: bool | None = None,
+) -> dict[str, Any]:
+    system_prompt = track_cfg.get(
+        "system_prompt", "你是内容运营编辑，输出可发布草稿。"
+    )
+    post_format = platform_cfg.get("post_format", "generic")
+    if post_format == "short_video_script":
+        format_requirements = textwrap.dedent(
+            """
+            这是给抖音/视频号/快手导入剪映用的素材脚本，必须输出足够细的分镜，不要只写泛泛口播。
+            body_markdown 必须包含这些小节：
+            1. `## 口播稿`：30-60秒口播，开头3秒有强钩子，句子短，适合直接配音。
+            2. `## 分镜脚本`：Markdown 表格，列必须包含：镜头、时间、画面/场景、镜头运动、字幕、配图提示。
+               - 至少 6 个镜头。
+               - 每个镜头都要写清楚画面元素、人物/地点/物件、情绪、镜头运动。
+               - 字幕要短，适合剪映显示。
+               - 配图提示要能直接用于生成插图。
+            3. `## 剪映制作提示`：写明图片顺序、转场、字幕样式、BGM/节奏。
+            4. `## 发布文案`：短视频发布时可直接粘贴的标题文案和互动问题。
+            """
+        ).strip()
+    elif post_format == "graphic_post":
+        format_requirements = textwrap.dedent(
+            """
+            这是给小红书发布的图文笔记，必须像真实笔记，不要写成新闻稿。
+            body_markdown 要求：
+            - 600-1000字，口语化但信息密度高。
+            - 开头给出强场景/痛点，前80字就说明为什么值得收藏。
+            - 至少包含 4 个小标题，结构清楚。
+            - 给出路线/清单/预算/避坑/步骤等可执行信息（按赛道选择）。
+            - 文末要有收藏、评论或提问引导。
+            - 配图位置：用「【配图1】」「【配图2】」「【配图3】」简单标注即可，不要额外写配图说明。
+            """
+        ).strip()
+    elif post_format == "long_article":
+        format_requirements = textwrap.dedent(
+            """
+            这是给微信公众号的长图文，必须像可直接发布的成稿。
+            body_markdown 要求：
+            - 900-1500字，观点清晰，有信息增量，不要空泛。
+            - 结构：开头冲突/背景 -> 3-5个小标题分论点 -> 总结/互动。
+            - 每个分论点要有具体事实、判断和读者价值。
+            - 如果涉及足球竞彩，必须理性分析，不承诺收益，不诱导下注。
+            - 配图位置：用「【配图1】」「【配图2】」「【配图3】」标记在正文中即可，不要写额外的配图描述或建议文字。
+            - 禁止出现"配图建议"、"配图0"、"image-marker"等字样的说明文字。
+            """
+        ).strip()
+    else:
+        format_requirements = "生成可直接发布的中文内容，结构清晰，避免空话。"
+    topic_title = str(topic.get("title", "")).strip()
+    topic_description = str(topic.get("description", "")).strip()
+
+    knowledge_section = ""
+    if match_knowledge.strip():
+        knowledge_section = textwrap.dedent(
+            f"""
+            【用户提供的比赛信息，请优先使用这些信息做深度分析】
+            {match_knowledge.strip()}
+
+            """
+        ).strip()
+
+    is_football = "football" in str(track_cfg.get("description", "")).lower() or "足球" in str(track_cfg.get("system_prompt", ""))
+
+    user_prompt = textwrap.dedent(
+        f"""
+        请根据以下信息生成一个高质量、可直接发布的草稿，并且仅输出 JSON 对象，不要输出 Markdown 代码块：
+        {{
+          "title": "标题",
+          "hook": "开头钩子",
+          "body_markdown": "正文Markdown",
+          "cover_text": "封面文案",
+          "hashtags": ["#标签1", "#标签2"]
+        }}
+
+        {knowledge_section}
+
+        通用质量要求：
+        - 标题要具体，有传播点，不要标题党。
+        - hook 要能放在正文开头直接使用，吸引读者继续阅读。
+        - 内容必须贴合账号定位和平台语气。
+        - 不要出现“作为AI”“以下是”“让我们来看看”等提示词痕迹。
+        - 不要只复述新闻，要给出深度判断、战术分析、数据洞察或可执行建议。
+        - 如果信息不足，标注“建议发布前核实”，但不要用核实清单代替正文。
+        - 严禁编造来源没有明确给出的事实（人名、比分、进球人、伤停、首发、赔率、时间地点），
+          但允许基于已知战术风格和球员特点做合理分析推演，并标注「此为分析推演」。
+        - 足球内容必须做赛前/即将开始的比赛分析：分析对阵形势、战术博弈、关键球员对位、伤停影响。
+        - 如果选题标题明确是即将开始的比赛（含日期、对阵双方），必须围绕该比赛做深度分析，
+          不得写成通用风险提示或信息核实清单。
+        - 当前日期是 {now_local().strftime('%Y-%m-%d')}，确保时效表述正确。
+        - 已知事实：托马斯·图赫尔已于 2025-01-01 正式执教英格兰队；不得写“还没上任”“即将上任”等错误表述。
+
+        内容形式专项要求：
+        {format_requirements}
+
+        账号名: {platform_cfg["account_name"]}
+        平台: {platform_cfg["platform"]}
+        内容格式: {post_format}
+        发布时段: {platform_cfg.get("publish_time", "20:00")}
+        赛道定位: {track_cfg.get("description", "")}
+
+        选题标题: {topic.get("title", "")}
+        选题摘要: {topic.get("description", "")}
+        选题链接: {topic.get("link", "")}
+        """
+    ).strip()
+
+    should_use_reasoning = use_reasoning if use_reasoning is not None else is_football
+    generated = llm_generate(
+        config.get("llm", {}),
+        system_prompt,
+        user_prompt,
+        use_reasoning=should_use_reasoning,
+    )
+    if generated:
+        return sanitize_draft_for_accuracy(generated, platform_cfg, track_cfg, topic)
+    return sanitize_draft_for_accuracy(fallback_draft(platform_cfg, track_cfg, topic), platform_cfg, track_cfg, topic)
+
+
+def replace_markdown_sections_by_keywords(markdown_text: str, keywords: list[str], replacement: str) -> str:
+    lines = markdown_text.splitlines()
+    result: list[str] = []
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        if line.startswith("## ") and any(keyword in line for keyword in keywords):
+            result.append(replacement.strip())
+            idx += 1
+            while idx < len(lines) and not lines[idx].startswith("## "):
+                idx += 1
+            continue
+        result.append(line)
+        idx += 1
+    return "\n".join(result)
+
+
+def sanitize_draft_for_accuracy(
+    draft: dict[str, Any],
+    platform_cfg: dict[str, Any],
+    track_cfg: dict[str, Any],
+    topic: dict[str, Any],
+) -> dict[str, Any]:
+    description = str(track_cfg.get("description", "")).lower()
+    system_prompt = str(track_cfg.get("system_prompt", ""))
+    if "football" not in description and "足球" not in system_prompt:
+        return draft
+
+    body = str(draft.get("body_markdown", ""))
+    title = str(draft.get("title", ""))
+    for bad, good in [
+        ("图赫尔还没上任", "图赫尔执教周期中的"),
+        ("图赫尔尚未上任", "图赫尔执教周期中的"),
+        ("图赫尔即将上任", "图赫尔执教周期中的"),
+        ("图赫尔首秀", "图赫尔带队"),
+        ("还没上任", "当前执教阶段"),
+        ("即将上任", "当前执教阶段"),
+    ]:
+        title = title.replace(bad, good)
+        body = body.replace(bad, good)
+    draft["title"] = title
+    topic_title = str(topic.get("title", "")).strip()
+    generic_titles = {
+        "足球赛前信息核实清单：先看伤停、阵容和盘口变化",
+        "足球赛前信息核实清单",
+        "赛前信息核实清单",
+        "信息核实清单",
+    }
+    if not title.strip() or title.strip() in generic_titles:
+        draft["title"] = f"{topic_title}：赛前深度分析" if topic_title else title
+
+    # Clean up illustration suggestions and consolidate disclaimers
+    body = _clean_article_body(body)
+    draft["body_markdown"] = body
+    return draft
+
+
+def _clean_article_body(body: str) -> str:
+    """Remove illustration suggestions and consolidate disclaimers to the end."""
+    lines = body.split("\n")
+    cleaned: list[str] = []
+    disclaimers: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Remove illustration suggestion blocks: "> **配图建议X：** ..."
+        if re.match(r"^>\s*\*\*配图建议\d*[:：]", stripped):
+            continue
+        # Remove standalone "配图建议X：..." (no blockquote)
+        if re.match(r"^配图建议\d*[:：]", stripped):
+            continue
+
+        # Extract standalone disclaimers (not part of a paragraph)
+        disclaimer_match = re.match(
+            r"^[（(【]?\*?(?:此为分析推演|此为推演|分析推演|建议发布前核实|建议核实|请核实.*?首发名单|请核实.*?伤停|此为.*?推演)\*?[）)】]?",
+            stripped,
+        )
+        if disclaimer_match:
+            text = disclaimer_match.group(0).strip("*（）()【】")
+            if text not in disclaimers:
+                disclaimers.append(text)
+            continue
+
+        # Remove inline "【此为分析推演，建议发布前核实具体伤停名单】" and similar
+        line = re.sub(
+            r"[（(【]?\*?此为分析推演[，,]\s*建议发布前核实具体伤停名单\*?[）)】]?",
+            "",
+            line,
+        )
+        line = re.sub(
+            r"[（(【]?\*?此为分析推演\*?[）)】]?",
+            "",
+            line,
+        )
+
+        if line.strip():
+            cleaned.append(line)
+        else:
+            # keep blank lines for structure
+            if cleaned and cleaned[-1] != "":
+                cleaned.append("")
+
+    # Remove trailing blank lines
+    while cleaned and cleaned[-1] == "":
+        cleaned.pop()
+
+    # Append consolidated disclaimers after signature/end
+    if disclaimers:
+        cleaned.append("")
+        cleaned.append("---")
+        for d in disclaimers:
+            cleaned.append(f"*{d}*")
+
+    return "\n".join(cleaned)
+
+
+def clamp_score(value: Any, minimum: int = 0, maximum: int = 20) -> int:
+    try:
+        score = int(round(float(value)))
+    except (TypeError, ValueError):
+        return minimum
+    return max(minimum, min(maximum, score))
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def extract_markdown_section(markdown_text: str, heading: str, next_heading: str) -> str:
+    pattern = rf"{re.escape(heading)}\s*(.*?)(?:{re.escape(next_heading)}|\Z)"
+    match = re.search(pattern, markdown_text, flags=re.DOTALL)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def extract_content_payload(item: dict[str, Any]) -> dict[str, str]:
+    hook_text = str(item.get("hook_text", "")).strip()
+    body_markdown = str(item.get("body_markdown", "")).strip()
+    cover_text = str(item.get("cover_text", "")).strip()
+    markdown_text = ""
+
+    content_file = str(item.get("content_file", "")).strip()
+    if content_file:
+        file_path = Path(content_file)
+        if file_path.exists():
+            markdown_text = file_path.read_text(encoding="utf-8")
+            if not hook_text:
+                hook_text = extract_markdown_section(markdown_text, "## Hook", "## Body")
+            if not body_markdown:
+                body_markdown = extract_markdown_section(
+                    markdown_text, "## Body", "## Cover Text"
+                )
+            if not cover_text:
+                cover_text = extract_markdown_section(
+                    markdown_text, "## Cover Text", "## Hashtags"
+                )
+
+    if not markdown_text:
+        markdown_text = str(item.get("content_markdown", "")).strip()
+
+    body_preview = strip_markdown(body_markdown)[:320]
+    markdown_trimmed = markdown_text[:8000]
+    return {
+        "hook_text": hook_text,
+        "body_markdown": body_markdown,
+        "cover_text": cover_text,
+        "body_preview": body_preview,
+        "content_markdown": markdown_trimmed,
+    }
+
+
+def apply_quality_guard(config: dict[str, Any], queue: list[dict[str, Any]]) -> dict[str, Any]:
+    guard_cfg = config.get("quality_guard", {})
+    if not guard_cfg.get("enabled", True):
+        return {"changed": 0, "blocked_items": []}
+
+    block_threshold = int(guard_cfg.get("block_score_threshold", 60))
+    min_body_chars = int(guard_cfg.get("min_body_chars", 120))
+    min_hook_chars = int(guard_cfg.get("min_hook_chars", 10))
+    target_statuses = set(
+        guard_cfg.get("target_statuses", ["pending_review", "approved", "ready_to_post"])
+    )
+    placeholder_patterns = guard_cfg.get(
+        "placeholder_patterns",
+        [
+            "围绕以上选题，结合账号定位给出可执行观点，避免空泛结论。",
+            "用一个反常识观点开场，提升完播和阅读意愿。",
+            "无摘要，建议补充自己的观察。",
+        ],
+    )
+
+    changed = 0
+    blocked_items: list[dict[str, Any]] = []
+    for item in queue:
+        if item.get("status") not in target_statuses:
+            continue
+
+        content = extract_content_payload(item)
+        score = safe_int(item.get("total_score", 0), default=0)
+        title_text = str(item.get("title", "")).strip()
+        hook_text = content["hook_text"]
+        body_text = content["body_markdown"]
+        body_plain = strip_markdown(body_text)
+        reasons: list[str] = []
+
+        if score < block_threshold:
+            reasons.append(f"总分{score}低于{block_threshold}")
+        if not title_text:
+            reasons.append("标题为空")
+        if len(strip_markdown(hook_text)) < min_hook_chars:
+            reasons.append("开头hook过短")
+        if len(body_plain) < min_body_chars:
+            reasons.append("正文为空或过短")
+        if any(pattern in (hook_text + "\n" + body_text) for pattern in placeholder_patterns):
+            reasons.append("命中模板占位内容")
+
+        if not reasons:
+            continue
+
+        reason_text = "；".join(dict.fromkeys(reasons))
+        item["status"] = "auto_blocked"
+        item["publish_advice"] = "禁发"
+        item["quality_level"] = "low"
+        item["quality_badge"] = "🔴"
+        item["total_score"] = min(score, max(0, block_threshold - 1))
+
+        existing_reason = str(item.get("quality_reason", "")).strip()
+        if existing_reason:
+            item["quality_reason"] = f"{existing_reason}；{reason_text}"[:260]
+        else:
+            item["quality_reason"] = reason_text[:260]
+
+        guard_note = f"自动质检拦截：{reason_text}"
+        existing_notes = str(item.get("notes", "")).strip()
+        if guard_note not in existing_notes:
+            item["notes"] = f"{existing_notes} | {guard_note}".strip(" |")
+        item["updated_at"] = now_local().isoformat()
+
+        blocked_items.append(
+            {
+                "id": item.get("id", ""),
+                "platform": item.get("platform", ""),
+                "score": item.get("total_score", 0),
+                "reason": reason_text,
+            }
+        )
+        changed += 1
+
+    return {"changed": changed, "blocked_items": blocked_items}
+
+
+def build_block_alert(blocked_items: list[dict[str, Any]]) -> str:
+    lines = [
+        f"Quality Guard Alert: auto-blocked {len(blocked_items)} item(s)",
+        "",
+    ]
+    for item in blocked_items[:12]:
+        lines.append(
+            f"- {item['id']} | {item['platform']} | score={item['score']} | {item['reason']}"
+        )
+    return "\n".join(lines)
+
+
+def quality_level_from_score(total_score: int, quality_cfg: dict[str, Any]) -> tuple[str, str, str]:
+    publish_threshold = int(quality_cfg.get("publish_threshold", 80))
+    revise_threshold = int(quality_cfg.get("revise_threshold", 60))
+    if total_score >= publish_threshold:
+        return ("high", "🟢", "可发")
+    if total_score >= revise_threshold:
+        return ("medium", "🟡", "需改")
+    return ("low", "🔴", "禁发")
+
+
+def heuristic_quality_review(
+    platform_cfg: dict[str, Any], track_cfg: dict[str, Any], draft: dict[str, Any]
+) -> dict[str, Any]:
+    title = str(draft.get("title", "")).strip()
+    hook = str(draft.get("hook", "")).strip()
+    body = str(draft.get("body_markdown", "")).strip()
+    hashtags = draft.get("hashtags", [])
+    body_len = len(body)
+
+    hook_score = clamp_score(6 + min(len(hook) / 6.0, 12))
+    structure_points = 8
+    structure_points += 4 if "## " in body else 0
+    structure_points += 4 if any(ch in body for ch in ["1.", "2.", "3.", "- "]) else 0
+    structure_points += 4 if body_len >= 240 else 0
+    structure_score = clamp_score(structure_points)
+
+    platform = platform_cfg.get("platform", "")
+    post_format = platform_cfg.get("post_format", "")
+    platform_fit = 10
+    if post_format == "long_article":
+        platform_fit += 6 if body_len >= 450 else -3
+    elif post_format == "short_video_script":
+        platform_fit += 5 if 80 <= body_len <= 800 else -2
+        platform_fit += 3 if len(hook) >= 18 else -2
+    elif post_format == "graphic_post":
+        platform_fit += 4 if any(token in body for token in ["预算", "路线", "避坑", "清单"]) else -1
+    if title:
+        platform_fit += 2
+    if platform in {"douyin", "wechat_channels", "kuaishou"} and len(title) > 36:
+        platform_fit -= 2
+    platform_fit_score = clamp_score(platform_fit)
+
+    cta_keywords = ["评论", "关注", "收藏", "私信", "转发", "点击", "领取", "清单", "下期"]
+    cta_hits = sum(1 for keyword in cta_keywords if keyword in body or keyword in hook or keyword in title)
+    commercial_score = clamp_score(8 + cta_hits * 2 + (2 if hashtags else 0))
+
+    compliance_score = 18
+    risky_words = ["稳赚", "包赢", "内幕", "下注", "赌博", "保过", "躺赚", "暴富", "医疗奇迹"]
+    if track_cfg.get("description", "").lower().find("football") >= 0:
+        risky_words.extend(["单场必胜", "杀庄", "倍投"])
+    for word in risky_words:
+        if word in body or word in hook or word in title:
+            compliance_score -= 4
+
+    # Sensitive events should not be used as pure comedy hooks.
+    if platform == "kuaishou" and any(word in (title + body + hook) for word in ["地震", "灾难", "伤亡"]):
+        compliance_score -= 6
+    compliance_score = clamp_score(compliance_score)
+
+    scores = {
+        "hook_score": hook_score,
+        "structure_score": structure_score,
+        "platform_fit_score": platform_fit_score,
+        "commercial_score": commercial_score,
+        "compliance_score": compliance_score,
+    }
+    lowest = sorted(scores.items(), key=lambda kv: kv[1])[:2]
+    reason = "；".join([f"{name}:{value}" for name, value in lowest])
+    return {**scores, "reason": f"启发式评分，建议优先优化 {reason}"}
+
+
+def llm_quality_review(
+    config: dict[str, Any],
+    platform_cfg: dict[str, Any],
+    track_cfg: dict[str, Any],
+    topic: dict[str, Any],
+    draft: dict[str, Any],
+) -> dict[str, Any] | None:
+    quality_cfg = config.get("quality_scoring", {})
+    if not quality_cfg.get("llm_review_enabled", True):
+        return None
+
+    system_prompt = (
+        "你是内容质检编辑。请对内容打分并输出 JSON，不要输出任何额外文字。"
+    )
+    user_prompt = textwrap.dedent(
+        f"""
+        请按以下五个维度分别打分（0-20，整数）：
+        1) hook_score（开头抓力）
+        2) structure_score（结构清晰度）
+        3) platform_fit_score（平台适配度）
+        4) commercial_score（变现相关度）
+        5) compliance_score（合规安全度）
+
+        并返回：
+        {{
+          "hook_score": 0,
+          "structure_score": 0,
+          "platform_fit_score": 0,
+          "commercial_score": 0,
+          "compliance_score": 0,
+          "reason": "一句话说明主要短板"
+        }}
+
+        平台: {platform_cfg.get("platform", "")}
+        账号: {platform_cfg.get("account_name", "")}
+        内容格式: {platform_cfg.get("post_format", "")}
+        赛道: {track_cfg.get("description", "")}
+        选题: {topic.get("title", "")}
+        内容标题: {draft.get("title", "")}
+        Hook: {draft.get("hook", "")}
+        正文:
+        {draft.get("body_markdown", "")}
+        """
+    ).strip()
+
+    return llm_generate(config.get("llm", {}), system_prompt, user_prompt)
+
+
+def evaluate_draft_quality(
+    config: dict[str, Any],
+    platform_cfg: dict[str, Any],
+    track_cfg: dict[str, Any],
+    topic: dict[str, Any],
+    draft: dict[str, Any],
+) -> dict[str, Any]:
+    quality_cfg = config.get("quality_scoring", {})
+    if not quality_cfg.get("enabled", True):
+        return {
+            "hook_score": 0,
+            "structure_score": 0,
+            "platform_fit_score": 0,
+            "commercial_score": 0,
+            "compliance_score": 0,
+            "total_score": 0,
+            "quality_level": "unknown",
+            "quality_badge": "⚪",
+            "publish_advice": "需改",
+            "reason": "质量评分已关闭",
+        }
+
+    review = llm_quality_review(config, platform_cfg, track_cfg, topic, draft)
+    if review is None:
+        review = heuristic_quality_review(platform_cfg, track_cfg, draft)
+
+    hook_score = clamp_score(review.get("hook_score", 0))
+    structure_score = clamp_score(review.get("structure_score", 0))
+    platform_fit_score = clamp_score(review.get("platform_fit_score", 0))
+    commercial_score = clamp_score(review.get("commercial_score", 0))
+    compliance_score = clamp_score(review.get("compliance_score", 0))
+    total_score = hook_score + structure_score + platform_fit_score + commercial_score + compliance_score
+    quality_level, quality_badge, publish_advice = quality_level_from_score(total_score, quality_cfg)
+
+    return {
+        "hook_score": hook_score,
+        "structure_score": structure_score,
+        "platform_fit_score": platform_fit_score,
+        "commercial_score": commercial_score,
+        "compliance_score": compliance_score,
+        "total_score": total_score,
+        "quality_level": quality_level,
+        "quality_badge": quality_badge,
+        "publish_advice": publish_advice,
+        "reason": str(review.get("reason", "")).strip()[:200],
+    }
+
+
+def render_markdown(
+    queue_id: str,
+    platform_cfg: dict[str, Any],
+    topic: dict[str, Any],
+    draft: dict[str, Any],
+    quality: dict[str, Any] | None = None,
+) -> str:
+    hashtags = draft.get("hashtags", [])
+    hashtag_line = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
+    lines = [
+        f"# {draft.get('title', 'Untitled')}",
+        "",
+        f"- Queue ID: `{queue_id}`",
+        f"- Account: {platform_cfg['account_name']}",
+        f"- Platform: {platform_cfg['platform']}",
+        f"- Scheduled Time: {platform_cfg.get('publish_time', 'N/A')}",
+        f"- Source Topic: {topic.get('title', '')}",
+        f"- Source Link: {topic.get('link', '')}",
+        "",
+        "## Hook",
+        draft.get("hook", ""),
+        "",
+        "## Body",
+        draft.get("body_markdown", ""),
+        "",
+        "## Cover Text",
+        draft.get("cover_text", ""),
+        "",
+        "## Hashtags",
+        hashtag_line,
+        "",
+    ]
+    if quality:
+        lines.extend(
+            [
+                "## Quality",
+                (
+                    f"{quality.get('quality_badge', '⚪')} 总分 {quality.get('total_score', 0)}/100 | "
+                    f"发布建议：{quality.get('publish_advice', '需改')}"
+                ),
+                (
+                    "维度："
+                    f"Hook {quality.get('hook_score', 0)}/20, "
+                    f"结构 {quality.get('structure_score', 0)}/20, "
+                    f"平台适配 {quality.get('platform_fit_score', 0)}/20, "
+                    f"变现 {quality.get('commercial_score', 0)}/20, "
+                    f"合规 {quality.get('compliance_score', 0)}/20"
+                ),
+                f"说明：{quality.get('reason', '')}",
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def load_queue() -> list[dict[str, Any]]:
+    return load_json(QUEUE_FILE, [])
+
+
+def save_queue(items: list[dict[str, Any]]) -> None:
+    save_json(QUEUE_FILE, items)
+
+
+def update_item_status(
+    queue: list[dict[str, Any]], item_id: str, new_status: str, notes: str = ""
+) -> bool:
+    for item in queue:
+        if item["id"] == item_id:
+            item["status"] = new_status
+            item["updated_at"] = now_local().isoformat()
+            if notes:
+                item["notes"] = notes
+            return True
+    return False
+
+
+def strip_markdown(text: str) -> str:
+    no_links = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", text)
+    no_marks = re.sub(r"[#>*`_~\-]", " ", no_links)
+    return re.sub(r"\s+", " ", no_marks).strip()
+
+
+def markdown_to_simple_html(markdown_text: str) -> str:
+    lines = markdown_text.splitlines()
+    html_lines: list[str] = []
+    in_ul = False
+    for raw in lines:
+        line = raw.rstrip()
+        if not line.strip():
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            continue
+        if line.startswith("### "):
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<h3>{html.escape(line[4:])}</h3>")
+        elif line.startswith("## "):
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<h2>{html.escape(line[3:])}</h2>")
+        elif line.startswith("# "):
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<h1>{html.escape(line[2:])}</h1>")
+        elif line.lstrip().startswith("- "):
+            if not in_ul:
+                html_lines.append("<ul>")
+                in_ul = True
+            item = line.lstrip()[2:]
+            html_lines.append(f"<li>{html.escape(item)}</li>")
+        else:
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<p>{html.escape(line)}</p>")
+    if in_ul:
+        html_lines.append("</ul>")
+    return "\n".join(html_lines)
+
+
+def sanitize_filename_part(text: str, max_len: int = 36) -> str:
+    cleaned = re.sub(r"[\\/:*?\"<>|\r\n\t]+", "_", str(text).strip())
+    cleaned = re.sub(r"\s+", "_", cleaned).strip("._ ")
+    return (cleaned or "untitled")[:max_len]
+
+
+def image_card_html(url: str, label: str) -> str:
+    safe_url = html.escape(str(url))
+    return (
+        "<figure style='margin:12px 0;text-align:center;'>"
+        f"<img src='{safe_url}' style='max-width:100%;height:auto;border-radius:8px;display:block;margin:0 auto;' loading='lazy' />"
+        f"<figcaption style='color:#64748b;font-size:12px;margin-top:4px;'>{html.escape(label)}</figcaption>"
+        "</figure>"
+    )
+
+
+def clean_image_html(url: str, label: str) -> str:
+    safe_url = html.escape(str(url))
+    return (
+        f"<p><img src='{safe_url}' alt='{html.escape(label)}' style='max-width:100%;height:auto;border-radius:8px;display:block;margin:8px auto;' /></p>"
+    )
+
+
+def markdown_to_html_with_inline_images(markdown_text: str, image_urls: list[str]) -> str:
+    lines = markdown_text.splitlines()
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if line.strip():
+            current.append(line)
+            continue
+        if current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    if not blocks:
+        return markdown_to_simple_html(markdown_text)
+
+    image_after: dict[int, list[str]] = {}
+    for idx, url in enumerate(image_urls):
+        block_idx = min(len(blocks) - 1, int((idx + 1) * len(blocks) / (len(image_urls) + 1)))
+        image_after.setdefault(block_idx, []).append(url)
+
+    html_parts: list[str] = []
+    rendered_image_idx = 0
+    for block_idx, block in enumerate(blocks):
+        html_parts.append(markdown_to_simple_html("\n".join(block)))
+        for url in image_after.get(block_idx, []):
+            rendered_image_idx += 1
+            html_parts.append(image_card_html(url, f"配图{rendered_image_idx:02d}：对应上方段落"))
+    return "\n".join(html_parts)
+
+
+def markdown_to_clean_rich_html(markdown_text: str, image_urls: list[str]) -> str:
+    """Convert markdown to HTML with inline styles, optimized for pasting into WeChat Official Account editor."""
+    lines = markdown_text.splitlines()
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if line.strip():
+            current.append(line)
+            continue
+        if current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    if not blocks:
+        return _rich_simple_html(markdown_text)
+    image_after: dict[int, list[str]] = {}
+    for idx, url in enumerate(image_urls):
+        block_idx = min(len(blocks) - 1, int((idx + 1) * len(blocks) / (len(image_urls) + 1)))
+        image_after.setdefault(block_idx, []).append(url)
+    html_parts: list[str] = []
+    rendered_image_idx = 0
+    for block_idx, block in enumerate(blocks):
+        html_parts.append(_rich_simple_html("\n".join(block)))
+        for url in image_after.get(block_idx, []):
+            rendered_image_idx += 1
+            html_parts.append(_inline_image_html(url, f"配图{rendered_image_idx}"))
+    return "\n".join(html_parts)
+
+
+def _rich_simple_html(markdown_text: str) -> str:
+    """Convert markdown to HTML with inline styles for WeChat/Xiaohongshu paste compatibility."""
+    lines = markdown_text.splitlines()
+    html_lines: list[str] = []
+    in_ul = False
+    for raw in lines:
+        line = raw.rstrip()
+        if not line.strip():
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            continue
+        if line.startswith("### "):
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<h3 style='font-size:16px;font-weight:700;margin:16px 0 8px;line-height:1.5;'>{html.escape(line[4:])}</h3>")
+        elif line.startswith("## "):
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<h2 style='font-size:18px;font-weight:700;margin:18px 0 10px;line-height:1.5;'>{html.escape(line[3:])}</h2>")
+        elif line.startswith("# "):
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<h1 style='font-size:20px;font-weight:700;margin:20px 0 12px;line-height:1.4;'>{html.escape(line[2:])}</h1>")
+        elif line.lstrip().startswith("- ") or line.lstrip().startswith("* "):
+            if not in_ul:
+                html_lines.append("<ul style='padding-left:20px;margin:8px 0;'>")
+                in_ul = True
+            item = line.lstrip()[2:]
+            html_lines.append(f"<li style='font-size:15px;line-height:1.8;margin:4px 0;color:#333;'>{html.escape(item)}</li>")
+        else:
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<p style='font-size:15px;line-height:1.8;margin:8px 0;color:#333;'>{html.escape(line)}</p>")
+    if in_ul:
+        html_lines.append("</ul>")
+    return "\n".join(html_lines)
+
+
+def _inline_image_html(url: str, label: str) -> str:
+    """Image HTML with inline styles for WeChat paste compatibility."""
+    safe_url = html.escape(str(url))
+    return (
+        f"<p style='text-align:center;margin:12px 0;font-size:13px;color:#999;'>"
+        f"<img src='{safe_url}' alt='{html.escape(label)}' "
+        f"style='max-width:100%;height:auto;border-radius:8px;display:block;margin:0 auto;' /></p>"
+    )
+
+
+def markdown_with_image_markers(markdown_text: str, image_count: int) -> str:
+    if image_count <= 0:
+        return markdown_text
+    lines = markdown_text.splitlines()
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if line.strip():
+            current.append(line)
+            continue
+        if current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    if not blocks:
+        return markdown_text
+
+    markers_after: dict[int, list[int]] = {}
+    for idx in range(image_count):
+        block_idx = min(len(blocks) - 1, int((idx + 1) * len(blocks) / (image_count + 1)))
+        markers_after.setdefault(block_idx, []).append(idx + 1)
+
+    parts: list[str] = []
+    for block_idx, block in enumerate(blocks):
+        parts.append("\n".join(block))
+        for image_idx in markers_after.get(block_idx, []):
+            parts.append(f"【配图{image_idx}】")
+    return "\n\n".join(parts)
+
+
+def build_preview_url(config: dict[str, Any], preview_file: Path) -> str:
+    preview_cfg = config.get("preview", {})
+    public_base_url = str(preview_cfg.get("public_base_url", "")).strip()
+    if not public_base_url:
+        public_base_url = str(
+            config.get("sample_video", {}).get("public_base_url", "")
+        ).strip()
+    if not public_base_url:
+        return ""
+    try:
+        relative_path = preview_file.relative_to(PREVIEW_DIR)
+    except ValueError:
+        relative_path = Path(preview_file.name)
+    encoded_path = urllib.parse.quote(relative_path.as_posix(), safe="/:@?&=+$,;~")
+    return f"{public_base_url.rstrip('/')}/{encoded_path}"
+
+
+def cache_bust_token(item: dict[str, Any]) -> str:
+    raw = str(item.get("updated_at", "")).strip() or str(item.get("created_at", "")).strip()
+    token = re.sub(r"\D", "", raw)[:14]
+    return token or str(safe_int(item.get("total_score", 0), default=0))
+
+
+def display_datetime(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = dt.datetime.fromisoformat(raw)
+        return parsed.strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return raw[:16]
+
+
+STATUS_LABELS = {
+    "pending_review": "待筛选",
+    "approved": "已选用",
+    "ready_to_post": "待发布",
+    "posted": "已发布",
+    "rejected": "已丢弃",
+    "auto_blocked": "系统拦截",
+    "draft": "草稿",
+}
+
+
+PLATFORM_LABELS = {
+    "wechat_official": "公众号",
+    "xiaohongshu": "小红书",
+    "douyin": "抖音",
+    "wechat_channels": "视频号",
+    "kuaishou": "快手",
+    "free_graphic": "自由图文",
+    "free_video": "自由视频脚本",
+}
+
+
+POST_FORMAT_LABELS = {
+    "long_article": "长图文",
+    "graphic_post": "图文笔记",
+    "short_video_script": "剪映素材",
+}
+
+
+def status_label(status: Any) -> str:
+    raw = str(status or "").strip()
+    return STATUS_LABELS.get(raw, raw or "未知")
+
+
+def platform_label(platform: Any) -> str:
+    raw = str(platform or "").strip()
+    return PLATFORM_LABELS.get(raw, raw or "未知平台")
+
+
+def post_format_label(post_format: Any) -> str:
+    raw = str(post_format or "").strip()
+    return POST_FORMAT_LABELS.get(raw, raw or "内容")
+
+
+def next_step_for_item(item: dict[str, Any]) -> str:
+    status = str(item.get("status", "")).strip()
+    if status == "posted":
+        return "已发布：如需复盘，可记录发布链接和数据。"
+    if status == "rejected":
+        return "已丢弃：无需处理，也可重新生成同账号内容。"
+    if status in {"approved", "ready_to_post"}:
+        return "复制发布文案，按插图标记上传图片，发布后点击“已发布”。"
+    if len(item.get("illustration_urls") or []) == 0:
+        return "先点击“重新配图”，再筛选是否发布。"
+    return "检查标题、正文和配图，满意就点击“选用”。"
+
+
+def split_video_segments(body_markdown: str, limit: int = 8) -> list[str]:
+    plain = strip_markdown(body_markdown)
+    chunks = [segment.strip() for segment in re.split(r"[。！？!?;\n]+", plain) if segment.strip()]
+    if not chunks and plain:
+        chunks = [plain]
+    return chunks[:limit]
+
+
+def local_gpu_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("local_gpu", {}).get("enabled", False))
+
+
+def video_jobs_root(config: dict[str, Any]) -> Path:
+    jobs_dir = str(config.get("local_gpu", {}).get("jobs_dir", "state/video_jobs")).strip()
+    if jobs_dir.startswith("/"):
+        return Path(jobs_dir)
+    return BASE_DIR / jobs_dir
+
+
+def video_jobs_pending_dir(config: dict[str, Any]) -> Path:
+    return video_jobs_root(config) / "pending"
+
+
+def video_jobs_completed_dir(config: dict[str, Any]) -> Path:
+    return video_jobs_root(config) / "completed"
+
+
+def video_jobs_failed_dir(config: dict[str, Any]) -> Path:
+    return video_jobs_root(config) / "failed"
+
+
+def ensure_video_job_dirs(config: dict[str, Any]) -> None:
+    for path in (
+        video_jobs_pending_dir(config),
+        video_jobs_completed_dir(config),
+        video_jobs_failed_dir(config),
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def filter_queue_items(
+    queue: list[dict[str, Any]],
+    *,
+    item_id: str = "",
+    date: str = "",
+    account: str = "",
+    platform: str = "",
+    limit: int = 0,
+    only_pending: bool = False,
+    include_blocked: bool = False,
+    post_format: str = "",
+) -> list[dict[str, Any]]:
+    filtered = queue
+    if item_id:
+        return [item for item in filtered if item.get("id") == item_id]
+    if date:
+        filtered = [item for item in filtered if item.get("date") == date]
+    if account:
+        needle = account.strip().lower()
+        filtered = [
+            item
+            for item in filtered
+            if needle in str(item.get("account_name", "")).lower()
+            or needle in str(item.get("account_id", "")).lower()
+        ]
+    if platform:
+        needle = platform.strip().lower()
+        filtered = [
+            item
+            for item in filtered
+            if needle == str(item.get("platform", "")).strip().lower()
+        ]
+    if only_pending:
+        filtered = [
+            item
+            for item in filtered
+            if item.get("status") in {"pending_review", "approved", "ready_to_post"}
+        ]
+    if not include_blocked:
+        filtered = [
+            item
+            for item in filtered
+            if item.get("status") != "auto_blocked" and item.get("publish_advice") != "禁发"
+        ]
+    if post_format:
+        filtered = [item for item in filtered if item.get("post_format") == post_format]
+    if limit > 0:
+        return filtered[-limit:]
+    return filtered
+
+
+def platform_account_id(platform_cfg: dict[str, Any]) -> str:
+    explicit = str(platform_cfg.get("account_id", "")).strip()
+    if explicit:
+        return explicit
+    raw = f"{platform_cfg.get('platform', '')}-{platform_cfg.get('account_name', '')}"
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", raw).strip("-").lower()
+    return slug or uuid.uuid4().hex[:8]
+
+
+def find_platform_configs(
+    config: dict[str, Any], account: str = "", platform: str = ""
+) -> list[dict[str, Any]]:
+    platforms = list(config.get("platforms", []))
+    account_needle = account.strip().lower()
+    platform_needle = platform.strip().lower()
+    if account_needle:
+        platforms = [
+            cfg
+            for cfg in platforms
+            if account_needle in str(cfg.get("account_name", "")).lower()
+            or account_needle in str(cfg.get("account_id", "")).lower()
+            or account_needle in platform_account_id(cfg).lower()
+        ]
+    if platform_needle:
+        platforms = [
+            cfg
+            for cfg in platforms
+            if platform_needle == str(cfg.get("platform", "")).strip().lower()
+        ]
+    return platforms
+
+
+def build_queue_item(
+    config: dict[str, Any],
+    date: str,
+    platform_cfg: dict[str, Any],
+    track_cfg: dict[str, Any],
+    track_name: str,
+    topic: dict[str, Any],
+    *,
+    match_knowledge: str = "",
+) -> dict[str, Any]:
+    queue_id = uuid.uuid4().hex[:12]
+    draft = generate_draft(config, platform_cfg, track_cfg, topic, match_knowledge=match_knowledge)
+    quality = evaluate_draft_quality(config, platform_cfg, track_cfg, topic, draft)
+    output_dir = OUTBOX_DIR / date / platform_cfg["platform"]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / f"{queue_id}.md"
+    markdown = render_markdown(queue_id, platform_cfg, topic, draft, quality=quality)
+    output_file.write_text(markdown, encoding="utf-8")
+    return {
+        "id": queue_id,
+        "date": date,
+        "status": "pending_review",
+        "platform": platform_cfg["platform"],
+        "account_id": platform_account_id(platform_cfg),
+        "account_name": platform_cfg["account_name"],
+        "track": track_name,
+        "publish_time": platform_cfg.get("publish_time"),
+        "auto_publish": bool(platform_cfg.get("auto_publish", False)),
+        "post_format": platform_cfg.get("post_format", "generic"),
+        "title": draft.get("title", ""),
+        "hashtags": draft.get("hashtags", []),
+        "source_topic": topic.get("title"),
+        "source_link": topic.get("link"),
+        "content_file": str(output_file),
+        "hook_text": str(draft.get("hook", "")).strip(),
+        "body_markdown": str(draft.get("body_markdown", "")).strip(),
+        "cover_text": str(draft.get("cover_text", "")).strip(),
+        "body_preview": strip_markdown(str(draft.get("body_markdown", "")))[:320],
+        "content_markdown": markdown[:8000],
+        "sample_video_file": "",
+        "sample_video_url": "",
+        "sample_audio_file": "",
+        "created_at": now_local().isoformat(),
+        "updated_at": now_local().isoformat(),
+        "post_url": None,
+        "notes": "",
+        "hook_score": quality["hook_score"],
+        "structure_score": quality["structure_score"],
+        "platform_fit_score": quality["platform_fit_score"],
+        "commercial_score": quality["commercial_score"],
+        "compliance_score": quality["compliance_score"],
+        "total_score": quality["total_score"],
+        "quality_level": quality["quality_level"],
+        "quality_badge": quality["quality_badge"],
+        "publish_advice": quality["publish_advice"],
+        "quality_reason": quality["reason"],
+    }
+
+
+def platform_config_for_item(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    account_name = str(item.get("account_name", "")).strip()
+    platform = str(item.get("platform", "")).strip()
+    for platform_cfg in config.get("platforms", []):
+        if (
+            str(platform_cfg.get("account_name", "")).strip() == account_name
+            and str(platform_cfg.get("platform", "")).strip() == platform
+        ):
+            return platform_cfg
+    for platform_cfg in config.get("platforms", []):
+        if str(platform_cfg.get("account_name", "")).strip() == account_name:
+            return platform_cfg
+    raise ValueError(f"Platform config not found for {account_name}/{platform}")
+
+
+def rewrite_queue_item_draft(
+    config: dict[str, Any], item: dict[str, Any], *, render_images: bool = False
+) -> dict[str, Any]:
+    platform_cfg = platform_config_for_item(config, item)
+    track_name = str(item.get("track") or platform_cfg.get("track", "")).strip()
+    track_cfg = config.get("tracks", {}).get(track_name, {})
+    if not track_cfg:
+        raise ValueError(f"Track config not found: {track_name}")
+    topic = {
+        "title": item.get("source_topic") or item.get("title") or "原选题",
+        "link": item.get("source_link") or "",
+        "description": item.get("body_preview") or item.get("quality_reason") or "",
+    }
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    draft = generate_draft(config, platform_cfg, track_cfg, topic)
+    quality = evaluate_draft_quality(config, platform_cfg, track_cfg, topic, draft)
+    output_dir = OUTBOX_DIR / item_date / platform_cfg["platform"]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / f"{queue_id}.md"
+    markdown = render_markdown(queue_id, platform_cfg, topic, draft, quality=quality)
+    output_file.write_text(markdown, encoding="utf-8")
+
+    item.update(
+        {
+            "platform": platform_cfg["platform"],
+            "account_id": platform_account_id(platform_cfg),
+            "account_name": platform_cfg["account_name"],
+            "track": track_name,
+            "publish_time": platform_cfg.get("publish_time"),
+            "auto_publish": bool(platform_cfg.get("auto_publish", False)),
+            "post_format": platform_cfg.get("post_format", item.get("post_format", "generic")),
+            "title": draft.get("title", ""),
+            "hashtags": draft.get("hashtags", []),
+            "source_topic": topic.get("title"),
+            "source_link": topic.get("link"),
+            "content_file": str(output_file),
+            "hook_text": str(draft.get("hook", "")).strip(),
+            "body_markdown": str(draft.get("body_markdown", "")).strip(),
+            "cover_text": str(draft.get("cover_text", "")).strip(),
+            "body_preview": strip_markdown(str(draft.get("body_markdown", "")))[:320],
+            "content_markdown": markdown[:8000],
+            "updated_at": now_local().isoformat(),
+            "notes": (str(item.get("notes", "")).strip() + " | 已重写文案").strip(" |"),
+            "hook_score": quality["hook_score"],
+            "structure_score": quality["structure_score"],
+            "platform_fit_score": quality["platform_fit_score"],
+            "commercial_score": quality["commercial_score"],
+            "compliance_score": quality["compliance_score"],
+            "total_score": quality["total_score"],
+            "quality_level": quality["quality_level"],
+            "quality_badge": quality["quality_badge"],
+            "publish_advice": quality["publish_advice"],
+            "quality_reason": quality["reason"],
+        }
+    )
+    if render_images:
+        item["illustration_files"] = []
+        item["illustration_urls"] = []
+        render_cloud_illustrations_for_items(config, [item])
+    generate_preview_for_item(config, item)
+    return {"status": "ok", "id": queue_id, "title": item.get("title", ""), "score": item.get("total_score", 0)}
+
+
+def create_free_content_item(
+    config: dict[str, Any],
+    idea: str,
+    content_type: str,
+    *,
+    render_images: bool = True,
+) -> dict[str, Any]:
+    idea = idea.strip()
+    if not idea:
+        raise ValueError("请输入想法/主题。")
+    date = now_local().strftime("%Y-%m-%d")
+    is_video = content_type == "video"
+    platform_cfg = {
+        "platform": "free_video" if is_video else "free_graphic",
+        "account_name": "自由内容-视频脚本" if is_video else "自由内容-图文",
+        "track": "free_content",
+        "publish_time": "",
+        "auto_publish": False,
+        "post_format": "short_video_script" if is_video else "graphic_post",
+    }
+    track_cfg = {
+        "description": (
+            "user-provided free content idea, generate high-quality Chinese social media content"
+        ),
+        "keywords": ["自由内容", "运营", "图文", "短视频"],
+        "system_prompt": (
+            "你是资深中文新媒体内容主编，擅长把用户给出的粗略想法扩展成可直接发布的图文或短视频脚本。"
+            "要求内容具体、有结构、有传播点，避免空泛。"
+        ),
+    }
+    topic = {
+        "title": idea[:80],
+        "description": idea,
+        "link": "",
+    }
+    item = build_queue_item(config, date, platform_cfg, track_cfg, "free_content", topic)
+    item["free_content"] = True
+    item["notes"] = "自由生成内容"
+    if render_images:
+        render_cloud_illustrations_for_items(config, [item])
+    generate_preview_for_item(config, item)
+    return item
+
+
+def build_video_script_text(item: dict[str, Any]) -> str:
+    content = extract_content_payload(item)
+    hook = content.get("hook_text", "").strip()
+    body = strip_markdown(content.get("body_markdown", "")).strip()
+    if hook and body:
+        return f"{hook}\n\n{body}"
+    return hook or body or str(item.get("title", "")).strip()
+
+
+def build_cloud_image_prompts(item: dict[str, Any], count: int = 3) -> list[str]:
+    content = extract_content_payload(item)
+    segments = split_video_segments(content.get("body_markdown", ""), limit=max(3, count + 1))
+    title = str(item.get("title", "")).strip()
+    track = str(item.get("track", "")).strip()
+    style_map = {
+        "football": "sports editorial photography, close-up of football match action, dramatic stadium lighting, depth of field, cinematic composition, 8K",
+        "child_education": "warm parenting scene, soft natural lighting, lifestyle photography, cozy indoor setting, happy family atmosphere, professional photo",
+        "travel": "travel destination photography, scenic landscape, golden hour lighting, vibrant colors, wide angle view, National Geographic style",
+        "ai_funny": "comic illustration, expressive cartoon characters, humorous situation, bright colors, digital art style, funny scene",
+    }
+    style = style_map.get(track, "editorial photography, clean composition, professional lighting")
+    prompts: list[str] = []
+    for idx in range(count):
+        seed_text = segments[idx] if idx < len(segments) else title
+        prompts.append(
+            f"Chinese social media article illustration, photographic style, no text overlay, {style}. "
+            f"Topic: {title[:100]}. Scene: {seed_text[:200]}"
+        )
+    return prompts
+
+
+def generate_svg_illustration(track: str, title: str, scene: str, idx: int) -> str:
+    """Generate a rich scene-based SVG illustration for content articles."""
+    import hashlib
+    title_esc = html.escape(title[:50])
+    scene_esc = html.escape(scene[:100])
+    seed = hashlib.md5(f"{title}{scene}{idx}".encode()).hexdigest()[:8]
+
+    return _render_track_svg(track, title_esc, scene_esc, scene, seed, idx)
+
+
+def _render_track_svg(track: str, title_esc: str, scene_esc: str, scene_raw: str, seed: str, idx: int) -> str:
+    """Dispatch to the correct SVG illustrator based on track."""
+    if track == "football":
+        return _svg_football(title_esc, scene_esc, scene_raw, seed, idx)
+    if track == "travel":
+        return _svg_travel(title_esc, scene_esc, scene_raw, seed, idx)
+    if track == "child_education":
+        return _svg_education(title_esc, scene_esc, scene_raw, seed, idx)
+    if track == "ai_funny":
+        return _svg_comedy(title_esc, scene_esc, scene_raw, seed, idx)
+    return _svg_generic(title_esc, scene_esc, scene_raw, seed, idx)
+
+
+def _svg_football(title: str, scene: str, _raw: str, seed: str, idx: int) -> str:
+    """Football illustration: dynamic match scene with stadium, pitch, and action."""
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="sky-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#0c1445"/><stop offset="50%" stop-color="#1a237e"/><stop offset="100%" stop-color="#283593"/></linearGradient>
+    <linearGradient id="grass-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#2e7d32"/><stop offset="100%" stop-color="#1b5e20"/></linearGradient>
+    <linearGradient id="flood-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fff9c4" stop-opacity="0.6"/><stop offset="100%" stop-color="#fff9c4" stop-opacity="0"/></linearGradient>
+    <radialGradient id="moon-{seed}"><stop offset="0%" stop-color="#fff9c4"/><stop offset="100%" stop-color="#fbc02d"/></radialGradient>
+  </defs>
+  <!-- Sky -->
+  <rect width="1024" height="1024" fill="url(#sky-{seed})"/>
+  <!-- Stadium floodlights glow -->
+  <ellipse cx="512" cy="200" rx="400" ry="100" fill="url(#flood-{seed})" opacity="0.15"/>
+  <!-- Moon -->
+  <circle cx="800" cy="100" r="35" fill="url(#moon-{seed})" opacity="0.5"/>
+  <circle cx="810" cy="90" r="30" fill="#0c1445" opacity="0.4"/>
+  <!-- Pitch -->
+  <rect x="62" y="350" width="900" height="500" rx="8" fill="url(#grass-{seed})"/>
+  <rect x="62" y="350" width="900" height="500" rx="8" fill="none" stroke="#4caf50" stroke-width="3"/>
+  <!-- Pitch lines -->
+  <line x1="512" y1="350" x2="512" y2="850" stroke="#4caf50" stroke-width="2" opacity="0.6"/>
+  <circle cx="512" cy="600" r="60" fill="none" stroke="#4caf50" stroke-width="2" opacity="0.6"/>
+  <!-- Penalty areas -->
+  <rect x="62" y="450" width="120" height="300" rx="4" fill="none" stroke="#4caf50" stroke-width="2" opacity="0.5"/>
+  <rect x="842" y="450" width="120" height="300" rx="4" fill="none" stroke="#4caf50" stroke-width="2" opacity="0.5"/>
+  <!-- Goals -->
+  <rect x="62" y="540" width="20" height="120" rx="2" fill="none" stroke="#fff" stroke-width="3" opacity="0.7"/>
+  <rect x="942" y="540" width="20" height="120" rx="2" fill="none" stroke="#fff" stroke-width="3" opacity="0.7"/>
+  <!-- Player silhouettes - team A (blue) -->
+  <g opacity="0.7">
+    <circle cx="200" cy="480" r="10" fill="#42a5f5"/><circle cx="280" cy="520" r="10" fill="#42a5f5"/>
+    <circle cx="350" cy="460" r="10" fill="#42a5f5"/><circle cx="380" cy="550" r="10" fill="#42a5f5"/>
+    <circle cx="450" cy="500" r="10" fill="#42a5f5"/><circle cx="500" cy="580" r="10" fill="#42a5f5"/>
+    <circle cx="550" cy="490" r="10" fill="#42a5f5"/>
+  </g>
+  <!-- Player silhouettes - team B (red) -->
+  <g opacity="0.7">
+    <circle cx="820" cy="480" r="10" fill="#ef5350"/><circle cx="740" cy="520" r="10" fill="#ef5350"/>
+    <circle cx="670" cy="460" r="10" fill="#ef5350"/><circle cx="640" cy="550" r="10" fill="#ef5350"/>
+    <circle cx="570" cy="500" r="10" fill="#ef5350"/><circle cx="520" cy="580" r="10" fill="#ef5350"/>
+    <circle cx="470" cy="490" r="10" fill="#ef5350"/>
+  </g>
+  <!-- Football -->
+  <circle cx="460" cy="560" r="12" fill="#f5f5f5" stroke="#bbb" stroke-width="1"/>
+  <path d="M460 548 L460 572 M448 560 L472 560" stroke="#bbb" stroke-width="1.5" opacity="0.6"/>
+  <!-- Action trails -->
+  <path d="M460,560 Q420,540 380,530" fill="none" stroke="#fff" stroke-width="2" stroke-dasharray="4,3" opacity="0.3"/>
+  <!-- Stadium stands (background) -->
+  <rect x="62" y="280" width="900" height="70" rx="4" fill="#1a237e" opacity="0.6"/>
+  <line x1="62" y1="300" x2="962" y2="300" stroke="#283593" stroke-width="1" opacity="0.5"/>
+  <line x1="62" y1="320" x2="962" y2="320" stroke="#283593" stroke-width="1" opacity="0.3"/>
+  <!-- Crowd dots -->
+  <g opacity="0.3">{''.join(f'<circle cx="{70+i*30}" cy="{285+(i%3)*10}" r="3" fill="#e8eaf6"/>' for i in range(30))}</g>
+  <!-- Title card -->
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="rgba(12,20,69,0.85)"/>
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="none" stroke="#42a5f5" stroke-width="1" opacity="0.3"/>
+  <text x="512" y="916" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="22" fill="#fff" font-weight="700">{title}</text>
+  <text x="512" y="956" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#90caf9">{scene}</text>
+  <text x="512" y="976" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#546e7a">Illustration #{idx + 1}</text>
+</svg>'''
+
+
+def _svg_travel(title: str, scene: str, _raw: str, seed: str, idx: int) -> str:
+    """Travel illustration: scenic landscape with mountains, sun, route markers."""
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="sky-t-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#87ceeb"/><stop offset="60%" stop-color="#e0f7fa"/><stop offset="100%" stop-color="#fff9c4"/></linearGradient>
+    <linearGradient id="sun-t-{seed}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ffeb3b"/><stop offset="100%" stop-color="#ff9800"/></linearGradient>
+    <linearGradient id="sea-t-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#0288d1"/><stop offset="100%" stop-color="#01579b"/></linearGradient>
+  </defs>
+  <!-- Sky -->
+  <rect width="1024" height="600" fill="url(#sky-t-{seed})"/>
+  <!-- Sun -->
+  <circle cx="820" cy="150" r="60" fill="url(#sun-t-{seed})" opacity="0.9"/>
+  <circle cx="820" cy="150" r="70" fill="#ffeb3b" opacity="0.15"/>
+  <circle cx="820" cy="150" r="85" fill="#ffeb3b" opacity="0.08"/>
+  <!-- Clouds -->
+  <g opacity="0.6">
+    <ellipse cx="250" cy="120" rx="80" ry="25" fill="#fff"/>
+    <ellipse cx="300" cy="110" rx="50" ry="20" fill="#fff"/>
+    <ellipse cx="600" cy="160" rx="70" ry="20" fill="#fff"/>
+    <ellipse cx="650" cy="150" rx="40" ry="15" fill="#fff"/>
+  </g>
+  <!-- Distant mountains -->
+  <polygon points="0,500 120,280 250,500" fill="#90caf9" opacity="0.5"/>
+  <polygon points="150,500 320,220 480,500" fill="#64b5f6" opacity="0.5"/>
+  <polygon points="380,500 540,250 700,500" fill="#42a5f5" opacity="0.4"/>
+  <polygon points="580,500 750,200 920,500" fill="#1e88e5" opacity="0.35"/>
+  <polygon points="820,500 1024,280 1024,500" fill="#1565c0" opacity="0.3"/>
+  <!-- Snow caps -->
+  <polygon points="320,220 300,260 340,260" fill="#fff" opacity="0.5"/>
+  <polygon points="750,200 730,240 770,240" fill="#fff" opacity="0.4"/>
+  <!-- Sea -->
+  <rect y="500" width="1024" height="200" fill="url(#sea-t-{seed})" opacity="0.6"/>
+  <!-- Waves -->
+  <path d="M0,530 Q50,520 100,530 Q150,540 200,530 Q250,520 300,530 Q350,540 400,530 Q450,520 500,530 Q550,540 600,530 Q650,520 700,530 Q750,540 800,530 Q850,520 900,530 Q950,540 1000,530 L1024,530" fill="none" stroke="#81d4fa" stroke-width="2" opacity="0.4"/>
+  <!-- Foreground beach/land -->
+  <path d="M0,700 Q200,650 400,700 Q600,750 800,700 Q900,680 1024,720 L1024,1024 L0,1024 Z" fill="#f5deb3"/>
+  <path d="M0,720 Q200,680 400,720 Q600,760 800,720 Q900,700 1024,740 L1024,1024 L0,1024 Z" fill="#deb887" opacity="0.5"/>
+  <!-- Route markers -->
+  <circle cx="200" cy="780" r="15" fill="#ff5722" opacity="0.8"/>
+  <circle cx="200" cy="780" r="8" fill="#fff"/>
+  <circle cx="520" cy="800" r="15" fill="#ff5722" opacity="0.7"/>
+  <circle cx="520" cy="800" r="8" fill="#fff"/>
+  <circle cx="820" cy="760" r="15" fill="#ff5722" opacity="0.6"/>
+  <circle cx="820" cy="760" r="8" fill="#fff"/>
+  <!-- Dotted route line -->
+  <path d="M200,780 Q360,820 520,800 Q670,770 820,760" fill="none" stroke="#ff5722" stroke-width="3" stroke-dasharray="8,6" opacity="0.5"/>
+  <!-- Trees -->
+  <g opacity="0.6">
+    <polygon points="120,700 140,640 160,700" fill="#388e3c"/>
+    <polygon points="420,720 445,650 470,720" fill="#43a047"/>
+    <polygon points="700,690 720,630 740,690" fill="#2e7d32"/>
+    <polygon points="900,710 920,660 940,710" fill="#388e3c"/>
+  </g>
+  <!-- Title card -->
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="rgba(13,71,161,0.85)"/>
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="none" stroke="#4fc3f7" stroke-width="1" opacity="0.3"/>
+  <text x="512" y="916" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="22" fill="#fff" font-weight="700">{title}</text>
+  <text x="512" y="956" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#b3e5fc">{scene}</text>
+  <text x="512" y="976" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#546e7a">Illustration #{idx + 1}</text>
+</svg>'''
+
+
+def _svg_education(title: str, scene: str, _raw: str, seed: str, idx: int) -> str:
+    """Education illustration: warm study scene with books, lamp, and plants."""
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="wall-e-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fef9e7"/><stop offset="100%" stop-color="#fdf2e9"/></linearGradient>
+    <linearGradient id="lamp-e-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fff9c4"/><stop offset="100%" stop-color="#fdd835"/></linearGradient>
+    <radialGradient id="glow-e-{seed}"><stop offset="0%" stop-color="#fdd835" stop-opacity="0.4"/><stop offset="100%" stop-color="#fdd835" stop-opacity="0"/></radialGradient>
+  </defs>
+  <!-- Wall -->
+  <rect width="1024" height="1024" fill="url(#wall-e-{seed})"/>
+  <!-- Warm glow -->
+  <ellipse cx="350" cy="500" rx="300" ry="250" fill="url(#glow-e-{seed})"/>
+  <!-- Window -->
+  <rect x="700" y="100" width="240" height="320" rx="12" fill="#bbdefb" stroke="#8d6e63" stroke-width="6"/>
+  <line x1="820" y1="100" x2="820" y2="420" stroke="#8d6e63" stroke-width="4"/>
+  <line x1="700" y1="240" x2="940" y2="240" stroke="#8d6e63" stroke-width="4"/>
+  <!-- Sky outside window -->
+  <rect x="706" y="106" width="108" height="130" rx="6" fill="#87ceeb"/>
+  <rect x="826" y="106" width="108" height="130" rx="6" fill="#87ceeb"/>
+  <rect x="706" y="244" width="228" height="170" fill="#a5d6a7"/>
+  <!-- Bookshelf -->
+  <rect x="80" y="180" width="300" height="380" rx="8" fill="#5d4037"/>
+  <rect x="90" y="190" width="280" height="8" rx="2" fill="#4e342e"/>
+  <rect x="90" y="315" width="280" height="8" rx="2" fill="#4e342e"/>
+  <rect x="90" y="440" width="280" height="8" rx="2" fill="#4e342e"/>
+  <!-- Books on shelf -->
+  <g opacity="0.9">
+    <rect x="100" y="203" width="22" height="110" rx="2" fill="#e53935"/>
+    <rect x="126" y="210" width="18" height="103" rx="2" fill="#43a047"/>
+    <rect x="148" y="205" width="25" height="108" rx="2" fill="#1e88e5"/>
+    <rect x="177" y="215" width="20" height="98" rx="2" fill="#fb8c00"/>
+    <rect x="201" y="208" width="24" height="105" rx="2" fill="#8e24aa"/>
+    <rect x="229" y="203" width="18" height="110" rx="2" fill="#00897b"/>
+    <rect x="251" y="218" width="22" height="95" rx="2" fill="#c62828"/>
+    <rect x="277" y="208" width="20" height="105" rx="2" fill="#1565c0"/>
+    <rect x="100" y="328" width="24" height="110" rx="2" fill="#00897b"/>
+    <rect x="128" y="335" width="20" height="103" rx="2" fill="#e53935"/>
+    <rect x="152" y="325" width="26" height="113" rx="2" fill="#fb8c00"/>
+    <rect x="182" y="340" width="18" height="98" rx="2" fill="#43a047"/>
+    <rect x="204" y="328" width="22" height="110" rx="2" fill="#8e24aa"/>
+  </g>
+  <!-- Desk -->
+  <rect x="150" y="550" width="500" height="20" rx="4" fill="#8d6e63"/>
+  <rect x="160" y="570" width="16" height="200" fill="#6d4c41"/>
+  <rect x="620" y="570" width="16" height="200" fill="#6d4c41"/>
+  <!-- Lamp -->
+  <rect x="420" y="470" width="8" height="80" fill="#424242"/>
+  <path d="M380,470 Q424,450 468,470" fill="#fdd835" stroke="#f9a825" stroke-width="2"/>
+  <ellipse cx="424" cy="470" rx="44" ry="12" fill="#f57f17" opacity="0.6"/>
+  <!-- Open book on desk -->
+  <g transform="translate(250,500)">
+    <path d="M0,50 Q60,-10 120,50 L120,0 Q60,-10 0,0 Z" fill="#fff" stroke="#e0e0e0" stroke-width="1"/>
+    <path d="M120,50 Q180,-10 240,50 L240,0 Q180,-10 120,0 Z" fill="#fafafa" stroke="#e0e0e0" stroke-width="1"/>
+    <line x1="120" y1="0" x2="120" y2="50" stroke="#e0e0e0" stroke-width="2"/>
+    <!-- Text lines -->
+    <line x1="20" y1="15" x2="95" y2="15" stroke="#e0e0e0" stroke-width="2"/>
+    <line x1="20" y1="28" x2="100" y2="28" stroke="#e0e0e0" stroke-width="2"/>
+    <line x1="20" y1="41" x2="90" y2="41" stroke="#e0e0e0" stroke-width="2"/>
+    <line x1="140" y1="15" x2="215" y2="15" stroke="#e0e0e0" stroke-width="2"/>
+    <line x1="140" y1="28" x2="220" y2="28" stroke="#e0e0e0" stroke-width="2"/>
+    <line x1="140" y1="41" x2="210" y2="41" stroke="#e0e0e0" stroke-width="2"/>
+  </g>
+  <!-- Potted plant -->
+  <g transform="translate(600,480)">
+    <polygon points="20,70 -10,0 50,0" fill="#6d4c41"/>
+    <ellipse cx="20" cy="70" rx="30" ry="8" fill="#5d4037"/>
+    <circle cx="20" cy="-20" r="18" fill="#43a047" opacity="0.8"/>
+    <circle cx="5" cy="-35" r="14" fill="#66bb6a" opacity="0.7"/>
+    <circle cx="35" cy="-30" r="12" fill="#4caf50" opacity="0.7"/>
+    <circle cx="20" cy="-45" r="16" fill="#81c784" opacity="0.6"/>
+  </g>
+  <!-- Title card -->
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="rgba(93,64,55,0.9)"/>
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="none" stroke="#ffb74d" stroke-width="1" opacity="0.3"/>
+  <text x="512" y="916" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="22" fill="#fff" font-weight="700">{title}</text>
+  <text x="512" y="956" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#ffcc80">{scene}</text>
+  <text x="512" y="976" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#a1887f">Illustration #{idx + 1}</text>
+</svg>'''
+
+
+def _svg_comedy(title: str, scene: str, _raw: str, seed: str, idx: int) -> str:
+    """Comedy illustration: stage performance with audience, mic, and spotlights."""
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg-c-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1a0033"/><stop offset="50%" stop-color="#2d1b69"/><stop offset="100%" stop-color="#4a148c"/></linearGradient>
+    <linearGradient id="spot1-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#e040fb" stop-opacity="0.5"/><stop offset="100%" stop-color="#e040fb" stop-opacity="0"/></linearGradient>
+    <linearGradient id="spot2-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ffeb3b" stop-opacity="0.4"/><stop offset="100%" stop-color="#ffeb3b" stop-opacity="0"/></linearGradient>
+    <linearGradient id="stage-c-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6d1b00"/><stop offset="100%" stop-color="#3e0a00"/></linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="1024" height="1024" fill="url(#bg-c-{seed})"/>
+  <!-- Spotlight beams -->
+  <polygon points="256,0 100,550 412,550" fill="url(#spot1-{seed})"/>
+  <polygon points="768,0 612,550 924,550" fill="url(#spot2-{seed})"/>
+  <!-- Curtains -->
+  <path d="M0,0 Q80,200 0,500 Z" fill="#b71c1c" opacity="0.8"/>
+  <path d="M1024,0 Q944,200 1024,500 Z" fill="#b71c1c" opacity="0.8"/>
+  <path d="M0,0 Q50,100 0,300 Z" fill="#d32f2f" opacity="0.6"/>
+  <path d="M1024,0 Q974,100 1024,300 Z" fill="#d32f2f" opacity="0.6"/>
+  <!-- Curtain top -->
+  <rect x="0" y="0" width="1024" height="40" fill="#b71c1c"/>
+  <path d="M0,40 Q40,70 80,40 Q120,70 160,40 Q200,70 240,40 Q280,70 320,40 Q360,70 400,40 Q440,70 480,40 Q520,70 560,40 Q600,70 640,40 Q680,70 720,40 Q760,70 800,40 Q840,70 880,40 Q920,70 960,40 Q1000,70 1024,40" fill="none" stroke="#c62828" stroke-width="3"/>
+  <!-- Stage floor -->
+  <rect x="80" y="520" width="864" height="180" fill="url(#stage-c-{seed})"/>
+  <rect x="80" y="520" width="864" height="8" fill="#ff6d00" opacity="0.5"/>
+  <!-- Microphone stand -->
+  <line x1="512" y1="520" x2="512" y2="420" stroke="#424242" stroke-width="4"/>
+  <circle cx="512" cy="415" r="12" fill="#616161"/>
+  <circle cx="512" cy="415" r="8" fill="#757575"/>
+  <!-- Mic glow -->
+  <circle cx="512" cy="415" r="25" fill="#e040fb" opacity="0.15"/>
+  <!-- Speech bubbles -->
+  <g transform="translate(350,280)" opacity="0.85">
+    <ellipse cx="70" cy="30" rx="80" ry="35" fill="#fff" opacity="0.9"/>
+    <polygon points="100,65 120,95 130,60" fill="#fff" opacity="0.9"/>
+    <text x="70" y="28" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#333" font-weight="bold">😂</text>
+  </g>
+  <g transform="translate(540,230)" opacity="0.7">
+    <ellipse cx="60" cy="25" rx="70" ry="30" fill="#fff" opacity="0.7"/>
+    <polygon points="30,55 10,85 70,55" fill="#fff" opacity="0.7"/>
+    <text x="60" y="23" text-anchor="middle" font-family="sans-serif" font-size="24" fill="#333">💀</text>
+  </g>
+  <!-- Confetti -->
+  <g opacity="0.6">
+    <rect x="200" y="120" width="10" height="10" rx="2" fill="#e040fb" transform="rotate(30 205 125)"/>
+    <rect x="350" y="90" width="10" height="10" rx="2" fill="#ffeb3b" transform="rotate(45 355 95)"/>
+    <rect x="550" y="110" width="10" height="10" rx="2" fill="#00e5ff" transform="rotate(15 555 115)"/>
+    <rect x="700" y="130" width="10" height="10" rx="2" fill="#ff4081" transform="rotate(60 705 135)"/>
+    <rect x="450" y="70" width="8" height="8" rx="2" fill="#76ff03" transform="rotate(20 454 74)"/>
+    <rect x="300" y="160" width="8" height="8" rx="2" fill="#ffeb3b" transform="rotate(35 304 164)"/>
+    <rect x="650" y="100" width="8" height="8" rx="2" fill="#e040fb" transform="rotate(50 654 104)"/>
+  </g>
+  <!-- Stars / sparkles -->
+  <g opacity="0.5">
+    <polygon points="300,200 303,210 313,210 305,216 308,226 300,220 292,226 295,216 287,210 297,210" fill="#ffeb3b"/>
+    <polygon points="680,160 682,167 689,167 683,171 685,178 680,174 675,178 677,171 671,167 678,167" fill="#e040fb"/>
+    <polygon points="180,250 182,257 189,257 183,261 185,268 180,264 175,268 177,261 171,257 178,257" fill="#00e5ff"/>
+  </g>
+  <!-- Audience silhouettes -->
+  <g opacity="0.3">{''.join(f'<circle cx="{80+i*20}" cy="{550+(i%3)*8}" r="6" fill="#e0e0e0"/>' for i in range(44))}</g>
+  <!-- Title card -->
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="rgba(26,0,51,0.9)"/>
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="none" stroke="#e040fb" stroke-width="1" opacity="0.3"/>
+  <text x="512" y="916" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="22" fill="#fff" font-weight="700">{title}</text>
+  <text x="512" y="956" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#ce93d8">{scene}</text>
+  <text x="512" y="976" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#7b1fa2">Illustration #{idx + 1}</text>
+</svg>'''
+
+
+def _svg_generic(title: str, scene: str, _raw: str, seed: str, idx: int) -> str:
+    """Generic illustration: abstract artistic composition."""
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg-g-{seed}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#e8eaf6"/><stop offset="100%" stop-color="#f3e5f5"/></linearGradient>
+    <linearGradient id="circ1-{seed}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#5c6bc0"/><stop offset="100%" stop-color="#7c4dff"/></linearGradient>
+    <linearGradient id="circ2-{seed}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#26a69a"/><stop offset="100%" stop-color="#00bfa5"/></linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg-g-{seed})"/>
+  <circle cx="300" cy="250" r="180" fill="url(#circ1-{seed})" opacity="0.15"/>
+  <circle cx="700" cy="600" r="220" fill="url(#circ2-{seed})" opacity="0.12"/>
+  <circle cx="512" cy="400" r="120" fill="#7c4dff" opacity="0.06"/>
+  <rect x="200" y="300" width="600" height="8" rx="4" fill="#5c6bc0" opacity="0.15" transform="rotate(-30 500 304)"/>
+  <rect x="150" y="450" width="700" height="8" rx="4" fill="#26a69a" opacity="0.12" transform="rotate(20 500 454)"/>
+  <rect x="250" y="200" width="500" height="8" rx="4" fill="#7c4dff" opacity="0.1" transform="rotate(-10 500 204)"/>
+  <!-- Dots pattern -->
+  <g opacity="0.08">{''.join(f'<circle cx="{x}" cy="{y}" r="4" fill="#5c6bc0"/>' for x in range(60, 965, 60) for y in range(60, 965, 60))}</g>
+  <!-- Title card -->
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="rgba(255,255,255,0.92)"/>
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="none" stroke="#5c6bc0" stroke-width="1" opacity="0.3"/>
+  <text x="512" y="916" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="22" fill="#37474f" font-weight="700">{title}</text>
+  <text x="512" y="956" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#78909c">{scene}</text>
+  <text x="512" y="976" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#b0bec5">Illustration #{idx + 1}</text>
+</svg>'''
+
+
+def _svg_escape(text: str) -> str:
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def create_placeholder_illustrations_for_item(
+    config: dict[str, Any], item: dict[str, Any], count: int = 3
+) -> dict[str, Any]:
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    media_dir = PREVIEW_DIR / "media" / item_date / "illustrations"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    title = str(item.get("title", "内容插图")).strip()
+    track = str(item.get("track", ""))
+    files: list[str] = []
+    urls: list[str] = []
+    prompts = build_cloud_image_prompts(item, count=count)
+    for idx, prompt in enumerate(prompts, start=1):
+        svg_content = generate_svg_illustration(track, title, prompt, idx)
+        out_file = media_dir / f"{queue_id}_placeholder_{idx}.svg"
+        out_file.write_text(svg_content, encoding="utf-8")
+        files.append(str(out_file))
+        urls.append(build_preview_url(config, out_file))
+
+    item["illustration_files"] = files
+    item["illustration_urls"] = urls
+    item["cloud_image_model"] = "placeholder-svg-fallback"
+    item["updated_at"] = now_local().isoformat()
+    return {"status": "ok", "count": len(files), "urls": urls, "fallback": True}
+
+
+def build_asset_pack_for_item(config: dict[str, Any], item: dict[str, Any]) -> dict[str, str]:
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    pack_dir = PREVIEW_DIR / "media" / item_date / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    account_name = str(item.get("account_name", "account")).strip()
+    title = str(item.get("title", "content")).strip()
+    score = safe_int(item.get("total_score", 0), default=0)
+    platform = str(item.get("platform", "")).strip()
+    status = str(item.get("status", "")).strip()
+    pack_name = "_".join(
+        [
+            sanitize_filename_part(account_name, 20),
+            sanitize_filename_part(platform, 16),
+            item_date,
+            f"{score}分",
+            sanitize_filename_part(title, 32),
+            queue_id,
+        ]
+    )
+    pack_file = pack_dir / f"{pack_name}.zip"
+    content = extract_content_payload(item)
+    hashtags = item.get("hashtags", [])
+    hashtag_line = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
+    image_files = [Path(str(path)) for path in item.get("illustration_files") or []]
+    image_manifest_lines = ["# 配图对应关系", ""]
+    segments = split_video_segments(content.get("body_markdown", ""), limit=max(3, len(image_files)))
+    if str(item.get("post_format", "")) == "short_video_script":
+        for idx, local_path in enumerate(image_files, start=1):
+            scene = segments[idx - 1] if idx - 1 < len(segments) else str(item.get("title", ""))
+            image_manifest_lines.append(f"- 图片 {idx:02d}: 对应第 {idx} 镜 / {scene}")
+    else:
+        for idx, local_path in enumerate(image_files, start=1):
+            image_manifest_lines.append(f"- 图片 {idx:02d}: 插入正文第 {idx} 个重点段落附近")
+
+    publish_steps = textwrap.dedent(
+        f"""
+        # 发布步骤
+
+        ## 基本信息
+        - 账号：{account_name}
+        - 平台：{platform}
+        - 日期：{item_date}
+        - 评分：{score}
+        - 状态：{status}
+        - Queue ID：{queue_id}
+
+        ## 公众号/小红书发布
+        1. 打开 `01_content/full_publish_text.md`。
+        2. 复制标题和正文到发布后台。
+        3. 按 `02_images/image_manifest.md` 的位置插入图片。
+        4. 复制 `01_content/hashtags.txt` 中的话题/标签。
+        5. 发布前检查封面文案和敏感词。
+
+        ## 剪映素材使用
+        1. 打开 `01_content/capcut_script.txt`，复制为配音/字幕文本。
+        2. 将 `02_images/` 下的图片按编号导入剪映。
+        3. 按 `02_images/image_manifest.md` 对应关系排列画面。
+        4. 导出视频后回到工作台，将内容状态改为“已发布”。
+
+        ## 文件说明
+        - `01_content/`: 可复制文案、标题、正文、剪映口播稿、标签。
+        - `02_images/`: 配图文件和对应关系。
+        - `03_publish_steps/`: 发布步骤说明。
+        - `04_metadata/`: 机器可读元数据。
+        """
+    ).strip()
+    with zipfile.ZipFile(pack_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        content_file = str(item.get("content_file", "")).strip()
+        if content_file and Path(content_file).exists():
+            zf.write(content_file, "01_content/original_markdown.md")
+        else:
+            zf.writestr("01_content/original_markdown.md", content.get("content_markdown", ""))
+        full_publish_text = "\n\n".join(
+            [
+                part
+                for part in [
+                    str(item.get("title", "")).strip(),
+                    content.get("hook_text", ""),
+                    markdown_with_image_markers(content.get("body_markdown", ""), len(image_files)),
+                    content.get("cover_text", ""),
+                    hashtag_line,
+                ]
+                if str(part).strip()
+            ]
+        )
+        zf.writestr("01_content/title.txt", str(item.get("title", "")).strip())
+        zf.writestr("01_content/body.md", content.get("body_markdown", ""))
+        zf.writestr("01_content/full_publish_text.md", full_publish_text)
+        zf.writestr("01_content/capcut_script.txt", strip_markdown(content.get("body_markdown", "")))
+        zf.writestr("01_content/hashtags.txt", hashtag_line)
+        zf.writestr("02_images/image_manifest.md", "\n".join(image_manifest_lines))
+        for idx, local_path in enumerate(image_files, start=1):
+            if local_path.exists():
+                suffix = local_path.suffix or ".jpg"
+                zf.write(local_path, f"02_images/{idx:02d}_{sanitize_filename_part(title, 18)}{suffix}")
+        zf.writestr("03_publish_steps/README.md", publish_steps)
+        zf.writestr(
+            "04_metadata/item.json",
+            json.dumps(
+                {
+                    "id": queue_id,
+                    "date": item_date,
+                    "account_name": account_name,
+                    "platform": platform,
+                    "title": title,
+                    "score": score,
+                    "status": status,
+                    "preview_url": item.get("preview_url", ""),
+                    "image_count": len(image_files),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+    item["asset_pack_file"] = str(pack_file)
+    item["asset_pack_url"] = build_preview_url(config, pack_file)
+    return {"asset_pack_file": str(pack_file), "asset_pack_url": item["asset_pack_url"]}
+
+
+def build_bulk_asset_pack(
+    config: dict[str, Any],
+    queue: list[dict[str, Any]],
+    *,
+    date: str = "",
+    status: str = "all",
+    rebuild_items: bool = True,
+) -> dict[str, str]:
+    target_date = date or max([str(item.get("date", "")) for item in queue] or [now_local().strftime("%Y-%m-%d")])
+    selected = [item for item in queue if item.get("date") == target_date]
+    if status == "selected":
+        selected = [
+            item
+            for item in selected
+            if item.get("status") in {"approved", "ready_to_post", "posted"}
+        ]
+    elif status and status != "all":
+        selected = [item for item in selected if item.get("status") == status]
+    if not selected:
+        raise ValueError("No items matched bulk asset pack filters.")
+
+    bulk_dir = PREVIEW_DIR / "media" / target_date / "bulk"
+    bulk_dir.mkdir(parents=True, exist_ok=True)
+    suffix = "selected" if status == "selected" else status or "all"
+    bulk_file = bulk_dir / f"{target_date}_{sanitize_filename_part(suffix, 20)}_asset_packs.zip"
+    newest_item_update = max(
+        [
+            str(item.get("updated_at") or item.get("created_at") or "")
+            for item in selected
+        ]
+        or [""]
+    )
+    marker_file = bulk_dir / f"{bulk_file.stem}.meta"
+    if bulk_file.exists() and marker_file.exists() and marker_file.read_text(encoding="utf-8") == newest_item_update:
+        return {"bulk_pack_file": str(bulk_file), "bulk_pack_url": build_preview_url(config, bulk_file)}
+    with zipfile.ZipFile(bulk_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        manifest_lines = [f"# 批量素材包 {target_date}", ""]
+        for item in selected:
+            if rebuild_items:
+                build_asset_pack_for_item(config, item)
+            pack_path = Path(str(item.get("asset_pack_file", "")))
+            if not pack_path.exists() and not rebuild_items:
+                continue
+            folder = "_".join(
+                [
+                    sanitize_filename_part(item.get("account_name", ""), 16),
+                    sanitize_filename_part(item.get("platform", ""), 14),
+                    sanitize_filename_part(item.get("title", ""), 28),
+                    str(item.get("id", "")),
+                ]
+            )
+            manifest_lines.append(
+                f"- {item.get('account_name', '')} / {platform_label(item.get('platform'))} / "
+                f"{status_label(item.get('status'))} / {item.get('title', '')}"
+            )
+            if pack_path.exists():
+                zf.write(pack_path, f"{folder}/{pack_path.name}")
+        zf.writestr("README.md", "\n".join(manifest_lines))
+    marker_file.write_text(newest_item_update, encoding="utf-8")
+    return {"bulk_pack_file": str(bulk_file), "bulk_pack_url": build_preview_url(config, bulk_file)}
+
+
+def write_cloud_asset_from_url(url: str, target: Path) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    blob = http_get_bytes(url, timeout=120)
+    target.write_bytes(blob)
+    return target
+
+
+def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    """Render illustrations with fallback chain: DashScope -> Replicate -> SVG."""
+    media_cfg = config.get("cloud_media", {})
+    image_cfg = media_cfg.get("image", {})
+    if not media_cfg.get("enabled", False) or not image_cfg.get("enabled", False):
+        return {"status": "disabled"}
+    primary_provider = str(image_cfg.get("provider", "dashscope")).lower().strip()
+    backup_provider = "replicate" if primary_provider == "dashscope" else "dashscope"
+
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    count = max(1, int(image_cfg.get("images_per_item", 1)))
+    track = str(item.get("track", ""))
+    title = str(item.get("title", ""))
+    prompts = build_cloud_image_prompts(item, count=count)
+    media_dir = PREVIEW_DIR / "media" / item_date / "illustrations"
+    urls: list[str] = []
+    files: list[str] = []
+    used_model = ""
+    use_svg_fallback = bool(image_cfg.get("svg_fallback", False))
+
+    for idx, prompt in enumerate(prompts, start=1):
+        out_urls: list[str] = []
+        last_error: Exception | None = None
+
+        # === Try primary provider ===
+        if primary_provider == "replicate":
+            try:
+                input_candidates = [
+                    {"prompt": prompt, "aspect_ratio": "9:16", "output_format": "jpg", "num_outputs": 1},
+                    {"prompt": prompt, "num_outputs": 1},
+                    {"prompt": prompt},
+                ]
+                prediction = replicate_create_prediction_candidates(image_cfg, input_candidates)
+                prediction_id = str(prediction.get("id", "")).strip()
+                if prediction_id:
+                    done = replicate_poll_prediction(image_cfg, prediction_id)
+                    out_urls = normalize_prediction_urls(done.get("output"))
+                    used_model = f"replicate-{image_cfg.get('model', 'sdxl')}"
+            except Exception as exc:
+                last_error = exc
+                print(f"[WARN] Replicate primary failed for {queue_id}_{idx}: {exc}")
+        else:
+            try:
+                image_models = dashscope_model_candidates(
+                    image_cfg,
+                    defaults=["wanx-v1", "wan2.5-t2i-preview", "wan2.2-t2i-flash", "wan2.2-t2i-plus"],
+                )
+                created: dict[str, Any] | None = None
+                for candidate_model in image_models:
+                    payload = {
+                        "model": candidate_model,
+                        "input": {"prompt": prompt},
+                        "parameters": {
+                            "size": str(image_cfg.get("size", "1024*1024")),
+                            "n": 1,
+                            "negative_prompt": str(image_cfg.get("negative_prompt", "")),
+                        },
+                    }
+                    try:
+                        created = dashscope_create_task(
+                            image_cfg, "/services/aigc/text2image/image-synthesis", payload
+                        )
+                        used_model = f"dashscope-{candidate_model}"
+                        break
+                    except Exception as exc:
+                        last_error = exc
+                        if is_dashscope_model_retryable_error(exc):
+                            continue
+                        break
+                if created is not None:
+                    task_id = dashscope_extract_task_id(created)
+                    if task_id:
+                        done = dashscope_poll_task(image_cfg, task_id)
+                        out_urls = normalize_prediction_urls(done)
+            except Exception as exc:
+                last_error = exc
+                print(f"[WARN] DashScope primary failed for {queue_id}_{idx}: {exc}")
+
+        # === Try backup provider if primary failed ===
+        if not out_urls:
+            if backup_provider == "replicate":
+                try:
+                    input_candidates = [
+                        {"prompt": prompt, "aspect_ratio": "9:16", "output_format": "jpg", "num_outputs": 1},
+                        {"prompt": prompt, "num_outputs": 1},
+                        {"prompt": prompt},
+                    ]
+                    prediction = replicate_create_prediction_candidates(image_cfg, input_candidates)
+                    prediction_id = str(prediction.get("id", "")).strip()
+                    if prediction_id:
+                        done = replicate_poll_prediction(image_cfg, prediction_id)
+                        out_urls = normalize_prediction_urls(done.get("output"))
+                        used_model = f"replicate-{image_cfg.get('model', 'sdxl')}"
+                except Exception as exc:
+                    last_error = exc
+                    print(f"[WARN] Replicate backup also failed for {queue_id}_{idx}: {exc}")
+            else:
+                try:
+                    image_models = dashscope_model_candidates(
+                        image_cfg,
+                        defaults=["wanx-v1", "wan2.5-t2i-preview", "wan2.2-t2i-flash", "wan2.2-t2i-plus"],
+                    )
+                    created = None
+                    for candidate_model in image_models:
+                        payload = {
+                            "model": candidate_model,
+                            "input": {"prompt": prompt},
+                            "parameters": {
+                                "size": str(image_cfg.get("size", "1024*1024")),
+                                "n": 1,
+                                "negative_prompt": str(image_cfg.get("negative_prompt", "")),
+                            },
+                        }
+                        try:
+                            created = dashscope_create_task(
+                                image_cfg, "/services/aigc/text2image/image-synthesis", payload
+                            )
+                            used_model = f"dashscope-{candidate_model}"
+                            break
+                        except Exception as exc:
+                            last_error = exc
+                            if is_dashscope_model_retryable_error(exc):
+                                continue
+                            break
+                    if created is not None:
+                        task_id = dashscope_extract_task_id(created)
+                        if task_id:
+                            done = dashscope_poll_task(image_cfg, task_id)
+                            out_urls = normalize_prediction_urls(done)
+                except Exception as exc:
+                    last_error = exc
+                    print(f"[WARN] DashScope backup also failed for {queue_id}_{idx}: {exc}")
+
+        # === SVG fallback if all cloud providers failed ===
+        if not out_urls:
+            if use_svg_fallback:
+                svg_content = generate_svg_illustration(track, title, prompt, idx)
+                svg_file = media_dir / f"{queue_id}_{idx}.svg"
+                svg_file.parent.mkdir(parents=True, exist_ok=True)
+                svg_file.write_text(svg_content, encoding="utf-8")
+                files.append(str(svg_file))
+                urls.append(build_preview_url(config, svg_file))
+                print(f"[WARN] All providers failed, SVG fallback for {queue_id}_{idx}: {last_error}")
+                used_model = "svg_fallback"
+                continue
+            raise RuntimeError(f"All image providers failed. Last error: {last_error}")
+
+        source_url = out_urls[0]
+        ext = ".jpg" if image_cfg.get("output_format", "jpg") == "jpg" else f".{image_cfg.get('output_format')}"
+        local_file = media_dir / f"{queue_id}_{idx}{ext}"
+        write_cloud_asset_from_url(source_url, local_file)
+        files.append(str(local_file))
+        urls.append(build_preview_url(config, local_file))
+
+    item["illustration_files"] = files
+    item["illustration_urls"] = urls
+    if used_model:
+        item["cloud_image_model"] = used_model
+    item["updated_at"] = now_local().isoformat()
+    return {"status": "ok", "count": len(files), "urls": urls}
+
+
+def render_cloud_video_for_item(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    media_cfg = config.get("cloud_media", {})
+    video_cfg = media_cfg.get("video", {})
+    if not media_cfg.get("enabled", False) or not video_cfg.get("enabled", False):
+        return {"status": "disabled"}
+    provider = str(video_cfg.get("provider", "replicate")).lower().strip()
+    if provider not in {"replicate", "dashscope"}:
+        raise ValueError(f"Unsupported cloud video provider: {provider}")
+
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    script_text = build_video_script_text(item)
+    prompt = (
+        f"Create a vertical short social video for this script. "
+        f"Title: {item.get('title','')}. Script: {script_text[:1200]}"
+    )
+    used_model = ""
+    video_models = dashscope_model_candidates(
+        video_cfg,
+        defaults=["wan2.6-t2v", "wan2.7-t2v-2026-04", "wanx2.1-t2v-turbo"],
+    )
+    if provider == "replicate":
+        input_candidates = [
+            {
+                "prompt": prompt,
+                "aspect_ratio": str(video_cfg.get("aspect_ratio", "9:16")),
+                "duration": int(video_cfg.get("duration_seconds", 8)),
+            },
+            {"prompt": prompt, "duration": int(video_cfg.get("duration_seconds", 8))},
+            {"prompt": prompt},
+        ]
+        prediction = replicate_create_prediction_candidates(video_cfg, input_candidates)
+        prediction_id = str(prediction.get("id", "")).strip()
+        if not prediction_id:
+            raise RuntimeError(f"Replicate video prediction failed: {prediction}")
+        done = replicate_poll_prediction(video_cfg, prediction_id)
+        out_urls = normalize_prediction_urls(done.get("output"))
+    else:
+        last_error: Exception | None = None
+        created: dict[str, Any] | None = None
+        for candidate_model in video_models:
+            payload = {
+                "model": candidate_model,
+                "input": {"prompt": prompt},
+                "parameters": {
+                    "size": str(video_cfg.get("size", "720*1280")),
+                    "duration": int(video_cfg.get("duration_seconds", 8)),
+                },
+            }
+            try:
+                created = dashscope_create_task(
+                    video_cfg, "/services/aigc/video-generation/video-synthesis", payload
+                )
+                used_model = candidate_model
+                break
+            except Exception as exc:  # pylint: disable=broad-except
+                last_error = exc
+                if is_dashscope_model_retryable_error(exc):
+                    continue
+                raise
+        if created is None:
+            raise RuntimeError(f"DashScope video models unavailable: {last_error}")
+        prediction_id = dashscope_extract_task_id(created)
+        if not prediction_id:
+            raise RuntimeError(f"DashScope video task create failed: {created}")
+        done = dashscope_poll_task(video_cfg, prediction_id)
+        out_urls = normalize_prediction_urls(done)
+    if not out_urls:
+        raise RuntimeError(
+            f"No video URL from prediction {prediction_id}. raw={json.dumps(done, ensure_ascii=False)[:1200]}"
+        )
+    source_url = out_urls[0]
+    media_dir = PREVIEW_DIR / "media" / item_date
+    media_dir.mkdir(parents=True, exist_ok=True)
+    out_video = media_dir / f"{queue_id}.mp4"
+    write_cloud_asset_from_url(source_url, out_video)
+
+    item["sample_video_file"] = str(out_video)
+    item["sample_video_url"] = build_preview_url(config, out_video)
+    item["cloud_video_provider"] = provider
+    if used_model:
+        item["cloud_video_model"] = used_model
+    item["cloud_video_prediction_id"] = prediction_id
+    item["updated_at"] = now_local().isoformat()
+    return {
+        "status": "ok",
+        "id": queue_id,
+        "video_file": str(out_video),
+        "video_url": item["sample_video_url"],
+        "prediction_id": prediction_id,
+    }
+
+
+def render_cloud_illustrations_for_items(
+    config: dict[str, Any], items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    image_cfg = config.get("cloud_media", {}).get("image", {})
+    item_delay = float(image_cfg.get("item_delay_seconds", 1.5))
+    for item in items:
+        if item.get("post_format") not in {"long_article", "graphic_post"}:
+            continue
+        try:
+            result = render_cloud_illustrations_for_item(config, item)
+            results.append({"id": item.get("id"), **result})
+            if result.get("status") == "ok":
+                print(f"[OK] illustrations rendered {item.get('id')} -> {result.get('count', 0)} image(s)")
+        except Exception as exc:  # pylint: disable=broad-except
+            if bool(image_cfg.get("allow_placeholder_fallback", True)):
+                fallback = create_placeholder_illustrations_for_item(
+                    config, item, count=int(image_cfg.get("images_per_item", 3))
+                )
+                results.append({"id": item.get("id"), **fallback})
+                print(
+                    f"[WARN] cloud illustrations failed {item.get('id')}: {exc} | "
+                    "used placeholder fallback"
+                )
+                print(
+                    f"[OK] illustrations fallback {item.get('id')} -> "
+                    f"{fallback.get('count', 0)} image(s)"
+                )
+            else:
+                item["notes"] = (str(item.get("notes", "")).strip() + f" | 云插图失败: {exc}").strip(" |")
+                item["updated_at"] = now_local().isoformat()
+                print(f"[WARN] cloud illustrations failed {item.get('id')}: {exc}")
+        if item_delay > 0:
+            time.sleep(item_delay)
+    return results
+
+
+def render_cloud_videos_for_items(
+    config: dict[str, Any], items: list[dict[str, Any]], *, include_blocked: bool = False
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    video_cfg = config.get("cloud_media", {}).get("video", {})
+    item_delay = float(video_cfg.get("item_delay_seconds", 2.5))
+    for item in items:
+        if item.get("post_format") != "short_video_script":
+            continue
+        if not include_blocked and (
+            item.get("status") == "auto_blocked" or item.get("publish_advice") == "禁发"
+        ):
+            continue
+        try:
+            result = render_cloud_video_for_item(config, item)
+            results.append({"id": item.get("id"), **result})
+            if result.get("status") == "ok":
+                print(f"[OK] cloud video rendered {item.get('id')} -> {result.get('video_file','')}")
+        except Exception as exc:  # pylint: disable=broad-except
+            if bool(video_cfg.get("allow_server_fallback", True)):
+                try:
+                    fallback = render_sample_video_for_item(config, item)
+                    item["cloud_video_provider"] = "server-ffmpeg-fallback"
+                    item["updated_at"] = now_local().isoformat()
+                    results.append({"id": item.get("id"), **fallback, "fallback": True})
+                    print(
+                        f"[WARN] cloud video failed {item.get('id')}: {exc} | "
+                        "used server fallback video"
+                    )
+                    print(
+                        f"[OK] cloud video fallback {item.get('id')} -> "
+                        f"{fallback.get('video_file', '')}"
+                    )
+                except Exception as fallback_exc:  # pylint: disable=broad-except
+                    item["notes"] = (
+                        str(item.get("notes", "")).strip()
+                        + f" | 云视频失败: {exc} | 服务器兜底失败: {fallback_exc}"
+                    ).strip(" |")
+                    item["updated_at"] = now_local().isoformat()
+                    print(f"[WARN] cloud video + fallback failed {item.get('id')}: {fallback_exc}")
+            else:
+                item["notes"] = (str(item.get("notes", "")).strip() + f" | 云视频失败: {exc}").strip(" |")
+                item["updated_at"] = now_local().isoformat()
+                print(f"[WARN] cloud video failed {item.get('id')}: {exc}")
+        if item_delay > 0:
+            time.sleep(item_delay)
+    return results
+
+
+def build_video_job_payload(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    local_cfg = config.get("local_gpu", {})
+    comfy_cfg = local_cfg.get("comfyui", {})
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    content = extract_content_payload(item)
+    script_text = build_video_script_text(item)
+    return {
+        "job_id": queue_id,
+        "date": item_date,
+        "platform": str(item.get("platform", "")),
+        "account_name": str(item.get("account_name", "")),
+        "track": str(item.get("track", "")),
+        "title": str(item.get("title", "")).strip(),
+        "hook_text": content.get("hook_text", "").strip(),
+        "cover_text": content.get("cover_text", "").strip(),
+        "script_text": script_text,
+        "output_filename": f"{queue_id}.mp4",
+        "remote_media_path": f"{item_date}/{queue_id}.mp4",
+        "status": "pending",
+        "created_at": now_local().isoformat(),
+        "comfyui_url": str(local_cfg.get("comfyui_url", "http://127.0.0.1:8000")).rstrip("/"),
+        "comfyui": {
+            "url": str(comfy_cfg.get("url", local_cfg.get("comfyui_url", "http://127.0.0.1:8000"))).rstrip("/"),
+            "render_mode": str(comfy_cfg.get("render_mode", "slideshow")),
+            "workflow_file": str(comfy_cfg.get("workflow_file", "short_video.api.json")),
+            "poll_interval_seconds": int(comfy_cfg.get("poll_interval_seconds", 3)),
+            "timeout_seconds": int(comfy_cfg.get("timeout_seconds", 3600)),
+        },
+        "upload": local_cfg.get("upload", {}),
+    }
+
+
+def export_video_jobs_for_items(
+    config: dict[str, Any], items: list[dict[str, Any]]
+) -> list[dict[str, str]]:
+    if not local_gpu_enabled(config):
+        return []
+    ensure_video_job_dirs(config)
+    pending_dir = video_jobs_pending_dir(config)
+    results: list[dict[str, str]] = []
+    for item in items:
+        if item.get("post_format") != "short_video_script":
+            continue
+        queue_id = str(item.get("id", "")).strip()
+        if not queue_id:
+            continue
+        payload = build_video_job_payload(config, item)
+        job_file = pending_dir / f"{queue_id}.json"
+        save_json(job_file, payload)
+        item["video_job_status"] = "exported"
+        item["video_job_file"] = str(job_file)
+        item["updated_at"] = now_local().isoformat()
+        results.append(
+            {
+                "id": queue_id,
+                "status": "exported",
+                "job_file": str(job_file),
+            }
+        )
+        print(f"[OK] video job exported {queue_id} -> {job_file}")
+    return results
+
+
+def import_local_video_for_item(
+    config: dict[str, Any],
+    queue: list[dict[str, Any]],
+    job_id: str,
+    video_path: Path | None = None,
+    *,
+    regenerate_preview: bool = True,
+) -> dict[str, str]:
+    item = next((entry for entry in queue if entry.get("id") == job_id), None)
+    if item is None:
+        raise ValueError(f"Queue item not found: {job_id}")
+
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    media_dir = PREVIEW_DIR / "media" / item_date
+    media_dir.mkdir(parents=True, exist_ok=True)
+    target_video = media_dir / f"{job_id}.mp4"
+
+    source = video_path
+    if source is None:
+        completed_job = video_jobs_completed_dir(config) / f"{job_id}.json"
+        if completed_job.exists():
+            job_meta = load_json(completed_job, {})
+            candidate = str(job_meta.get("local_video_file", "")).strip()
+            if candidate:
+                source = Path(candidate)
+        if source is None and target_video.exists():
+            source = target_video
+    if source is None or not source.exists():
+        raise FileNotFoundError(f"Video file not found for job {job_id}")
+
+    if source.resolve() != target_video.resolve():
+        shutil.copy2(source, target_video)
+
+    item["sample_video_file"] = str(target_video)
+    item["sample_video_url"] = build_preview_url(config, target_video)
+    item["video_job_status"] = "completed"
+    item["updated_at"] = now_local().isoformat()
+    if regenerate_preview:
+        generate_preview_for_item(config, item)
+    return {
+        "status": "ok",
+        "id": job_id,
+        "video_file": str(target_video),
+        "video_url": item.get("sample_video_url", ""),
+    }
+
+
+def synthesize_tts_segment(
+    segment_text: str,
+    segment_audio: Path,
+    sample_cfg: dict[str, Any],
+    tts_binary: str | None,
+) -> None:
+    engine = str(sample_cfg.get("tts_engine", "espeak-ng")).strip().lower()
+    voice = str(sample_cfg.get("tts_voice", "zh-CN-XiaoxiaoNeural"))
+    speed = int(sample_cfg.get("tts_speed", 165))
+
+    if engine == "edge-tts":
+        binary = tts_binary or ensure_binary("edge-tts")
+        run_command(
+            [
+                binary,
+                "--voice",
+                voice,
+                "--text",
+                segment_text,
+                "--write-media",
+                str(segment_audio),
+            ]
+        )
+        return
+
+    binary = tts_binary or ensure_binary("espeak-ng")
+    run_command(
+        [
+            binary,
+            "-v",
+            voice,
+            "-s",
+            str(speed),
+            "-w",
+            str(segment_audio),
+            segment_text,
+        ]
+    )
+
+
+def _build_xiaohongshu_text(
+    title: str, hook: str, body: str, image_urls: list[str], cover: str, hashtags: str
+) -> str:
+    """Build Xiaohongshu-friendly plain text (strips markdown, simple format)."""
+    parts: list[str] = [title]
+    if hook:
+        parts.append(strip_markdown(hook))
+    body_clean = strip_markdown(body)
+    # Insert image markers in body
+    if image_urls:
+        body_lines = body_clean.split("\n")
+        blocks: list[list[str]] = []
+        current: list[str] = []
+        for line in body_lines:
+            if line.strip():
+                current.append(line)
+                continue
+            if current:
+                blocks.append(current)
+                current = []
+        if current:
+            blocks.append(current)
+        if blocks:
+            markers: dict[int, list[int]] = {}
+            for idx in range(len(image_urls)):
+                block_idx = min(len(blocks) - 1, int((idx + 1) * len(blocks) / (len(image_urls) + 1)))
+                markers.setdefault(block_idx, []).append(idx + 1)
+            final_lines: list[str] = []
+            for bi, blk in enumerate(blocks):
+                final_lines.append("\n".join(blk))
+                for mi in markers.get(bi, []):
+                    final_lines.append(f"[配图{mi}]")
+            body_clean = "\n\n".join(final_lines)
+    parts.append(body_clean)
+    if cover:
+        parts.append(f"封面：{cover}")
+    if hashtags:
+        parts.append(hashtags)
+    return "\n\n".join(parts)
+
+
+def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: dict[str, str]) -> str:
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    raw_title = str(item.get("title", "")).strip() or "未命名草稿"
+    raw_hook = content.get("hook_text", "").strip()
+    raw_body = content.get("body_markdown", "").strip()
+    raw_cover = content.get("cover_text", "").strip()
+    hashtags = item.get("hashtags", [])
+    hashtag_line = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
+    publish_text = "\n\n".join(
+        [part for part in [raw_title, raw_hook, raw_body, raw_cover, hashtag_line] if part]
+    )
+    capcut_text = strip_markdown(raw_body or raw_hook or raw_title)
+    asset_pack_url = str(item.get("asset_pack_url", "")).strip()
+    if not asset_pack_url:
+        asset_pack_url = build_preview_url(config, PREVIEW_DIR / "media" / str(item.get("date", "")) / "packs" / f"{queue_id}_publish_pack.zip")
+    title = html.escape(str(item.get("title", "")).strip() or "未命名草稿")
+    account = html.escape(str(item.get("account_name", "")).strip())
+    platform = html.escape(str(item.get("platform", "")).strip())
+    publish_time = html.escape(str(item.get("publish_time", "")).strip())
+    source_topic = html.escape(str(item.get("source_topic", "")).strip())
+    source_link = html.escape(str(item.get("source_link", "")).strip())
+    hook_text = html.escape(content.get("hook_text", "").strip())
+    cover_text = html.escape(content.get("cover_text", "").strip())
+    badge = html.escape(str(item.get("quality_badge", "⚪")))
+    score = safe_int(item.get("total_score", 0), default=0)
+    advice = html.escape(str(item.get("publish_advice", "需改")))
+    reason = html.escape(str(item.get("quality_reason", "")).strip())
+    raw_status = str(item.get("status", "")).strip()
+    status = html.escape(status_label(raw_status))
+    next_step = html.escape(next_step_for_item(item))
+    updated_time = html.escape(display_datetime(item.get("updated_at") or item.get("created_at")))
+    body_html = markdown_to_simple_html(content.get("body_markdown", ""))
+    post_format = str(item.get("post_format", ""))
+
+    metadata_html = (
+        f"<div class='meta'><span>{badge} {score}/100 · {advice}</span>"
+        f"<span>状态: {status}</span><span>发布时间: {publish_time}</span><span>更新时间: {updated_time or '无'}</span></div>"
+        f"<div class='meta'><span>账号: {account}</span><span>平台: {platform}</span></div>"
+        f"<div class='meta'><span>选题: {source_topic}</span>"
+        f"<a href='{source_link}' target='_blank' rel='noreferrer'>来源链接</a></div>"
+    )
+
+    sample_video_url = str(item.get("sample_video_url", "")).strip()
+    sample_video_file = str(item.get("sample_video_file", "")).strip()
+    if not sample_video_url and sample_video_file:
+        sample_video_url = build_preview_url(config, Path(sample_video_file))
+    illustration_urls = item.get("illustration_urls", [])
+    if not illustration_urls:
+        files = item.get("illustration_files", [])
+        if isinstance(files, list):
+            illustration_urls = [
+                build_preview_url(config, Path(path))
+                for path in files
+                if str(path).strip()
+            ]
+    if not isinstance(illustration_urls, list):
+        illustration_urls = []
+    body_html = markdown_to_html_with_inline_images(content.get("body_markdown", ""), illustration_urls)
+    clean_body_html = markdown_to_clean_rich_html(content.get("body_markdown", ""), illustration_urls)
+    xiaohongshu_text = _build_xiaohongshu_text(raw_title, raw_hook, raw_body, illustration_urls, cover_text, hashtag_line)
+    marker_publish_text = "\n\n".join(
+        [
+            part
+            for part in [
+                raw_title,
+                raw_hook,
+                markdown_with_image_markers(raw_body, len(illustration_urls)),
+                raw_cover,
+                hashtag_line,
+            ]
+            if part
+        ]
+    )
+    rich_publish_html = (
+        "<article>"
+        f"<h1 style='font-size:22px;line-height:1.45;margin:0 0 12px;'>{title}</h1>"
+        f"<p style='background:#eff6ff;border-left:3px solid #3b82f6;padding:8px 10px;border-radius:6px;font-size:15px;line-height:1.8;margin:8px 0;color:#333;'>{hook_text}</p>"
+        f"{clean_body_html}"
+        f"<p style='color:#64748b;font-size:14px;margin-top:16px;'>封面文案：{cover_text}</p>"
+        f"<p style='color:#64748b;font-size:13px;'>{html.escape(hashtag_line)}</p>"
+        "</article>"
+    )
+    copy_panel = (
+        "<div class='copy-panel'>"
+        "<h3>发布素材复制区</h3>"
+        '<p class="copy-hint">提示：公众号直接点\u201c复制公众号图文\u201d粘贴到编辑器；小红书用\u201c复制小红书文案\u201d粘贴后手动上传图片；剪映用\u201c复制剪映口播稿\u201d+素材包图片。</p>'
+        "<div class='copy-actions'>"
+        f"<button type='button' data-copy-target='copy-title-{queue_id}' onclick='copyTarget(this)'>复制标题</button>"
+        f"<button type='button' data-copy-target='copy-body-{queue_id}' onclick='copyTarget(this)'>复制正文</button>"
+        f"<button type='button' data-rich-target='rich-copy-{queue_id}' onclick='copyRichTarget(this)'>复制公众号图文</button>"
+        f"<button type='button' data-copy-target='copy-xiaohongshu-{queue_id}' onclick='copyTarget(this)'>复制小红书文案</button>"
+        f"<button type='button' data-copy-target='copy-marker-{queue_id}' onclick='copyTarget(this)'>复制带图片位置文案</button>"
+        f"<button type='button' data-copy-target='copy-capcut-{queue_id}' onclick='copyTarget(this)'>复制剪映口播稿</button>"
+        f"<a class='download-pack' href='{html.escape(asset_pack_url)}' target='_blank' rel='noreferrer'>下载素材包</a>"
+        "</div>"
+        "<div class='status-actions'>"
+        f"<button type='button' onclick=\"setStatus('{queue_id}','approved',this)\">选用</button>"
+        f"<button type='button' onclick=\"setStatus('{queue_id}','posted',this)\">已发布</button>"
+        f"<button type='button' class='danger' onclick=\"setStatus('{queue_id}','rejected',this)\">丢弃</button>"
+        f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','draft',this)\">重写文案</button>"
+        f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','draft_images',this)\">重写文案+配图</button>"
+        f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','images',this)\">重新配图</button>"
+        f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','pack',this)\">重建素材包</button>"
+        "<span class='status-result'></span>"
+        "</div>"
+        f"<div class='next-step'>运营提示：{next_step}</div>"
+        f"<textarea id='copy-title-{queue_id}'>{html.escape(raw_title)}</textarea>"
+        f"<textarea id='copy-body-{queue_id}'>{html.escape(raw_body)}</textarea>"
+        f"<textarea id='copy-xiaohongshu-{queue_id}'>{html.escape(xiaohongshu_text)}</textarea>"
+        f"<textarea id='copy-marker-{queue_id}'>{html.escape(marker_publish_text)}</textarea>"
+        f"<textarea id='copy-capcut-{queue_id}'>{html.escape(capcut_text)}</textarea>"
+        "<details class='rich-copy-details'>"
+        "<summary>公众号富文本复制区（按钮失败时手动框选）</summary>"
+        f"<div id='rich-copy-{queue_id}' class='rich-copy-area' contenteditable='true'>{rich_publish_html}</div>"
+        "</details>"
+        "</div>"
+    )
+    gallery_html = ""
+    if illustration_urls:
+        cards = "".join(
+            [
+                (
+                    f"<div class='ill-card'><img src='{html.escape(str(url))}' loading='lazy' />"
+                    "</div>"
+                )
+                for url in illustration_urls
+            ]
+        )
+        gallery_html = f"<div class='ill-gallery'><h3>文案自动插图/剪映素材</h3><div class='ill-grid'>{cards}</div></div>"
+
+    if post_format == "short_video_script":
+        segments = split_video_segments(content.get("body_markdown", ""))
+        timeline_rows: list[str] = []
+        for idx, segment in enumerate(segments):
+            start = idx * 4
+            end = start + 4
+            segment_image = ""
+            if illustration_urls:
+                segment_image = image_card_html(
+                    str(illustration_urls[idx % len(illustration_urls)]),
+                    f"第 {idx + 1} 镜配图",
+                )
+            timeline_rows.append(
+                "<li>"
+                f"<span class='time'>{start:02d}s-{end:02d}s</span>"
+                f"<span class='line'>{html.escape(segment)}</span>"
+                f"{segment_image}"
+                "</li>"
+            )
+        timeline_html = "\n".join(timeline_rows) if timeline_rows else "<li><span class='line'>暂无分镜</span></li>"
+        narration_text = html.escape(strip_markdown(content.get("body_markdown", "")).strip())
+        image_hint = "<div class='video-missing'>暂未配图，请执行 render-illustrations。配图后可直接下载导入剪映。</div>" if not illustration_urls else ""
+        content_card = (
+            "<div class='phone video'>"
+            f"{copy_panel}"
+            "<div class='video-cover'>"
+            f"<div class='cover-text'>{cover_text or title}</div>"
+            f"<div class='updated-time'>更新时间：{updated_time or '无'}</div>"
+            f"<div class='video-hook'>{hook_text}</div>"
+            "</div>"
+            "<div class='timeline'><h3>剪映口播稿</h3>"
+            f"<div class='script-box'>{narration_text}</div>"
+            "<h3>分镜/画面节奏</h3><ol>"
+            f"{timeline_html}"
+            "</ol></div>"
+            f"{image_hint}"
+            "<div class='cover'>剪映使用：下载上方配图，按分镜顺序导入；口播稿可直接复制为字幕/配音文本。</div>"
+            "</div>"
+        )
+    else:
+        content_card = (
+            "<div class='phone article'>"
+            f"{copy_panel}"
+            f"<h1>{title}</h1>"
+            f"<div class='updated-time'>更新时间：{updated_time or '无'}</div>"
+            f"<div class='hook'>{hook_text}</div>"
+            f"<div class='body'>{body_html}</div>"
+            f"<div class='cover'>封面文案：{cover_text}</div>"
+            "</div>"
+        )
+
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{title} - 发布预览</title>
+  <style>
+    body {{
+      margin: 0; padding: 24px; background: #f5f7fb; color: #1f2937;
+      font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
+    }}
+    .container {{ max-width: 860px; margin: 0 auto; }}
+    .panel {{ background: #fff; border-radius: 14px; padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(0,0,0,.06); }}
+    .meta {{ display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: #4b5563; margin-top: 8px; }}
+    .meta a {{ color: #2563eb; text-decoration: none; }}
+    .phone {{
+      width: min(520px, 100%); margin: 0 auto; border: 1px solid #e5e7eb;
+      border-radius: 18px; background: #fff; padding: 16px; box-shadow: inset 0 0 0 1px #f3f4f6;
+    }}
+    .copy-panel {{ background:#f8fafc; border:1px solid #e5e7eb; border-radius:12px; padding:12px; margin-bottom:14px; }}
+    .copy-panel h3 {{ margin:0 0 8px; font-size:14px; }}
+    .copy-hint {{ margin:0 0 10px; color:#64748b; font-size:12px; line-height:1.6; }}
+    .copy-actions {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .copy-actions button {{ border:0; background:#2563eb; color:#fff; border-radius:8px; padding:7px 10px; cursor:pointer; font-size:12px; }}
+    .download-pack {{ display:inline-flex; align-items:center; background:#059669; color:#fff; border-radius:8px; padding:7px 10px; text-decoration:none; font-size:12px; }}
+    .status-actions {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; }}
+    .status-actions button {{ border:0; background:#0f766e; color:#fff; border-radius:8px; padding:7px 10px; cursor:pointer; font-size:12px; }}
+    .status-actions button.danger {{ background:#dc2626; }}
+    .status-actions button.secondary {{ background:#475569; }}
+    .status-result {{ color:#64748b; font-size:12px; }}
+    .next-step {{ margin-top:10px; background:#ecfdf5; color:#065f46; border:1px solid #a7f3d0; border-radius:8px; padding:8px 10px; font-size:12px; line-height:1.6; }}
+    .copy-panel textarea {{ position:absolute; left:-9999px; top:-9999px; }}
+    .rich-copy-details {{ margin-top: 10px; color:#475569; font-size:13px; }}
+    .rich-copy-area {{ margin-top:8px; background:#fff; border:1px dashed #94a3b8; border-radius:10px; padding:14px; color:#111827; }}
+    .rich-copy-area h1 {{ font-size:22px; line-height:1.45; }}
+    .rich-copy-area p, .rich-copy-area li {{ font-size:15px; line-height:1.8; }}
+    .rich-copy-area img {{ max-width:100%; border-radius:8px; margin:8px 0; }}
+    .article h1 {{ font-size: 21px; line-height: 1.4; margin: 0 0 12px; }}
+    .updated-time {{ color:#64748b; font-size:12px; margin: -4px 0 10px; }}
+    .hook {{ background: #eff6ff; border-left: 3px solid #3b82f6; padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }}
+    .body p, .body li {{ font-size: 14px; line-height: 1.75; }}
+    .cover {{ margin-top: 14px; font-size: 13px; color: #6b7280; }}
+    .video-cover {{
+      background: linear-gradient(140deg,#111827,#1f2937 65%,#374151);
+      color: #fff; border-radius: 12px; min-height: 220px;
+      display: flex; flex-direction: column; justify-content: space-between; padding: 14px;
+    }}
+    .cover-text {{ font-size: 20px; line-height: 1.35; font-weight: 700; }}
+    .video-hook {{ font-size: 13px; line-height: 1.6; opacity: .9; }}
+    .video-player {{ margin-top: 12px; }}
+    .video-player video {{ width: 100%; border-radius: 10px; background: #000; min-height: 220px; }}
+    .video-missing {{
+      margin-top: 12px; background: #fff7ed; color: #9a3412; border: 1px solid #fed7aa;
+      border-radius: 8px; padding: 10px; font-size: 13px;
+    }}
+    .timeline h3 {{ margin: 14px 0 8px; font-size: 14px; }}
+    .timeline ol {{ margin: 0; padding-left: 18px; }}
+    .timeline li {{ margin: 8px 0; font-size: 13px; line-height: 1.6; }}
+    .script-box {{ white-space: pre-wrap; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; font-size: 13px; line-height: 1.7; }}
+    .time {{ display: inline-block; width: 70px; color: #2563eb; font-weight: 600; }}
+    .line {{ color: #1f2937; }}
+    .ill-gallery {{ margin: 10px 0 12px; }}
+    .ill-gallery h3 {{ margin: 0 0 8px; font-size: 14px; color: #374151; }}
+    .ill-grid {{ display: grid; gap: 8px; grid-template-columns: 1fr; }}
+    .ill-card img {{ width: 100%; border-radius: 10px; border: 1px solid #e5e7eb; }}
+  </style>
+  <script>
+    async function copyToClipboard(text) {{
+      if (navigator.clipboard && window.isSecureContext) {{
+        await navigator.clipboard.writeText(text);
+        return true;
+      }}
+      const temp = document.createElement('textarea');
+      temp.value = text;
+      temp.setAttribute('readonly', '');
+      temp.style.position = 'fixed';
+      temp.style.left = '-9999px';
+      temp.style.top = '0';
+      document.body.appendChild(temp);
+      temp.focus();
+      temp.select();
+      let ok = false;
+      try {{ ok = document.execCommand('copy'); }} catch (err) {{ ok = false; }}
+      document.body.removeChild(temp);
+      if (!ok) throw new Error('浏览器阻止复制，请手动选中文案复制');
+      return true;
+    }}
+    async function copyTarget(btn) {{
+      const el = document.getElementById(btn.dataset.copyTarget);
+      if (!el) return;
+      const old = btn.innerText;
+      try {{
+        await copyToClipboard(el.value || el.textContent || '');
+        btn.innerText = '已复制';
+      }} catch (err) {{
+        btn.innerText = '复制失败';
+        alert(err.message || err);
+      }}
+      setTimeout(() => btn.innerText = old, 1600);
+    }}
+    async function copyRichTarget(btn) {{
+      const el = document.getElementById(btn.dataset.richTarget);
+      if (!el) return;
+      const old = btn.innerText;
+      try {{
+        const clone = el.cloneNode(true);
+        const imgs = Array.from(clone.querySelectorAll('img'));
+        for (const img of imgs) {{
+          try {{
+            const absoluteUrl = new URL(img.getAttribute('src'), window.location.href).toString();
+            const resp = await fetch(absoluteUrl, {{cache: 'no-store'}});
+            const blob = await resp.blob();
+            const dataUrl = await new Promise((resolve, reject) => {{
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result);
+              reader.onerror = reject;
+              reader.readAsDataURL(blob);
+            }});
+            img.setAttribute('src', dataUrl);
+          }} catch (err) {{
+            // Keep original src if conversion fails; manual upload remains available via素材包.
+          }}
+        }}
+        const html = clone.innerHTML;
+        const text = clone.innerText || clone.textContent || '';
+        if (navigator.clipboard && window.ClipboardItem && window.isSecureContext) {{
+          await navigator.clipboard.write([
+            new ClipboardItem({{
+              'text/html': new Blob([html], {{type: 'text/html'}}),
+              'text/plain': new Blob([text], {{type: 'text/plain'}})
+            }})
+          ]);
+        }} else {{
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          const selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+          const ok = document.execCommand('copy');
+          selection.removeAllRanges();
+          if (!ok) throw new Error('浏览器阻止富文本复制，请展开下方富文本复制区，手动框选 Ctrl+C');
+        }}
+        btn.innerText = '图文已复制';
+      }} catch (err) {{
+        btn.innerText = '复制失败';
+        const details = el.closest('details');
+        if (details) details.open = true;
+        alert((err && err.message) || '复制失败，请展开富文本复制区手动复制');
+      }}
+      setTimeout(() => btn.innerText = old, 1800);
+    }}
+    async function setStatus(id, status, btn) {{
+      const box = btn.closest('.status-actions').querySelector('.status-result');
+      box.innerText = '处理中...';
+      const resp = await fetch('/status?id=' + encodeURIComponent(id) + '&status=' + encodeURIComponent(status));
+      box.innerText = await resp.text();
+    }}
+    async function runAction(id, action, btn) {{
+      const box = btn.closest('.status-actions').querySelector('.status-result');
+      box.innerText = '处理中...';
+      btn.disabled = true;
+      try {{
+        const resp = await fetch('/action?id=' + encodeURIComponent(id) + '&action=' + encodeURIComponent(action));
+        box.innerText = await resp.text();
+      }} finally {{
+        btn.disabled = false;
+      }}
+    }}
+  </script>
+</head>
+<body>
+  <div class="container">
+    <div class="panel">
+      <h2 style="margin:0;font-size:20px;">发布预览</h2>
+      {metadata_html}
+      <div class="meta"><span>质量说明：{reason or "无"}</span></div>
+    </div>
+    <div class="panel">{content_card}</div>
+  </div>
+</body>
+</html>
+"""
+
+
+def generate_preview_for_item(config: dict[str, Any], item: dict[str, Any]) -> None:
+    preview_cfg = config.get("preview", {})
+    if not preview_cfg.get("enabled", True):
+        return
+    build_asset_pack_for_item(config, item)
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    content = extract_content_payload(item)
+    preview_dir = PREVIEW_DIR / item_date
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    preview_file = preview_dir / f"{queue_id}.html"
+    preview_file.write_text(build_preview_html(config, item, content), encoding="utf-8")
+    item["preview_file"] = str(preview_file)
+    item["preview_url"] = build_preview_url(config, preview_file)
+
+
+def build_preview_index(config: dict[str, Any], items: list[dict[str, Any]], date: str) -> dict[str, str]:
+    if not items:
+        return {"index_file": "", "index_url": ""}
+    preview_dir = PREVIEW_DIR / date
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[str] = []
+    for item in items:
+        title = html.escape(str(item.get("title", "")).strip()[:70] or "未命名草稿")
+        advice = html.escape(str(item.get("publish_advice", "需改")))
+        badge = html.escape(str(item.get("quality_badge", "⚪")))
+        score = safe_int(item.get("total_score", 0), default=0)
+        platform = html.escape(str(item.get("platform", "")))
+        preview_url = html.escape(str(item.get("preview_url", "")))
+        preview_file = Path(str(item.get("preview_file", "")).strip() or "#")
+        local_link = html.escape(preview_file.name) if preview_file != Path("#") else "#"
+        target_href = preview_url or local_link
+        bust = cache_bust_token(item)
+        if bust:
+            sep = "&" if "?" in target_href else "?"
+            target_href = f"{target_href}{sep}v={bust}"
+        sample_video_url = html.escape(str(item.get("sample_video_url", "")).strip())
+        sample_video_link = (
+            f"<a href='{sample_video_url}' target='_blank' rel='noreferrer'>播放样片</a>"
+            if sample_video_url
+            else "-"
+        )
+        rows.append(
+            "<tr>"
+            f"<td>{item.get('id','')}</td><td>{platform}</td>"
+            f"<td>{badge}{score}</td><td>{advice}</td>"
+            f"<td><a href='{target_href}' target='_blank' rel='noreferrer'>{title}</a></td>"
+            f"<td>{sample_video_link}</td>"
+            "</tr>"
+        )
+    index_html = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><title>发布预览索引 {date}</title>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;background:#f6f8fb;padding:20px;}}
+.card{{background:#fff;border-radius:12px;padding:16px;max-width:980px;margin:0 auto;box-shadow:0 4px 16px rgba(0,0,0,.06);}}
+table{{width:100%;border-collapse:collapse;font-size:14px;}}
+th,td{{border-bottom:1px solid #eef2f7;padding:10px;text-align:left;vertical-align:top;}}
+th{{background:#f8fafc;}}
+a{{color:#2563eb;text-decoration:none;}}
+</style></head><body><div class="card">
+<h2 style="margin-top:0;">发布预览索引（{date}）</h2>
+<table><thead><tr><th>QueueID</th><th>平台</th><th>评分</th><th>建议</th><th>预览链接</th><th>样片</th></tr></thead>
+<tbody>{''.join(rows)}</tbody></table></div></body></html>"""
+    index_file = preview_dir / "index.html"
+    index_file.write_text(index_html, encoding="utf-8")
+    index_url = build_preview_url(config, index_file)
+    return {"index_file": str(index_file), "index_url": index_url}
+
+
+def build_accounts_index(
+    config: dict[str, Any], queue: list[dict[str, Any]], date: str = ""
+) -> dict[str, str]:
+    preview_cfg = config.get("preview", {})
+    if not preview_cfg.get("enabled", True):
+        return {"index_file": "", "index_url": ""}
+    platforms = config.get("platforms", [])
+    if date:
+        visible_items = [item for item in queue if item.get("date") == date]
+    else:
+        visible_items = list(queue)
+    latest_date = date or (max([str(item.get("date", "")) for item in visible_items] or [""]) or "")
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in visible_items:
+        grouped.setdefault(str(item.get("account_id") or item.get("account_name") or ""), []).append(item)
+
+    cards: list[str] = []
+    for platform_cfg in platforms:
+        account_id = platform_account_id(platform_cfg)
+        account_name = str(platform_cfg.get("account_name", "")).strip()
+        platform = str(platform_cfg.get("platform", "")).strip()
+        post_format = str(platform_cfg.get("post_format", "")).strip()
+        track = str(platform_cfg.get("track", "")).strip()
+        publish_time = str(platform_cfg.get("publish_time", "")).strip()
+        mode = "公众号/小红书完整图文" if post_format != "short_video_script" else "剪映图文素材包"
+        items = sorted(
+            grouped.get(account_id, [])
+            + [
+                item
+                for item in visible_items
+                if not item.get("account_id") and item.get("account_name") == account_name
+            ],
+            key=lambda item: str(item.get("created_at", "")),
+            reverse=True,
+        )
+        ready_count = len(items)
+        image_ready = sum(1 for item in items if len(item.get("illustration_urls") or item.get("illustration_files") or []) > 0)
+        best_score = max([safe_int(item.get("total_score", 0), default=0) for item in items] or [0])
+        item_rows: list[str] = []
+        display_limit = 20
+        for item in items[:display_limit]:
+            preview_file = Path(str(item.get("preview_file", "")).strip() or "#")
+            href = html.escape(preview_file.name) if preview_file != Path("#") else "#"
+            title = html.escape(str(item.get("title", "")).strip()[:64] or "未命名草稿")
+            badge = html.escape(str(item.get("quality_badge", "⚪")))
+            score = safe_int(item.get("total_score", 0), default=0)
+            ill_count = len(item.get("illustration_urls") or item.get("illustration_files") or [])
+            material = f"{ill_count} 张图" if ill_count else "待配图"
+            raw_status = str(item.get("status", "pending_review"))
+            status = html.escape(status_label(raw_status))
+            updated = html.escape(display_datetime(item.get("created_at") or item.get("updated_at")) or "-")
+            item_rows.append(
+                f"<li data-status='{html.escape(raw_status)}'>"
+                f"<a href='{href}' target='_blank' rel='noreferrer'>{title}</a>"
+                f"<span>{badge}{score}</span><span>{material}</span><span>{status}</span><span>{updated}</span>"
+                "</li>"
+            )
+        if not item_rows:
+            item_rows.append("<li><span>暂无候选内容，先运行生成命令。</span></li>")
+        cards.append(
+            f"<section class='account-card' data-account='{html.escape(account_name)}' data-platform='{html.escape(platform)}'>"
+            f"<div class='account-head'><h2>{html.escape(account_name)}</h2><span>{html.escape(platform_label(platform))}</span></div>"
+            f"<p class='position'>定位：{html.escape(track)} · {html.escape(mode)} · 发布时间：{html.escape(publish_time or '-')}</p>"
+            f"<div class='stats'><span>候选 {ready_count}</span><span>已配图 {image_ready}</span><span>最高分 {best_score}</span></div>"
+            "<div class='generate-row'>"
+            "<input type='number' min='1' max='10' value='3' title='生成条数' />"
+            f"<button type='button' onclick=\"runGenerate(this)\" data-account=\"{html.escape(account_name)}\" data-date=\"{html.escape(latest_date)}\">点击生成</button>"
+            "</div>"
+            "<pre class='run-log'></pre>"
+            "<ul class='items'>"
+            f"{''.join(item_rows)}"
+            "</ul></section>"
+        )
+    title_suffix = f"（{html.escape(latest_date)}）" if latest_date else ""
+    accounts_html = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>按账号生成内容{title_suffix}</title>
+<style>
+body{{margin:0;background:#f3f5f9;color:#111827;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;}}
+.wrap{{max-width:1160px;margin:0 auto;padding:24px;}}
+.hero{{background:linear-gradient(135deg,#111827,#1d4ed8);color:#fff;border-radius:18px;padding:22px;margin-bottom:18px;}}
+.hero h1{{margin:0 0 8px;font-size:24px;}} .hero p{{margin:0;opacity:.9;line-height:1.7;}}
+.toolbar{{display:flex;gap:10px;align-items:center;margin:0 0 16px;}}
+.toolbar input{{width:min(420px,100%);border:1px solid #dbe3ef;border-radius:10px;padding:10px 12px;font-size:14px;}}
+.status-filter{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px;}}
+.status-filter button{{background:#fff;color:#334155;border:1px solid #cbd5e1;margin:0;}}
+.status-filter button.active{{background:#2563eb;color:#fff;border-color:#2563eb;}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:16px;}}
+.account-card{{background:#fff;border-radius:16px;padding:16px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
+.account-head{{display:flex;align-items:center;justify-content:space-between;gap:12px;}}
+.account-head h2{{margin:0;font-size:19px;}} .account-head span{{font-size:12px;background:#eff6ff;color:#1d4ed8;border-radius:999px;padding:4px 9px;}}
+.position{{font-size:13px;color:#4b5563;line-height:1.6;}}
+.stats{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px;}}
+.stats span{{font-size:12px;background:#f1f5f9;color:#334155;border-radius:999px;padding:4px 8px;}}
+.generate-row{{display:flex;gap:8px;align-items:center;}}
+.generate-row input{{width:64px;border:1px solid #dbe3ef;border-radius:9px;padding:8px;font-size:14px;}}
+button{{border:0;background:#2563eb;color:#fff;border-radius:9px;padding:8px 11px;cursor:pointer;margin-bottom:10px;}}
+button.secondary{{background:#64748b;}}
+.run-log{{display:none;white-space:pre-wrap;background:#0f172a;color:#dbeafe;border-radius:10px;padding:10px;font-size:12px;max-height:220px;overflow:auto;}}
+.items{{list-style:none;margin:0;padding:0;display:grid;gap:8px;}}
+    .items li{{display:grid;grid-template-columns:1fr auto auto auto auto;gap:8px;align-items:center;border-top:1px solid #eef2f7;padding-top:8px;font-size:13px;}}
+a{{color:#2563eb;text-decoration:none;}} .items span{{color:#6b7280;white-space:nowrap;}}
+</style>
+<script>
+async function parseJsonResponse(resp) {{
+  const text = await resp.text();
+  try {{
+    return JSON.parse(text);
+  }} catch (err) {{
+    throw new Error('预览 API 不可用：8787 端口当前可能是静态 http.server。请改用 serve-review 启动。');
+  }}
+}}
+async function runGenerate(btn){{
+  const card = btn.closest('.account-card');
+  const log = card.querySelector('.run-log');
+  const count = card.querySelector('.generate-row input')?.value || '3';
+  log.style.display='block'; log.textContent='正在创建生成任务...';
+  btn.disabled=true;
+  try {{
+    const date = btn.dataset.date || '';
+    const resp = await fetch('/generate?async=1&sync_feishu=0&count=' + encodeURIComponent(count) + '&account=' + encodeURIComponent(btn.dataset.account || '') + '&date=' + encodeURIComponent(date));
+    const payload = await parseJsonResponse(resp);
+    if (!resp.ok) throw new Error(payload.error || '创建任务失败');
+    await pollJob(payload.job_id, log);
+  }} catch (err) {{
+    log.textContent = '生成失败：' + err;
+  }} finally {{
+    btn.disabled=false;
+  }}
+}}
+async function pollJob(jobId, log){{
+  while (true) {{
+    const resp = await fetch('/job-status?id=' + encodeURIComponent(jobId));
+    const payload = await parseJsonResponse(resp);
+    log.textContent = (payload.lines || []).join('\\n');
+    if (payload.status === 'done') {{
+      log.textContent += '\\n\\n生成完成，正在刷新列表...';
+      setTimeout(() => location.reload(), 800);
+      return;
+    }}
+    if (payload.status === 'failed') {{
+      log.textContent += '\\n\\n生成失败，请看上方错误。';
+      return;
+    }}
+    await new Promise(resolve => setTimeout(resolve, 1500));
+  }}
+}}
+function filterAccounts(input){{
+  const q = (input.value || '').toLowerCase();
+  document.querySelectorAll('.account-card').forEach(card => {{
+    const hay = ((card.dataset.account || '') + ' ' + (card.dataset.platform || '')).toLowerCase();
+    card.style.display = hay.includes(q) ? '' : 'none';
+  }});
+}}
+function filterStatus(status, btn){{
+  document.querySelectorAll('.status-filter button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.items li').forEach(row => {{
+    row.style.display = (!status || row.dataset.status === status) ? '' : 'none';
+  }});
+}}
+</script></head><body><div class="wrap">
+<div class="hero"><h1>按账号生成/选择内容{title_suffix}</h1>
+<p>公众号和小红书输出可直接粘贴的完整图文；抖音/视频号/快手输出剪映可用的口播稿、分镜和配图素材，不再生成视频。</p></div>
+<div class="toolbar"><input placeholder="搜索账号或平台，例如 小红书 / 公众号 / 快手" oninput="filterAccounts(this)" /></div>
+<div class="status-filter">
+  <button type="button" class="active" onclick="filterStatus('', this)">全部</button>
+  <button type="button" onclick="filterStatus('pending_review', this)">待筛选</button>
+  <button type="button" onclick="filterStatus('approved', this)">已选用</button>
+  <button type="button" onclick="filterStatus('posted', this)">已发布</button>
+  <button type="button" onclick="filterStatus('rejected', this)">已丢弃</button>
+</div>
+<div class="grid">{''.join(cards)}</div></div></body></html>"""
+    target_dir = PREVIEW_DIR / latest_date if latest_date else PREVIEW_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    index_file = target_dir / "accounts.html"
+    index_file.write_text(accounts_html, encoding="utf-8")
+    return {"index_file": str(index_file), "index_url": build_preview_url(config, index_file)}
+
+
+def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], date: str = "") -> dict[str, str]:
+    if date:
+        items = [item for item in queue if item.get("date") == date]
+        dashboard_date = date
+    else:
+        dashboard_date = max([str(item.get("date", "")) for item in queue] or [now_local().strftime("%Y-%m-%d")])
+        items = [item for item in queue if item.get("date") == dashboard_date]
+    counts = {
+        "total": len(items),
+        "pending": sum(1 for item in items if item.get("status") == "pending_review"),
+        "approved": sum(1 for item in items if item.get("status") in {"approved", "ready_to_post"}),
+        "posted": sum(1 for item in items if item.get("status") == "posted"),
+        "rejected": sum(1 for item in items if item.get("status") == "rejected"),
+        "images": sum(1 for item in items if len(item.get("illustration_urls") or []) > 0),
+    }
+    latest_update = max(
+        [display_datetime(item.get("updated_at") or item.get("created_at")) for item in items]
+        or [""]
+    )
+    by_account: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        by_account.setdefault(str(item.get("account_name", "")), []).append(item)
+    platform_cfg_by_account = {
+        str(cfg.get("account_name", "")): cfg for cfg in config.get("platforms", [])
+    }
+    platform_counts: dict[str, int] = {}
+    for item in items:
+        platform_counts[str(item.get("platform", ""))] = platform_counts.get(str(item.get("platform", "")), 0) + 1
+    priority_items = sorted(
+        [
+            item
+            for item in items
+            if item.get("status") in {"pending_review", "approved", "ready_to_post"}
+            and item.get("publish_advice") != "禁发"
+        ],
+        key=lambda item: (
+            str(item.get("status", "")) != "approved",
+            -safe_int(item.get("total_score", 0), default=0),
+            str(item.get("updated_at", "")),
+        ),
+    )[:8]
+    priority_rows = []
+    for item in priority_items:
+        preview_file = Path(str(item.get("preview_file", "")).strip() or "#")
+        href = "#"
+        if preview_file != Path("#"):
+            try:
+                href = preview_file.relative_to(PREVIEW_DIR).as_posix()
+            except ValueError:
+                href = preview_file.name
+        priority_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(item.get('account_name', '')))}</td>"
+            f"<td>{html.escape(platform_label(item.get('platform')))}</td>"
+            f"<td><a href='{html.escape(href)}'>{html.escape(str(item.get('title', ''))[:52])}</a></td>"
+            f"<td>{html.escape(status_label(item.get('status')))}</td>"
+            f"<td>{safe_int(item.get('total_score', 0), default=0)}</td>"
+            f"<td>{html.escape(display_datetime(item.get('updated_at') or item.get('created_at')) or '-')}</td>"
+            f"<td>{html.escape(next_step_for_item(item))}</td>"
+            "</tr>"
+        )
+    account_rows = []
+    coverage_rows = []
+    schedule_rows = []
+    for account, account_items in sorted(by_account.items()):
+        first_item = account_items[0] if account_items else {}
+        platform_cfg = platform_cfg_by_account.get(account, {})
+        platform = platform_cfg.get("platform") or first_item.get("platform", "")
+        publish_time = platform_cfg.get("publish_time") or first_item.get("publish_time", "")
+        post_format = platform_cfg.get("post_format") or first_item.get("post_format", "")
+        best = max([safe_int(item.get("total_score", 0), default=0) for item in account_items] or [0])
+        ready = sum(1 for item in account_items if item.get("status") in {"approved", "ready_to_post"})
+        posted = sum(1 for item in account_items if item.get("status") == "posted")
+        latest = max([display_datetime(item.get("updated_at") or item.get("created_at")) for item in account_items] or [""])
+        suggestion = "已覆盖" if ready or posted else "建议先选 1 条"
+        account_rows.append(
+            "<tr>"
+            f"<td>{html.escape(account)}</td>"
+            f"<td>{html.escape(platform_label(platform))}</td>"
+            f"<td>{html.escape(str(publish_time) or '-')}</td>"
+            f"<td>{html.escape(post_format_label(post_format))}</td>"
+            f"<td>{len(account_items)}</td><td>{ready}</td><td>{best}</td><td>{html.escape(latest or '-')}</td>"
+            "</tr>"
+        )
+        coverage_rows.append(
+            f"<tr><td>{html.escape(account)}</td><td>{html.escape(platform_label(platform))}</td><td>{ready}</td><td>{posted}</td><td>{html.escape(latest or '-')}</td><td>{html.escape(suggestion)}</td></tr>"
+        )
+        schedule_rows.append(
+            (
+                str(publish_time) or "99:99",
+                "<tr>"
+                f"<td>{html.escape(str(publish_time) or '-')}</td>"
+                f"<td>{html.escape(account)}</td>"
+                f"<td>{html.escape(platform_label(platform))}</td>"
+                f"<td>{html.escape(post_format_label(post_format))}</td>"
+                f"<td>{len(account_items)}</td>"
+                f"<td>{ready or posted}</td>"
+                f"<td>{html.escape(latest or '-')}</td>"
+                "</tr>",
+            )
+        )
+    schedule_html = "".join(row for _, row in sorted(schedule_rows, key=lambda item: item[0]))
+    platform_stats = "".join(
+        f"<span class='pill'>{html.escape(platform_label(platform))}: {count}</span>"
+        for platform, count in sorted(platform_counts.items())
+    )
+    bulk_all_url = ""
+    bulk_selected_url = ""
+    try:
+        bulk_all_url = build_bulk_asset_pack(
+            config, queue, date=dashboard_date, status="all", rebuild_items=False
+        ).get("bulk_pack_url", "")
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] build all bulk pack failed: {exc}")
+    try:
+        bulk_selected_url = build_bulk_asset_pack(
+            config, queue, date=dashboard_date, status="selected", rebuild_items=False
+        ).get("bulk_pack_url", "")
+    except Exception:
+        bulk_selected_url = f"/download-packs?date={dashboard_date}&status=selected"
+    dashboard_html = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>发布工作台 {dashboard_date}</title>
+<style>
+body{{margin:0;background:#f3f5f9;color:#111827;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;}}
+.wrap{{max-width:1080px;margin:0 auto;padding:24px;}}
+.hero{{background:linear-gradient(135deg,#0f172a,#0f766e);color:#fff;border-radius:18px;padding:22px;margin-bottom:18px;}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px;}}
+.stat{{background:#fff;border-radius:14px;padding:15px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
+.stat b{{display:block;font-size:26px;margin-top:6px;}}
+.pill-row{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 18px;}}
+.pill{{background:#e0f2fe;color:#075985;border-radius:999px;padding:7px 10px;font-size:13px;}}
+.action-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:18px;}}
+.action-group{{background:#fff;border-radius:14px;padding:14px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
+.action-group h3{{margin:0 0 10px;font-size:15px;color:#334155;}}
+.action-group a{{display:inline-block;background:#2563eb;color:#fff;border-radius:10px;padding:9px 12px;text-decoration:none;margin:0 6px 8px 0;font-size:13px;}}
+.action-group a.green{{background:#059669;}}
+.action-group a.orange{{background:#f97316;}}
+.action-group a.purple{{background:#7c3aed;}}
+.card{{background:#fff;border-radius:14px;padding:16px;box-shadow:0 6px 18px rgba(15,23,42,.08);}}
+table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-bottom:1px solid #eef2f7;padding:10px;text-align:left;}} th{{background:#f8fafc;}}
+</style></head><body><div class="wrap">
+<div class="hero"><h1>发布工作台 {dashboard_date}</h1><p>先在账号页生成/筛选内容，单条页里复制文案、下载素材包，发布后点“已发布”。</p></div>
+<div class="grid">
+<div class="stat">总候选<b>{counts['total']}</b></div>
+<div class="stat">待筛选<b>{counts['pending']}</b></div>
+<div class="stat">已选用<b>{counts['approved']}</b></div>
+<div class="stat">已发布<b>{counts['posted']}</b></div>
+<div class="stat">已丢弃<b>{counts['rejected']}</b></div>
+<div class="stat">已配图<b>{counts['images']}</b></div>
+<div class="stat">最近更新<b style="font-size:16px;">{html.escape(latest_update or '-')}</b></div>
+</div>
+<div class="pill-row">{platform_stats}</div>
+<div class="action-grid">
+  <div class="action-group"><h3>生成内容</h3>
+    <a href="{dashboard_date}/accounts.html">账号工作台</a>
+    <a class="purple" href="/free.html">自由生成内容</a>
+  </div>
+  <div class="action-group"><h3>发布处理</h3>
+    <a href="{dashboard_date}/index.html">查看全部候选</a>
+    <a href="/reminders" target="_blank">发布提醒记录</a>
+    <a class="green" href="/export-selected?date={dashboard_date}" target="_blank">导出已选清单</a>
+  </div>
+  <div class="action-group"><h3>素材下载</h3>
+    <a class="green" href="{html.escape(bulk_all_url or f'/download-packs?date={dashboard_date}&status=all')}" target="_blank">下载今日全部素材包</a>
+    <a class="green" href="{html.escape(bulk_selected_url)}" target="_blank">下载已选素材包</a>
+  </div>
+  <div class="action-group"><h3>系统状态</h3>
+    <a class="orange" href="/health" target="_blank">状态检查</a>
+    <a href="/daily-log" target="_blank">每日自动生成日志</a>
+  </div>
+</div>
+<div class="card"><h2>今日优先处理</h2><table><thead><tr><th>账号</th><th>平台</th><th>内容</th><th>状态</th><th>评分</th><th>更新时间</th><th>下一步</th></tr></thead><tbody>{''.join(priority_rows) or '<tr><td colspan="7">暂无待处理内容</td></tr>'}</tbody></table></div>
+<br />
+<div class="card"><h2>今日发布排期</h2><table><thead><tr><th>时间</th><th>账号</th><th>平台</th><th>形式</th><th>候选</th><th>是否已覆盖</th><th>更新时间</th></tr></thead><tbody>{schedule_html}</tbody></table></div>
+<br />
+<div class="card"><h2>账号发布覆盖</h2><table><thead><tr><th>账号</th><th>平台</th><th>已选</th><th>已发布</th><th>更新时间</th><th>建议</th></tr></thead><tbody>{''.join(coverage_rows)}</tbody></table></div>
+<br />
+<div class="card"><h2>账号概览</h2><table><thead><tr><th>账号</th><th>平台</th><th>发布时间</th><th>内容形式</th><th>候选</th><th>已选</th><th>最高分</th><th>更新时间</th></tr></thead><tbody>{''.join(account_rows)}</tbody></table></div>
+</div></body></html>"""
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        build_bulk_asset_pack(config, queue, date=dashboard_date, status="all", rebuild_items=False)
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] build bulk asset pack failed: {exc}")
+    build_free_content_page(config)
+    index_file = PREVIEW_DIR / "dashboard.html"
+    index_file.write_text(dashboard_html, encoding="utf-8")
+    return {"index_file": str(index_file), "index_url": build_preview_url(config, index_file)}
+
+
+def build_free_content_page(config: dict[str, Any], queue: list[dict[str, Any]] | None = None) -> dict[str, str]:
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    if queue is None:
+        queue = load_queue()
+    page_html = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>自由生成内容</title>
+<style>
+body{margin:0;background:#f3f5f9;color:#111827;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;}
+.wrap{max-width:920px;margin:0 auto;padding:24px;}
+.hero{background:linear-gradient(135deg,#581c87,#2563eb);color:#fff;border-radius:18px;padding:22px;margin-bottom:18px;}
+.card{background:#fff;border-radius:16px;padding:18px;box-shadow:0 6px 18px rgba(15,23,42,.08);}
+label{display:block;font-weight:700;margin:14px 0 6px;}
+textarea,select,input{width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:10px;padding:11px;font-size:15px;}
+textarea{min-height:150px;line-height:1.7;}
+.row{display:grid;grid-template-columns:1fr 160px;gap:12px;}
+button{border:0;background:#2563eb;color:#fff;border-radius:10px;padding:11px 15px;cursor:pointer;margin-top:14px;font-size:15px;}
+pre{display:none;white-space:pre-wrap;background:#0f172a;color:#dbeafe;border-radius:12px;padding:14px;max-height:420px;overflow:auto;}
+.hint{color:#64748b;font-size:13px;line-height:1.7;}
+a{color:#2563eb;text-decoration:none;}
+.table-wrap{overflow-x:auto;border-radius:10px;border:1px solid #e2e8f0;margin-top:10px;}
+.free-table{width:100%;border-collapse:collapse;font-size:13px;}
+.free-table th{background:#f8fafc;padding:8px 10px;text-align:left;font-weight:600;color:#475569;border-bottom:1px solid #e2e8f0;white-space:nowrap;}
+.free-table td{padding:8px 10px;border-bottom:1px solid #f1f5f9;vertical-align:middle;color:#1e293b;}
+.free-table tr:last-child td{border-bottom:0;}
+.free-table tr:hover{background:#f8fafc;}
+.btn-sm{display:inline-block;border:0;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;text-decoration:none;background:#2563eb;color:#fff;}
+</style></head><body><div class="wrap">
+<div class="hero"><h1>自由生成内容</h1><p>输入你的想法，选择图文或视频脚本。系统会用 DeepSeek 生成内容，并用 DashScope 自动配图。</p></div>
+<div class="card">
+<label>你的想法/主题</label>
+<textarea id="idea" placeholder="例如：我想写一篇小红书，主题是周末带孩子去城市公园，重点是低预算、好拍照、避坑。"></textarea>
+<div class="row">
+  <div><label>内容类型</label><select id="content-type"><option value="graphic">图文内容（公众号/小红书）</option><option value="video">视频脚本（剪映素材）</option></select></div>
+  <div><label>配图</label><select id="render-images"><option value="1">生成配图</option><option value="0">先不配图</option></select></div>
+</div>
+<button onclick="generateFree()">开始生成</button>
+<p class="hint">生成完成后会返回预览链接。若不满意，进入内容页点击“重写文案”或“重写文案+配图”。</p>
+<pre id="log"></pre>
+</div></div>
+<div id="free-history" style="margin-top:20px;"></div>
+<script>
+async function parseJsonResponse(resp) {
+  const text = await resp.text();
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error('预览 API 不可用：8787 端口当前可能是静态 http.server。请改用 serve-review 启动。');
+  }
+}
+async function generateFree(){
+  const idea = document.getElementById('idea').value.trim();
+  const type = document.getElementById('content-type').value;
+  const renderImages = document.getElementById('render-images').value;
+  const log = document.getElementById('log');
+  if (!idea){ alert('请先输入想法'); return; }
+  log.style.display='block'; log.textContent='正在创建自由生成任务...';
+  const params = new URLSearchParams({idea, type, render_images: renderImages});
+  try {
+    const resp = await fetch('/free-generate?' + params.toString());
+    const payload = await parseJsonResponse(resp);
+    if (!resp.ok) throw new Error(payload.error || '创建任务失败');
+    await pollJob(payload.job_id, log);
+  } catch (err) {
+    log.textContent = '生成失败：' + err;
+  }
+}
+async function pollJob(jobId, log){
+  while (true) {
+    const resp = await fetch('/job-status?id=' + encodeURIComponent(jobId));
+    const payload = await parseJsonResponse(resp);
+    log.textContent = (payload.lines || []).join('\\n');
+    if (payload.status === 'done') {
+      log.textContent += '\\n\\n生成完成，请打开上方日志中的预览链接。';
+      return;
+    }
+    if (payload.status === 'failed') {
+      log.textContent += '\\n\\n生成失败，请看上方错误。';
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1500));
+  }
+}
+async function loadFreeList() {
+  const container = document.getElementById('free-history');
+  if (!container) return;
+  try {
+    const resp = await fetch('/free-list');
+    if (!resp.ok) throw new Error('Failed to load');
+    const items = await resp.json();
+    if (!items || items.length === 0) {
+      container.innerHTML = '<div class="card"><p style="color:#64748b;text-align:center;">暂无自由生成历史内容。</p></div>';
+      return;
+    }
+    let rows = '';
+    for (const item of items) {
+      const previewLink = item.preview_url
+        ? '<a class="btn-sm" href="' + item.preview_url + '" target="_blank">\u9884\u89c8</a>'
+        : '<span style="color:#94a3b8;font-size:12px;">\u65e0\u9884\u89c8</span>';
+      rows += '<tr>'
+        + '<td><a href="' + item.preview_url + '" target="_blank" style="font-weight:600;">' + item.title + '</a></td>'
+        + '<td>' + item.status + '</td>'
+        + '<td style="color:#64748b;font-size:12px;">' + item.updated_at + '</td>'
+        + '<td>' + previewLink + '</td>'
+        + '</tr>';
+    }
+    container.innerHTML = '<div class="card"><h3 style="margin:0 0 12px;font-size:16px;">\U0001F4CB \u5386\u53F2\u81EA\u7531\u751F\u6210\u5185\u5BB9</h3>'
+      + '<div class="table-wrap"><table class="free-table">'
+      + '<thead><tr><th>\u6807\u9898</th><th>\u72B6\u6001</th><th>\u65F6\u95F4</th><th>\u64CD\u4F5C</th></tr></thead>'
+      + '<tbody>' + rows + '</tbody>'
+      + '</table></div></div>';
+  } catch (err) {
+    container.innerHTML = '<div class="card"><p style="color:#dc2626;">\u52A0\u8F7D\u5386\u53F2\u5185\u5BB9\u5931\u8D25\uFF1A' + err.message + '</p></div>';
+  }
+}
+loadFreeList();
+</script></body></html>"""
+    page_file = PREVIEW_DIR / "free.html"
+    page_file.write_text(page_html, encoding="utf-8")
+    return {"index_file": str(page_file), "index_url": build_preview_url(config, page_file)}
+
+
+def list_preview_dates() -> list[str]:
+    if not PREVIEW_DIR.exists():
+        return []
+    dates: list[str] = []
+    for entry in PREVIEW_DIR.iterdir():
+        if not entry.is_dir():
+            continue
+        # Keep only day folders like 2026-07-04.
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry.name):
+            continue
+        if not (entry / "index.html").exists():
+            continue
+        dates.append(entry.name)
+    return sorted(dates, reverse=True)
+
+
+def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
+    """Build a comprehensive single-page web dashboard for all accounts."""
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+
+    queue = load_queue()
+    platforms = list(config.get("platforms", []))
+
+    TRACK_EMOJI = {
+        "football": "⚽",
+        "child_education": "🌱",
+        "travel": "🗺️",
+        "ai_funny": "🤖",
+    }
+    TRACK_COLORS = {
+        "football": ("#1e40af", "#3b82f6"),
+        "child_education": ("#065f46", "#10b981"),
+        "travel": ("#7c2d12", "#ea580c"),
+        "ai_funny": ("#581c87", "#a855f7"),
+    }
+
+    account_cards_html: list[str] = []
+    sidebar_links: list[str] = []
+
+    for p_idx, p_cfg in enumerate(platforms):
+        account_name = str(p_cfg.get("account_name", "未知账号"))
+        platform_name = str(p_cfg.get("platform", ""))
+        track = str(p_cfg.get("track", ""))
+        publish_time = str(p_cfg.get("publish_time", ""))
+        post_format = str(p_cfg.get("post_format", ""))
+        account_id = f"acc-{p_idx}"
+
+        emoji = TRACK_EMOJI.get(track, "📄")
+        grad_start, grad_end = TRACK_COLORS.get(track, ("#4f46e5", "#818cf8"))
+
+        account_items = [
+            item for item in queue
+            if str(item.get("account_name", "")).strip() == account_name
+        ]
+        account_items.sort(
+            key=lambda x: str(x.get("updated_at") or x.get("created_at", "")),
+            reverse=True,
+        )
+
+        total = len(account_items)
+        pending = sum(1 for it in account_items if it.get("status") == "pending_review")
+        approved = sum(1 for it in account_items if it.get("status") in {"approved", "ready_to_post"})
+        posted = sum(1 for it in account_items if it.get("status") == "posted")
+
+        sidebar_links.append(
+            f"""<a class="sidebar-link" href="#{account_id}" onclick="selectAccount('{account_id}')">
+            <span class="sidebar-emoji">{emoji}</span>
+            <span class="sidebar-name">{html.escape(account_name)}</span>
+            <span class="sidebar-count {'has-pending' if pending > 0 else ''}">{total}</span>
+            </a>"""
+        )
+
+        item_rows: list[str] = []
+        if not account_items:
+            item_rows.append(
+                '<tr><td colspan="7" class="empty-msg">暂无内容，点击上方"生成内容"按钮创建。</td></tr>'
+            )
+        for item in account_items:
+            item_id = html.escape(str(item.get("id", "")))
+            item_title = html.escape(str(item.get("title", ""))[:50])
+            item_status = str(item.get("status", ""))
+            status_cn = status_label(item_status)
+            score = safe_int(item.get("total_score", 0), default=0)
+            badge = str(item.get("quality_badge", ""))
+            updated = html.escape(display_datetime(item.get("updated_at") or item.get("created_at")) or "-")
+            preview_url = html.escape(str(item.get("preview_url", "") or ""))
+            preview_link = (
+                f'<a class="btn-sm btn-preview" href="{preview_url}" target="_blank" rel="noreferrer">查看预览</a>'
+                if preview_url else '<span class="no-link">无预览</span>'
+            )
+            status_cls = item_status.replace("_", "-")
+            item_rows.append(
+                f"""<tr class="item-row status-{status_cls}" data-item-id="{item_id}">
+                <td class="item-title">{item_title}</td>
+                <td><span class="badge badge-{status_cls}">{status_cn}</span></td>
+                <td class="item-score">{badge}{score}</td>
+                <td class="item-time">{updated}</td>
+                <td class="item-actions">
+                {preview_link}
+                <button class="btn-sm btn-images" onclick="reImage('{item_id}')">重新配图</button>
+                <button class="btn-sm btn-approve" onclick="setStatus('{item_id}','approved')">已采用</button>
+                <button class="btn-sm btn-reject" onclick="setStatus('{item_id}','rejected')">驳回</button>
+                </td>
+                </tr>"""
+            )
+
+        is_football = track == "football"
+        football_section = ""
+        if is_football:
+            football_section = f"""
+            <div class="football-section">
+            <textarea id="football-knowledge-{p_idx}" class="football-textarea" placeholder="输入比赛/选题知识，例如：明晚8点皇马vs巴萨，国家德比，本泽马伤愈复出...（可选，留空则使用RSS选题）"></textarea>
+            <button class="btn btn-football" onclick="generateFootball({p_idx})">
+            <span class="btn-icon">⚡</span> 生成足球分析
+            </button>
+            <div id="football-log-{p_idx}" class="job-log"></div>
+            </div>
+            """
+
+        plt_label = platform_label(platform_name)
+        fmt_label = post_format_label(post_format)
+
+        account_cards_html.append(
+            f"""<div class="account-card" id="{account_id}" data-track="{track}">
+            <div class="card-header" style="background:linear-gradient(135deg,{grad_start},{grad_end})">
+            <div class="card-header-top">
+            <span class="card-emoji">{emoji}</span>
+            <h2 class="card-name">{html.escape(account_name)}</h2>
+            </div>
+            <div class="card-meta">
+            <span class="platform-badge">{plt_label}</span>
+            <span class="meta-item">🕐 {html.escape(publish_time or '未设置')}</span>
+            <span class="meta-item">📋 {fmt_label}</span>
+            </div>
+            </div>
+            <div class="card-body">
+            <div class="card-actions">
+            <button class="btn btn-generate" onclick="generateContent({p_idx})">
+            <span class="btn-icon">✨</span> 生成内容
+            </button>
+            {football_section}
+            </div>
+            <div id="generate-log-{p_idx}" class="job-log"></div>
+            <div class="queue-section">
+            <h3 class="queue-title">📋 队列内容 <span class="queue-count">{len(account_items)} 条</span></h3>
+            <div class="table-wrap">
+            <table class="queue-table">
+            <thead>
+            <tr><th>标题</th><th>状态</th><th>评分</th><th>更新时间</th><th>操作</th></tr>
+            </thead>
+            <tbody>
+            {''.join(item_rows)}
+            </tbody>
+            </table>
+            </div>
+            </div>
+            </div>
+            </div>"""
+        )
+
+    total_all = len(queue)
+    pending_all = sum(1 for it in queue if it.get("status") == "pending_review")
+    approved_all = sum(1 for it in queue if it.get("status") in {"approved", "ready_to_post"})
+    posted_all = sum(1 for it in queue if it.get("status") == "posted")
+    rejected_all = sum(1 for it in queue if it.get("status") == "rejected")
+
+    portal_html = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>内容生产控制台</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+background: #f0f2f5;
+color: #1e293b;
+font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', sans-serif;
+min-height: 100vh;
+}}
+.app-layout {{
+display: grid;
+grid-template-columns: 220px 1fr;
+min-height: 100vh;
+}}
+.side {{
+background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+color: #cbd5e1;
+padding: 20px 12px;
+overflow-y: auto;
+position: sticky;
+top: 0;
+height: 100vh;
+}}
+.side-brand {{
+font-size: 20px;
+font-weight: 700;
+color: #f1f5f9;
+padding: 0 8px 16px;
+border-bottom: 1px solid #334155;
+margin-bottom: 16px;
+display: flex;
+align-items: center;
+gap: 8px;
+}}
+.side-brand small {{ font-size: 12px; font-weight: 400; color: #64748b; display: block; margin-top: 2px; }}
+.sidebar-link {{
+display: flex;
+align-items: center;
+gap: 10px;
+padding: 10px 12px;
+border-radius: 10px;
+color: #94a3b8;
+text-decoration: none;
+cursor: pointer;
+transition: all .15s ease;
+margin-bottom: 4px;
+}}
+.sidebar-link:hover {{ background: rgba(255,255,255,.08); color: #e2e8f0; }}
+.sidebar-link.active {{ background: rgba(59,130,246,.2); color: #60a5fa; }}
+.sidebar-emoji {{ font-size: 18px; width: 24px; text-align: center; }}
+.sidebar-name {{ flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.sidebar-count {{
+font-size: 12px;
+background: #334155;
+color: #94a3b8;
+border-radius: 999px;
+padding: 2px 8px;
+min-width: 20px;
+text-align: center;
+}}
+.sidebar-count.has-pending {{ background: #f59e0b; color: #0f172a; font-weight: 600; }}
+.main {{ padding: 24px; max-width: 1400px; overflow-y: auto; }}
+.hero-header {{
+background: linear-gradient(135deg, #0f172a 0%, #1d4ed8 50%, #0f766e 100%);
+border-radius: 16px;
+padding: 28px 32px;
+margin-bottom: 24px;
+color: #fff;
+position: relative;
+overflow: hidden;
+}}
+.hero-header::after {{
+content: '';
+position: absolute;
+top: -50%; right: -20%;
+width: 400px; height: 400px;
+background: radial-gradient(circle, rgba(255,255,255,.06) 0%, transparent 70%);
+border-radius: 50%;
+}}
+.hero-header h1 {{ font-size: 26px; font-weight: 700; margin-bottom: 6px; position: relative; z-index: 1; }}
+.hero-header p {{ font-size: 14px; color: rgba(255,255,255,.75); position: relative; z-index: 1; }}
+.stat-bar {{ display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; position: relative; z-index: 1; }}
+.stat-pill {{
+background: rgba(255,255,255,.12);
+backdrop-filter: blur(4px);
+border-radius: 999px;
+padding: 6px 14px;
+font-size: 13px;
+display: flex;
+align-items: center;
+gap: 6px;
+}}
+.stat-pill b {{ font-size: 16px; }}
+.stat-pill.pending {{ background: rgba(245,158,11,.25); }}
+.stat-pill.approved {{ background: rgba(16,185,129,.2); }}
+.stat-pill.posted {{ background: rgba(59,130,246,.25); }}
+.stat-pill.rejected {{ background: rgba(239,68,68,.2); }}
+.stat-pill.total {{ background: rgba(255,255,255,.15); }}
+.accounts-grid {{
+display: grid;
+grid-template-columns: repeat(auto-fill, minmax(560px, 1fr));
+gap: 20px;
+}}
+@media (max-width: 640px) {{
+.accounts-grid {{ grid-template-columns: 1fr; }}
+.app-layout {{ grid-template-columns: 1fr; }}
+.side {{ display: none; }}
+}}
+.account-card {{
+background: #fff;
+border-radius: 14px;
+box-shadow: 0 4px 20px rgba(15,23,42,.08);
+overflow: hidden;
+transition: box-shadow .2s, transform .2s;
+}}
+.account-card:hover {{ box-shadow: 0 8px 30px rgba(15,23,42,.12); transform: translateY(-2px); }}
+.card-header {{ padding: 18px 20px; color: #fff; }}
+.card-header-top {{ display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }}
+.card-emoji {{ font-size: 28px; }}
+.card-name {{ font-size: 18px; font-weight: 700; }}
+.card-meta {{ display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; opacity: .85; }}
+.platform-badge {{ background: rgba(255,255,255,.2); border-radius: 999px; padding: 2px 10px; font-weight: 600; }}
+.meta-item {{ opacity: .9; }}
+.card-body {{ padding: 16px 20px 20px; }}
+.btn {{
+border: 0;
+border-radius: 10px;
+padding: 10px 18px;
+font-size: 14px;
+font-weight: 600;
+cursor: pointer;
+display: inline-flex;
+align-items: center;
+gap: 6px;
+transition: all .15s;
+}}
+.btn-generate {{ background: linear-gradient(135deg, #2563eb, #3b82f6); color: #fff; }}
+.btn-generate:hover {{ box-shadow: 0 4px 14px rgba(37,99,235,.4); transform: translateY(-1px); }}
+.btn-generate:disabled {{ opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }}
+.btn-football {{ background: linear-gradient(135deg, #1e40af, #2563eb); color: #fff; }}
+.btn-football:hover {{ box-shadow: 0 4px 14px rgba(30,64,175,.4); transform: translateY(-1px); }}
+.btn-football:disabled {{ opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }}
+.btn-icon {{ font-size: 16px; }}
+.btn-sm {{
+border: 0;
+border-radius: 6px;
+padding: 4px 10px;
+font-size: 12px;
+cursor: pointer;
+transition: all .12s;
+text-decoration: none;
+display: inline-block;
+}}
+.btn-preview {{ background: #eff6ff; color: #1d4ed8; }}
+.btn-preview:hover {{ background: #dbeafe; }}
+.btn-images {{ background: #fef3c7; color: #92400e; }}
+.btn-images:hover {{ background: #fde68a; }}
+.btn-approve {{ background: #d1fae5; color: #065f46; }}
+.btn-approve:hover {{ background: #a7f3d0; }}
+.btn-reject {{ background: #fee2e2; color: #991b1b; }}
+.btn-reject:hover {{ background: #fecaca; }}
+.no-link {{ color: #94a3b8; font-size: 12px; }}
+.football-section {{ margin-top: 12px; padding-top: 14px; border-top: 1px dashed #e2e8f0; }}
+.football-textarea {{
+width: 100%;
+box-sizing: border-box;
+border: 1px solid #cbd5e1;
+border-radius: 10px;
+padding: 10px 12px;
+font-size: 13px;
+font-family: inherit;
+line-height: 1.6;
+min-height: 70px;
+resize: vertical;
+transition: border-color .15s;
+}}
+.football-textarea:focus {{ outline: 0; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,.15); }}
+.job-log {{
+display: none;
+margin-top: 10px;
+background: #0f172a;
+color: #93c5fd;
+border-radius: 10px;
+padding: 12px 14px;
+font-size: 12px;
+font-family: 'SF Mono', 'Fira Code', 'Courier New', monospace;
+line-height: 1.7;
+max-height: 200px;
+overflow-y: auto;
+white-space: pre-wrap;
+word-break: break-all;
+}}
+.queue-section {{ margin-top: 16px; }}
+.queue-title {{ font-size: 15px; font-weight: 600; margin-bottom: 10px; color: #334155; display: flex; align-items: center; gap: 8px; }}
+.queue-count {{ font-size: 12px; font-weight: 400; color: #64748b; }}
+.table-wrap {{ overflow-x: auto; border-radius: 10px; border: 1px solid #e2e8f0; }}
+.queue-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+.queue-table th {{ background: #f8fafc; padding: 8px 10px; text-align: left; font-weight: 600; color: #475569; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }}
+.queue-table td {{ padding: 8px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }}
+.queue-table tr:last-child td {{ border-bottom: 0; }}
+.queue-table tr:hover {{ background: #f8fafc; }}
+.item-title {{ max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.item-score {{ font-family: monospace; }}
+.item-time {{ font-size: 12px; color: #64748b; white-space: nowrap; }}
+.item-actions {{ white-space: nowrap; display: flex; gap: 4px; flex-wrap: wrap; }}
+.empty-msg {{ color: #94a3b8; text-align: center; padding: 20px !important; font-style: italic; }}
+.badge {{ display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 600; }}
+.badge-pending-review {{ background: #fef3c7; color: #92400e; }}
+.badge-approved {{ background: #d1fae5; color: #065f46; }}
+.badge-ready-to-post {{ background: #dbeafe; color: #1e40af; }}
+.badge-posted {{ background: #e0e7ff; color: #3730a3; }}
+.badge-rejected {{ background: #fee2e2; color: #991b1b; }}
+.badge-auto-blocked {{ background: #fce7f3; color: #9d174d; }}
+.badge-draft {{ background: #f3f4f6; color: #4b5563; }}
+.status-rejected td {{ opacity: .5; }}
+.status-rejected .item-actions .btn-approve,
+.status-rejected .item-actions .btn-images,
+.status-rejected .item-actions .btn-preview {{ display: none; }}
+.status-posted td {{ opacity: .7; }}
+.status-posted .item-actions .btn-approve,
+.status-posted .item-actions .btn-reject,
+.status-posted .item-actions .btn-images {{ display: none; }}
+@keyframes fadeSlideIn {{
+from {{ opacity: 0; transform: translateY(10px); }}
+to {{ opacity: 1; transform: translateY(0); }}
+}}
+.account-card {{ animation: fadeSlideIn .3s ease both; }}
+.account-card:nth-child(1) {{ animation-delay: 0s; }}
+.account-card:nth-child(2) {{ animation-delay: .05s; }}
+.account-card:nth-child(3) {{ animation-delay: .1s; }}
+.account-card:nth-child(4) {{ animation-delay: .15s; }}
+.account-card:nth-child(5) {{ animation-delay: .2s; }}
+.account-card:nth-child(6) {{ animation-delay: .25s; }}
+.toast {{
+position: fixed;
+bottom: 24px;
+right: 24px;
+background: #1e293b;
+color: #f1f5f9;
+padding: 12px 20px;
+border-radius: 12px;
+font-size: 14px;
+box-shadow: 0 8px 30px rgba(0,0,0,.2);
+z-index: 9999;
+opacity: 0;
+transform: translateY(20px);
+transition: all .3s ease;
+pointer-events: none;
+}}
+.toast.show {{ opacity: 1; transform: translateY(0); }}
+</style>
+</head>
+<body>
+<div class="app-layout">
+<aside class="side">
+<div class="side-brand">🎛️ 控制台 <small>内容生产 Dashboard</small></div>
+<nav>
+  <a class="sidebar-link" href="/free.html" target="_blank" style="border-bottom:1px solid #334155;margin-bottom:8px;padding-bottom:12px;">
+    <span class="sidebar-emoji">✏️</span>
+    <span class="sidebar-name">自由生成内容</span>
+    <span class="sidebar-count">创意</span>
+  </a>
+  {''.join(sidebar_links)}
+</nav>
+</aside>
+<main class="main">
+<div class="hero-header">
+<h1>🎯 内容生产控制台</h1>
+<p>选择账号，生成内容，审核配图，管理发布队列 — 一站式完成。</p>
+<div class="stat-bar">
+<span class="stat-pill total">📦 总计 <b>{total_all}</b></span>
+<span class="stat-pill pending">⏳ 待审核 <b>{pending_all}</b></span>
+<span class="stat-pill approved">✅ 已采用 <b>{approved_all}</b></span>
+<span class="stat-pill posted">🚀 已发布 <b>{posted_all}</b></span>
+<span class="stat-pill rejected">🗑️ 已驳回 <b>{rejected_all}</b></span>
+</div>
+</div>
+<div class="accounts-grid">{''.join(account_cards_html)}</div>
+</main>
+</div>
+<div id="toast" class="toast"></div>
+<script>
+function showToast(msg, isError) {{
+var t = document.getElementById('toast');
+t.textContent = msg;
+t.style.background = isError ? '#dc2626' : '#1e293b';
+t.classList.add('show');
+setTimeout(function() {{ t.classList.remove('show'); }}, 3500);
+}}
+function selectAccount(id) {{
+document.querySelectorAll('.sidebar-link').forEach(function(el) {{ el.classList.remove('active'); }});
+var link = document.querySelector('.sidebar-link[href="#' + id + '"]');
+if (link) link.classList.add('active');
+var card = document.getElementById(id);
+if (card) card.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+}}
+async function parseJsonResponse(resp) {{
+const text = await resp.text();
+try {{ return JSON.parse(text); }}
+catch (err) {{ throw new Error('API 响应异常：' + text.slice(0, 200)); }}
+}}
+async function pollJob(jobId, logEl) {{
+while (true) {{
+const resp = await fetch('/job-status?id=' + encodeURIComponent(jobId));
+const payload = await parseJsonResponse(resp);
+logEl.textContent = (payload.lines || []).join('\\n');
+if (payload.status === 'done') {{
+logEl.textContent += '\\n\\n✅ 生成完成！页面即将刷新...';
+setTimeout(function() {{ location.reload(); }}, 2000);
+return;
+}}
+if (payload.status === 'failed') {{
+logEl.textContent += '\\n\\n❌ 生成失败，请看上方错误信息。';
+return;
+}}
+await new Promise(function(resolve) {{ setTimeout(resolve, 1500); }});
+}}
+}}
+var generating = {{}};
+async function generateContent(idx) {{
+if (generating[idx]) return;
+generating[idx] = true;
+var btn = document.querySelectorAll('.btn-generate')[idx];
+var log = document.getElementById('generate-log-' + idx);
+if (!btn || !log) {{ generating[idx] = false; return; }}
+btn.disabled = true;
+btn.innerHTML = '<span class="btn-icon">⏳</span> 生成中...';
+log.style.display = 'block';
+log.textContent = '正在创建生成任务...';
+var params = new URLSearchParams({{ async: '1' }});
+var card = document.querySelectorAll('.account-card')[idx];
+var nameEl = card ? card.querySelector('.card-name') : null;
+var accountName = nameEl ? nameEl.textContent.trim() : '';
+if (accountName) params.set('account', accountName);
+try {{
+var resp = await fetch('/generate?' + params.toString());
+var payload = await parseJsonResponse(resp);
+if (!resp.ok) throw new Error(payload.error || '创建任务失败');
+await pollJob(payload.job_id, log);
+}} catch (err) {{
+log.textContent = '生成失败：' + err.message;
+showToast('生成失败：' + err.message, true);
+}} finally {{
+btn.disabled = false;
+btn.innerHTML = '<span class="btn-icon">✨</span> 生成内容';
+generating[idx] = false;
+}}
+}}
+var footballGenerating = {{}};
+async function generateFootball(idx) {{
+if (footballGenerating[idx]) return;
+footballGenerating[idx] = true;
+var btn = document.querySelectorAll('.btn-football')[idx];
+var textarea = document.getElementById('football-knowledge-' + idx);
+var log = document.getElementById('football-log-' + idx);
+if (!btn || !log) {{ footballGenerating[idx] = false; return; }}
+var knowledge = textarea ? textarea.value.trim() : '';
+btn.disabled = true;
+btn.innerHTML = '<span class="btn-icon">⏳</span> 生成中...';
+log.style.display = 'block';
+log.textContent = '正在创建足球分析任务...';
+var card = document.querySelectorAll('.account-card')[idx];
+var nameEl = card ? card.querySelector('.card-name') : null;
+var accountName = nameEl ? nameEl.textContent.trim() : '';
+var params = new URLSearchParams({{ account: accountName, async: '1' }});
+if (knowledge) params.set('knowledge', knowledge);
+try {{
+var resp = await fetch('/generate-football?' + params.toString());
+var payload = await parseJsonResponse(resp);
+if (!resp.ok) throw new Error(payload.error || '创建足球分析任务失败');
+await pollJob(payload.job_id, log);
+}} catch (err) {{
+log.textContent = '生成足球分析失败：' + err.message;
+showToast('生成足球分析失败：' + err.message, true);
+}} finally {{
+btn.disabled = false;
+btn.innerHTML = '<span class="btn-icon">⚡</span> 生成足球分析';
+footballGenerating[idx] = false;
+}}
+}}
+async function setStatus(itemId, newStatus) {{
+var statusNames = {{ approved: '已采用', rejected: '已驳回' }};
+try {{
+var resp = await fetch('/status?id=' + encodeURIComponent(itemId) + '&status=' + encodeURIComponent(newStatus));
+var text = await resp.text();
+if (!resp.ok) throw new Error(text);
+showToast(text);
+var row = document.querySelector('tr[data-item-id="' + itemId + '"]');
+if (row) {{
+row.className = row.className.replace(/status-\\S+/g, '') + ' status-' + newStatus;
+var badge = row.querySelector('.badge');
+if (badge) {{
+badge.className = 'badge badge-' + newStatus;
+badge.textContent = statusNames[newStatus] || newStatus;
+}}
+}}
+}} catch (err) {{ showToast('操作失败：' + err.message, true); }}
+}}
+async function reImage(itemId) {{
+try {{
+var resp = await fetch('/action?id=' + encodeURIComponent(itemId) + '&action=images');
+var text = await resp.text();
+if (!resp.ok) throw new Error(text);
+showToast('✅ ' + text);
+}} catch (err) {{ showToast('配图失败：' + err.message, true); }}
+}}
+// Smart auto-refresh: skip if any job log is visible or user interacted recently
+var lastActivity = Date.now();
+document.addEventListener('mousedown', function() {{ lastActivity = Date.now(); }});
+document.addEventListener('keydown', function() {{ lastActivity = Date.now(); }});
+setInterval(function() {{
+  var activeLogs = document.querySelectorAll('.job-log');
+  var hasActiveJob = false;
+  for (var i = 0; i < activeLogs.length; i++) {{
+    if (activeLogs[i].style.display === 'block') {{ hasActiveJob = true; break; }}
+  }}
+  if (hasActiveJob) return;
+  // Don't reload if user interacted within last 30 seconds
+  if (Date.now() - lastActivity < 30000) return;
+  location.reload();
+}}, 120000);
+</script>
+</body>
+</html>"""
+
+    portal_file = PREVIEW_DIR / "index.html"
+    portal_file.write_text(portal_html, encoding="utf-8")
+    portal_url = build_preview_url(config, portal_file)
+    build_free_content_page(config, queue)
+    return {"portal_file": str(portal_file), "portal_url": portal_url}
+
+
+def ensure_binary(binary_name: str) -> str:
+    candidate = Path(str(binary_name).strip())
+    if candidate.is_file():
+        return str(candidate)
+    path = shutil.which(str(binary_name))
+    if not path:
+        raise ValueError(
+            f"Required binary not found: {binary_name}. "
+            f"Install it on server first."
+        )
+    return path
+
+
+def run_command(command: list[str], cwd: str | None = None) -> None:
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        detail = stderr or stdout or "unknown error"
+        raise RuntimeError(f"Command failed: {' '.join(command)} | {detail[:500]}")
+
+
+def ffprobe_duration_seconds(audio_file: Path) -> float:
+    ensure_binary("ffprobe")
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(audio_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return 0.0
+    try:
+        return max(0.0, float((result.stdout or "0").strip()))
+    except ValueError:
+        return 0.0
+
+
+def format_srt_time(seconds: float) -> str:
+    millis = max(0, int(round(seconds * 1000)))
+    hours = millis // 3600000
+    minutes = (millis % 3600000) // 60000
+    secs = (millis % 60000) // 1000
+    ms = millis % 1000
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
+
+
+def write_srt(cues: list[tuple[float, float, str]], path: Path) -> None:
+    lines: list[str] = []
+    for idx, (start, end, text) in enumerate(cues, start=1):
+        clean_text = text.replace("\n", " ").strip()
+        lines.extend(
+            [
+                str(idx),
+                f"{format_srt_time(start)} --> {format_srt_time(end)}",
+                clean_text,
+                "",
+            ]
+        )
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def render_sample_video_for_item(config: dict[str, Any], item: dict[str, Any]) -> dict[str, str]:
+    sample_cfg = config.get("sample_video", {})
+    if not sample_cfg.get("enabled", True):
+        return {"status": "disabled", "message": "sample_video disabled"}
+
+    ensure_binary("ffmpeg")
+    ensure_binary("ffprobe")
+    tts_engine = str(sample_cfg.get("tts_engine", "edge-tts")).strip().lower()
+    tts_binary = (
+        ensure_binary(sample_cfg.get("tts_binary", "edge-tts"))
+        if tts_engine == "edge-tts"
+        else ensure_binary(sample_cfg.get("tts_binary", "espeak-ng"))
+    )
+    segment_ext = ".mp3" if tts_engine == "edge-tts" else ".wav"
+
+    queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
+    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+    content = extract_content_payload(item)
+    segments = split_video_segments(
+        content.get("body_markdown", "") or content.get("body_preview", ""),
+        limit=int(sample_cfg.get("max_segments", 8)),
+    )
+    if not segments:
+        raise ValueError("No script segments available for sample rendering.")
+
+    media_dir = PREVIEW_DIR / "media" / item_date
+    media_dir.mkdir(parents=True, exist_ok=True)
+    out_video = media_dir / f"{queue_id}.mp4"
+    out_audio = media_dir / f"{queue_id}.wav"
+
+    segment_gap = float(sample_cfg.get("segment_gap_seconds", 0.25))
+    lead_in = float(sample_cfg.get("lead_in_seconds", 0.4))
+    min_duration = float(sample_cfg.get("min_duration_seconds", 8.0))
+    width = int(sample_cfg.get("width", 720))
+    height = int(sample_cfg.get("height", 1280))
+    fps = int(sample_cfg.get("fps", 25))
+    bg_color = str(sample_cfg.get("background_color", "#1e3a8a"))
+
+    with tempfile.TemporaryDirectory(prefix=f"sample-{queue_id}-") as temp_dir:
+        temp_path = Path(temp_dir)
+        audio_segments: list[Path] = []
+        cues: list[tuple[float, float, str]] = []
+        current = lead_in
+        for idx, segment in enumerate(segments):
+            segment_text = segment.strip()[:120]
+            if not segment_text:
+                continue
+            segment_audio = temp_path / f"segment_{idx:02d}{segment_ext}"
+            synthesize_tts_segment(segment_text, segment_audio, sample_cfg, tts_binary)
+            duration = ffprobe_duration_seconds(segment_audio)
+            if duration < 0.1:
+                continue
+            audio_segments.append(segment_audio)
+            cues.append((current, current + duration, segment_text))
+            current += duration + segment_gap
+
+        if not audio_segments:
+            raise ValueError("TTS generated no usable audio segments.")
+
+        title_text = str(item.get("title", "")).strip()
+        if title_text:
+            title_dur = min(3.0, max(1.5, len(title_text) / 22.0))
+            cues.insert(0, (0.2, 0.2 + title_dur, title_text[:80]))
+
+        concat_file = temp_path / "audio_concat.txt"
+        concat_file.write_text(
+            "\n".join([f"file '{segment.as_posix()}'" for segment in audio_segments]),
+            encoding="utf-8",
+        )
+        narration_audio = temp_path / "narration.wav"
+        run_command(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-c:a",
+                "pcm_s16le",
+                str(narration_audio),
+            ]
+        )
+
+        total_duration = max(min_duration, current + 0.8)
+        subtitles_file = temp_path / "subtitles.srt"
+        write_srt(cues, subtitles_file)
+
+        rendered_video = temp_path / "preview.mp4"
+        subtitle_filter = "subtitles=subtitles.srt"
+        run_command(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c={bg_color}:s={width}x{height}:r={fps}:d={total_duration:.2f}",
+                "-i",
+                str(narration_audio),
+                "-filter_complex",
+                (
+                    f"[1:a]showwaves=s={width}x220:mode=line:rate={fps}:colors=0x93c5fd[sw];"
+                    f"[0:v][sw]overlay=0:H-h-70,{subtitle_filter}[v]"
+                ),
+                "-map",
+                "[v]",
+                "-map",
+                "1:a",
+                "-shortest",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "24",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                str(rendered_video),
+            ],
+            cwd=temp_dir,
+        )
+        shutil.move(str(rendered_video), str(out_video))
+        shutil.move(str(narration_audio), str(out_audio))
+
+    item["sample_video_file"] = str(out_video)
+    item["sample_video_url"] = build_preview_url(config, out_video)
+    item["sample_audio_file"] = str(out_audio)
+    item["updated_at"] = now_local().isoformat()
+    return {
+        "status": "ok",
+        "video_file": str(out_video),
+        "video_url": item["sample_video_url"],
+    }
+
+
+def render_samples_for_items(
+    config: dict[str, Any], items: list[dict[str, Any]], *, include_blocked: bool = False
+) -> list[dict[str, str]]:
+    if local_gpu_enabled(config):
+        print("[INFO] local_gpu.enabled=true, skipping server render-samples.")
+        return export_video_jobs_for_items(
+            config,
+            filter_queue_items(
+                items,
+                include_blocked=include_blocked,
+                post_format="short_video_script",
+            ),
+        )
+    results: list[dict[str, str]] = []
+    for item in items:
+        if item.get("post_format") != "short_video_script":
+            continue
+        if not include_blocked and (
+            item.get("status") == "auto_blocked" or item.get("publish_advice") == "禁发"
+        ):
+            continue
+        try:
+            result = render_sample_video_for_item(config, item)
+            result["id"] = str(item.get("id", ""))
+            result["platform"] = str(item.get("platform", ""))
+            results.append(result)
+            print(
+                f"[OK] sample video rendered {item.get('id')} -> {result.get('video_file','')}"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            item["notes"] = (str(item.get("notes", "")).strip() + f" | 样片生成失败: {exc}").strip(" |")
+            item["updated_at"] = now_local().isoformat()
+            print(f"[WARN] sample video failed {item.get('id')}: {exc}")
+    return results
+
+
+def build_queue_summary(queue: list[dict[str, Any]]) -> str:
+    if not queue:
+        return "Queue is empty."
+    grouped: dict[str, int] = {}
+    for item in queue:
+        grouped[item["status"]] = grouped.get(item["status"], 0) + 1
+    lines = [
+        f"Queue summary ({now_local().strftime('%Y-%m-%d %H:%M')}):",
+        "",
+    ]
+    for status, count in sorted(grouped.items()):
+        lines.append(f"- {status}: {count}")
+    advice_grouped: dict[str, int] = {}
+    for item in queue:
+        advice = item.get("publish_advice", "")
+        if advice:
+            advice_grouped[advice] = advice_grouped.get(advice, 0) + 1
+    if advice_grouped:
+        lines.append("")
+        lines.append("Quality advice summary:")
+        for advice, count in sorted(advice_grouped.items()):
+            lines.append(f"- {advice}: {count}")
+    blocked = [item for item in queue if item.get("status") == "auto_blocked"]
+    if blocked:
+        lines.append("")
+        lines.append(f"Auto-blocked items: {len(blocked)}")
+        for item in blocked[:8]:
+            lines.append(
+                (
+                    f"- {item.get('id', '')} | {item.get('platform', '')} | "
+                    f"{item.get('quality_badge', '🔴')}{item.get('total_score', 0)} | "
+                    f"{item.get('quality_reason', '')[:60]}"
+                )
+            )
+    lines.append("")
+    lines.append("Top pending items:")
+    pending = [item for item in queue if item["status"] in {"pending_review", "approved"}][:8]
+    if not pending:
+        lines.append("- none")
+    else:
+        for item in pending:
+            lines.append(
+                (
+                    f"- {item['id']} | {item['platform']} | "
+                    f"{item.get('quality_badge', '⚪')}{item.get('total_score', 0)} | "
+                    f"{item.get('publish_time', '--')} | {item.get('title', '')[:36]}"
+                )
+            )
+    return "\n".join(lines)
+
+
+def send_email_digest(config: dict[str, Any], body: str, subject: str | None = None) -> bool:
+    email_cfg = config.get("notification", {}).get("email", {})
+    if not email_cfg.get("enabled", False):
+        print("[INFO] Email digest disabled.")
+        return False
+
+    password = os.getenv(email_cfg.get("password_env", "SMTP_PASSWORD"), "")
+    if not password:
+        raise ValueError("SMTP password env var is missing.")
+
+    msg = MIMEText(body, _subtype="plain", _charset="utf-8")
+    msg["Subject"] = subject or f"[ContentOps] Queue Digest {now_local().strftime('%Y-%m-%d')}"
+    msg["From"] = email_cfg["sender"]
+    msg["To"] = ", ".join(email_cfg.get("receivers", []))
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL(
+        email_cfg["smtp_host"], int(email_cfg.get("smtp_port", 465)), context=context
+    ) as smtp:
+        smtp.login(email_cfg["sender"], password)
+        smtp.sendmail(email_cfg["sender"], email_cfg.get("receivers", []), msg.as_string())
+    print("[OK] digest email sent")
+    return True
+
+
+def send_feishu_webhook(config: dict[str, Any], body: str) -> bool:
+    feishu_cfg = config.get("notification", {}).get("feishu", {})
+    if not feishu_cfg.get("enabled", False):
+        print("[INFO] Feishu webhook disabled.")
+        return False
+    webhook = feishu_cfg.get("webhook_url", "").strip()
+    if not webhook:
+        raise ValueError("Feishu webhook is enabled but webhook_url is missing.")
+
+    payload = {"msg_type": "text", "content": {"text": body}}
+    response = http_post_json(webhook, payload, timeout=20)
+    if response.get("StatusCode") not in (0, None):
+        raise ValueError(f"Feishu webhook failed: {response}")
+    print("[OK] feishu notification sent")
+    return True
+
+
+def parse_publish_time_today(raw_time: Any) -> dt.datetime | None:
+    text = str(raw_time or "").strip()
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    now = now_local()
+    return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def pick_reminder_item(queue: list[dict[str, Any]], platform_cfg: dict[str, Any], date: str) -> dict[str, Any] | None:
+    account = str(platform_cfg.get("account_name", "")).strip()
+    platform = str(platform_cfg.get("platform", "")).strip()
+    candidates = [
+        item
+        for item in queue
+        if item.get("date") == date
+        and item.get("account_name") == account
+        and item.get("platform") == platform
+        and item.get("status") in {"approved", "ready_to_post", "pending_review"}
+        and item.get("publish_advice") != "禁发"
+    ]
+    if not candidates:
+        return None
+    status_rank = {"approved": 0, "ready_to_post": 1, "pending_review": 2}
+    return sorted(
+        candidates,
+        key=lambda item: (
+            status_rank.get(str(item.get("status", "")), 9),
+            -safe_int(item.get("total_score", 0), default=0),
+            str(item.get("updated_at", "")),
+        ),
+    )[0]
+
+
+def build_publish_reminders(
+    config: dict[str, Any],
+    queue: list[dict[str, Any]],
+    *,
+    window_minutes: int = 20,
+    include_all: bool = False,
+) -> list[dict[str, Any]]:
+    now = now_local()
+    date = now.strftime("%Y-%m-%d")
+    reminders: list[dict[str, Any]] = []
+    for platform_cfg in config.get("platforms", []):
+        publish_at = parse_publish_time_today(platform_cfg.get("publish_time"))
+        if publish_at is None:
+            continue
+        delta_minutes = (publish_at - now).total_seconds() / 60.0
+        if not include_all and (delta_minutes < -5 or delta_minutes > window_minutes):
+            continue
+        item = pick_reminder_item(queue, platform_cfg, date)
+        reminders.append(
+            {
+                "date": date,
+                "account_name": platform_cfg.get("account_name", ""),
+                "platform": platform_cfg.get("platform", ""),
+                "platform_label": platform_label(platform_cfg.get("platform", "")),
+                "publish_time": platform_cfg.get("publish_time", ""),
+                "minutes_until": round(delta_minutes, 1),
+                "item_id": item.get("id") if item else "",
+                "title": item.get("title") if item else "暂无可发布内容",
+                "status": status_label(item.get("status")) if item else "无内容",
+                "score": item.get("total_score") if item else "",
+                "preview_url": item.get("preview_url", "") if item else "",
+                "asset_pack_url": item.get("asset_pack_url", "") if item else "",
+                "next_step": next_step_for_item(item) if item else "请先进入账号工作台生成或选用内容。",
+            }
+        )
+    return reminders
+
+
+def reminder_key(reminder: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(reminder.get("date", "")),
+            str(reminder.get("account_name", "")),
+            str(reminder.get("platform", "")),
+            str(reminder.get("publish_time", "")),
+            str(reminder.get("item_id", "")),
+        ]
+    )
+
+
+def format_publish_reminders(reminders: list[dict[str, Any]]) -> str:
+    lines = [
+        f"发布提醒 {now_local().strftime('%Y-%m-%d %H:%M')}",
+        "",
+    ]
+    for reminder in reminders:
+        lines.extend(
+            [
+                f"账号：{reminder.get('account_name')}（{reminder.get('platform_label')}）",
+                f"发布时间：{reminder.get('publish_time')}（约 {reminder.get('minutes_until')} 分钟后）",
+                f"内容：{reminder.get('title')}",
+                f"状态/评分：{reminder.get('status')} / {reminder.get('score')}",
+                f"下一步：{reminder.get('next_step')}",
+                f"预览：{reminder.get('preview_url')}",
+                f"素材包：{reminder.get('asset_pack_url')}",
+                "",
+            ]
+        )
+    return "\n".join(lines).strip()
+
+
+def append_reminder_log(message: str) -> None:
+    REMINDER_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with REMINDER_LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(message.rstrip() + "\n\n")
+
+
+def send_publish_reminder_notifications(config: dict[str, Any], body: str) -> list[str]:
+    results: list[str] = []
+    try:
+        if send_feishu_webhook(config, body):
+            results.append("feishu:ok")
+    except Exception as exc:  # pylint: disable=broad-except
+        results.append(f"feishu:failed:{exc}")
+    try:
+        if send_email_digest(
+            config,
+            body,
+            subject=f"[ContentOps] 发布提醒 {now_local().strftime('%Y-%m-%d %H:%M')}",
+        ):
+            results.append("email:ok")
+    except Exception as exc:  # pylint: disable=broad-except
+        results.append(f"email:failed:{exc}")
+    if not results:
+        results.append("no_channel_enabled")
+    return results
+
+
+def get_feishu_tenant_access_token(bitable_cfg: dict[str, Any]) -> str:
+    app_id = os.getenv(bitable_cfg.get("app_id_env", "FEISHU_APP_ID"), "")
+    app_secret = os.getenv(bitable_cfg.get("app_secret_env", "FEISHU_APP_SECRET"), "")
+    if not app_id or not app_secret:
+        raise ValueError("Feishu Bitable app credentials env vars are missing.")
+
+    payload = {"app_id": app_id, "app_secret": app_secret}
+    response = http_post_json(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        payload,
+        timeout=20,
+    )
+    if response.get("code", 0) != 0:
+        raise ValueError(f"Feishu auth failed: {response}")
+    token = response.get("tenant_access_token", "")
+    if not token:
+        raise ValueError("Feishu auth succeeded but tenant_access_token is empty.")
+    return token
+
+
+def list_feishu_field_names(token: str, app_token: str, table_id: str) -> set[str]:
+    url = (
+        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/"
+        f"{table_id}/fields?page_size=500"
+    )
+    request = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {token}"}, method="GET"
+    )
+    with urllib.request.urlopen(request, timeout=25) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    if data.get("code", 0) != 0:
+        raise ValueError(f"list fields failed: {data}")
+    items = data.get("data", {}).get("items", [])
+    return {str(item.get("field_name", "")).strip() for item in items if item.get("field_name")}
+
+
+def ensure_feishu_fields(token: str, app_token: str, table_id: str) -> None:
+    existing = list_feishu_field_names(token, app_token, table_id)
+    created: list[str] = []
+    for field_name, definition in FEISHU_FIELD_DEFINITIONS.items():
+        if field_name in existing:
+            continue
+        payload: dict[str, Any] = {"field_name": field_name, "type": definition["type"]}
+        if "property" in definition:
+            payload["property"] = definition["property"]
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/"
+            f"{table_id}/fields"
+        )
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=25) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if data.get("code", 0) != 0:
+            raise ValueError(f"create field failed {field_name}: {data}")
+        created.append(field_name)
+    if created:
+        print(f"[OK] Feishu fields created: {', '.join(created)}")
+
+
+def to_feishu_fields(item: dict[str, Any]) -> dict[str, Any]:
+    hashtags = item.get("hashtags", [])
+    hashtags_text = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags)
+    content = extract_content_payload(item)
+    return {
+        "QueueID": item.get("id", ""),
+        "Date": item.get("date", ""),
+        "Platform": item.get("platform", ""),
+        "Account": item.get("account_name", ""),
+        "Track": item.get("track", ""),
+        "Status": item.get("status", ""),
+        "PublishTime": item.get("publish_time", ""),
+        "Title": item.get("title", ""),
+        "Hashtags": hashtags_text,
+        "SourceTopic": item.get("source_topic", ""),
+        "SourceLink": item.get("source_link", ""),
+        "ContentFile": item.get("content_file", ""),
+        "PreviewFile": item.get("preview_file", ""),
+        "PreviewURL": item.get("preview_url", ""),
+        "SampleVideoFile": item.get("sample_video_file", ""),
+        "SampleVideoURL": item.get("sample_video_url", ""),
+        "SampleAudioFile": item.get("sample_audio_file", ""),
+        "IllustrationFiles": "\n".join(item.get("illustration_files", []))
+        if isinstance(item.get("illustration_files"), list)
+        else str(item.get("illustration_files", "")),
+        "IllustrationURLs": "\n".join(item.get("illustration_urls", []))
+        if isinstance(item.get("illustration_urls"), list)
+        else str(item.get("illustration_urls", "")),
+        "CloudVideoProvider": item.get("cloud_video_provider", ""),
+        "CloudImageModel": item.get("cloud_image_model", ""),
+        "CloudVideoModel": item.get("cloud_video_model", ""),
+        "CloudVideoPredictionID": item.get("cloud_video_prediction_id", ""),
+        "HookText": content["hook_text"][:2000],
+        "BodyPreview": content["body_preview"][:1200],
+        "ContentMarkdown": content["content_markdown"][:8000],
+        "CoverText": content["cover_text"][:500],
+        "PostURL": item.get("post_url") or "",
+        "UpdatedAt": item.get("updated_at", ""),
+        "Notes": item.get("notes", ""),
+        "HookScore": clamp_score(item.get("hook_score", 0)),
+        "StructureScore": clamp_score(item.get("structure_score", 0)),
+        "PlatformFitScore": clamp_score(item.get("platform_fit_score", 0)),
+        "CommercialScore": clamp_score(item.get("commercial_score", 0)),
+        "ComplianceScore": clamp_score(item.get("compliance_score", 0)),
+        "TotalScore": max(0, min(100, safe_int(item.get("total_score", 0), default=0))),
+        "QualityLevel": item.get("quality_level", ""),
+        "QualityBadge": item.get("quality_badge", "⚪"),
+        "PublishAdvice": item.get("publish_advice", "需改"),
+        "QualityReason": item.get("quality_reason", ""),
+    }
+
+
+def sync_queue_to_feishu_bitable(config: dict[str, Any], queue: list[dict[str, Any]]) -> bool:
+    bitable_cfg = config.get("feishu_bitable", {})
+    if not bitable_cfg.get("enabled", False):
+        print("[INFO] Feishu Bitable sync disabled.")
+        return False
+
+    app_token = bitable_cfg.get("app_token", "").strip()
+    table_id = bitable_cfg.get("table_id", "").strip()
+    if not app_token or not table_id:
+        print(
+            "[WARN] Feishu Bitable enabled but app_token/table_id is missing. "
+            "Fill feishu_bitable.app_token and feishu_bitable.table_id in config.json."
+        )
+        return False
+
+    token = get_feishu_tenant_access_token(bitable_cfg)
+    if bitable_cfg.get("auto_create_fields", True):
+        ensure_feishu_fields(token, app_token, table_id)
+    headers = {"Authorization": f"Bearer {token}"}
+    base_url = (
+        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    )
+    mapping: dict[str, str] = load_json(FEISHU_MAPPING_FILE, {})
+    created = 0
+    updated = 0
+
+    for item in queue:
+        queue_id = item["id"]
+        fields = to_feishu_fields(item)
+        record_id = mapping.get(queue_id, "")
+        try:
+            if record_id:
+                request = urllib.request.Request(
+                    f"{base_url}/{record_id}",
+                    data=json.dumps({"fields": fields}).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": headers["Authorization"],
+                    },
+                    method="PUT",
+                )
+                with urllib.request.urlopen(request, timeout=25) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                if data.get("code", 0) != 0:
+                    raise ValueError(f"update failed: {data}")
+                updated += 1
+            else:
+                data = http_post_json(base_url, {"fields": fields}, headers=headers, timeout=25)
+                if data.get("code", 0) != 0:
+                    raise ValueError(f"create failed: {data}")
+                new_id = data.get("data", {}).get("record", {}).get("record_id", "")
+                if new_id:
+                    mapping[queue_id] = new_id
+                created += 1
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")[:500]
+            print(f"[WARN] Feishu Bitable sync skipped for {queue_id}: http={exc.code} {detail}")
+        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, ValueError) as exc:
+            print(f"[WARN] Feishu Bitable sync skipped for {queue_id}: {exc}")
+
+    save_json(FEISHU_MAPPING_FILE, mapping)
+    print(f"[OK] Feishu Bitable sync done. created={created}, updated={updated}")
+    return True
+
+
+def get_platform_adapter_cfg(config: dict[str, Any], platform: str) -> dict[str, Any]:
+    adapters = config.get("publish_adapters", {})
+    return adapters.get(platform, {})
+
+
+def wechat_get_access_token(adapter_cfg: dict[str, Any]) -> str:
+    appid = os.getenv(adapter_cfg.get("appid_env", "WECHAT_OFFICIAL_APPID"), "")
+    appsecret = os.getenv(
+        adapter_cfg.get("appsecret_env", "WECHAT_OFFICIAL_APPSECRET"), ""
+    )
+    if not appid or not appsecret:
+        raise ValueError("Missing WeChat app credentials env vars.")
+
+    params = urllib.parse.urlencode(
+        {
+            "grant_type": "client_credential",
+            "appid": appid,
+            "secret": appsecret,
+        }
+    )
+    response = http_get_json(f"https://api.weixin.qq.com/cgi-bin/token?{params}", timeout=20)
+    if response.get("errcode", 0) not in (0, None):
+        raise ValueError(f"WeChat token request failed: {response}")
+    token = response.get("access_token", "")
+    if not token:
+        raise ValueError("WeChat token response missing access_token.")
+    return token
+
+
+def read_markdown_content(path: str) -> str:
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Content file not found: {path}")
+    return file_path.read_text(encoding="utf-8")
+
+
+def auto_publish_wechat_official(
+    item: dict[str, Any], adapter_cfg: dict[str, Any]
+) -> tuple[str, str]:
+    if not adapter_cfg.get("enabled", False):
+        return (
+            "auto_publish_pending_integration",
+            "WeChat adapter is disabled in publish_adapters.wechat_official.",
+        )
+
+    thumb_media_id = adapter_cfg.get("thumb_media_id", "").strip()
+    if not thumb_media_id:
+        return (
+            "auto_publish_failed",
+            "Missing thumb_media_id for WeChat draft add API.",
+        )
+
+    token = wechat_get_access_token(adapter_cfg)
+    markdown_body = read_markdown_content(item.get("content_file", ""))
+    content_html = markdown_to_simple_html(markdown_body)
+    digest_limit = int(adapter_cfg.get("digest_max_length", 110))
+    digest = strip_markdown(markdown_body)[:digest_limit]
+    author = adapter_cfg.get("author", item.get("account_name", ""))
+
+    draft_payload = {
+        "articles": [
+            {
+                "title": item.get("title", "")[:64],
+                "author": author,
+                "digest": digest,
+                "content": content_html,
+                "content_source_url": item.get("source_link", ""),
+                "thumb_media_id": thumb_media_id,
+                "need_open_comment": int(adapter_cfg.get("need_open_comment", 0)),
+                "only_fans_can_comment": int(
+                    adapter_cfg.get("only_fans_can_comment", 0)
+                ),
+            }
+        ]
+    }
+    draft_url = f"https://api.weixin.qq.com/cgi-bin/draft/add?access_token={token}"
+    draft_response = http_post_json(draft_url, draft_payload, timeout=25)
+    if draft_response.get("errcode", 0) not in (0, None):
+        return ("auto_publish_failed", f"WeChat draft add failed: {draft_response}")
+    media_id = draft_response.get("media_id", "")
+    if not media_id:
+        return ("auto_publish_failed", "WeChat draft add missing media_id.")
+
+    if not adapter_cfg.get("submit_to_publish", True):
+        return ("auto_draft_created", f"WeChat draft created. media_id={media_id}")
+
+    submit_url = f"https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token={token}"
+    submit_response = http_post_json(submit_url, {"media_id": media_id}, timeout=25)
+    if submit_response.get("errcode", 0) not in (0, None):
+        return ("auto_publish_failed", f"WeChat submit failed: {submit_response}")
+
+    publish_id = submit_response.get("publish_id", "")
+    if publish_id:
+        return (
+            "auto_publish_submitted",
+            f"WeChat submitted. media_id={media_id}, publish_id={publish_id}",
+        )
+    return ("auto_publish_submitted", f"WeChat submitted. media_id={media_id}")
+
+
+def run_notify(config: dict[str, Any], queue: list[dict[str, Any]]) -> None:
+    summary = build_queue_summary(queue)
+    sent_any = False
+    try:
+        sent_any = send_feishu_webhook(config, summary) or sent_any
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] Feishu notify failed: {exc}")
+    try:
+        sent_any = send_email_digest(config, summary) or sent_any
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] Email notify failed: {exc}")
+    if not sent_any:
+        print("[INFO] No notification channel enabled.")
+
+
+def command_plan_day(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    date = args.date or now_local().strftime("%Y-%m-%d")
+    per_track_limit = int(config.get("generation", {}).get("topics_per_track", 6))
+
+    tracks: dict[str, Any] = config.get("tracks", {})
+    platforms: list[dict[str, Any]] = config.get("platforms", [])
+    if not tracks or not platforms:
+        raise ValueError("Config missing tracks/platforms.")
+
+    track_filter = (args.track or "").strip()
+    if track_filter:
+        if track_filter not in tracks:
+            raise ValueError(f"Unknown track: {track_filter}")
+        platforms = [p for p in platforms if p.get("track") == track_filter]
+        if not platforms:
+            print(f"[WARN] No platforms found for track={track_filter}, nothing to do.")
+            return
+
+    track_topics: dict[str, list[dict[str, Any]]] = {}
+    for track_name, track_cfg in tracks.items():
+        topics = collect_track_topics(track_name, track_cfg, per_track_limit)
+        track_topics[track_name] = topics
+        save_json(DATA_DIR / date / f"topics_{track_name}.json", topics)
+        print(f"[INFO] {track_name}: collected {len(topics)} topics")
+
+    queue = load_queue()
+    new_items = 0
+    newly_created_items: list[dict[str, Any]] = []
+    track_topic_pools: dict[str, list[dict[str, Any]]] = {}
+
+    for platform_cfg in platforms:
+        track_name = platform_cfg["track"]
+        topics = track_topics.get(track_name, [])
+        if not topics:
+            print(f"[WARN] No topics for track={track_name}, skip {platform_cfg['platform']}")
+            continue
+
+        if track_name not in track_topic_pools:
+            need = sum(1 for cfg in platforms if cfg.get("track") == track_name)
+            track_topic_pools[track_name] = select_topics_for_generation(
+                topics, queue, track_name=track_name, count=max(1, need)
+            )
+        if not track_topic_pools[track_name]:
+            print(f"[WARN] No fresh topics left for track={track_name}, skip {platform_cfg['platform']}")
+            continue
+        topic = track_topic_pools[track_name].pop(0)
+
+        queue_item = build_queue_item(
+            config, date, platform_cfg, tracks[track_name], track_name, topic
+        )
+        generate_preview_for_item(config, queue_item)
+        queue.append(queue_item)
+        newly_created_items.append(queue_item)
+        new_items += 1
+        print(
+            (
+                f"[OK] queued {platform_cfg['platform']} -> {queue_item['id']} "
+                f"{queue_item['quality_badge']}{queue_item['total_score']} "
+                f"({queue_item['title'][:38]})"
+            )
+        )
+
+    guard_result = apply_quality_guard(config, queue)
+    if guard_result["changed"]:
+        print(
+            f"[INFO] Quality guard auto-blocked {len(guard_result['blocked_items'])} item(s)."
+        )
+
+    preview_index = build_preview_index(config, newly_created_items, date)
+    if preview_index["index_file"]:
+        print(f"[OK] Preview index: {preview_index['index_file']}")
+        if preview_index["index_url"]:
+            print(f"[OK] Preview URL: {preview_index['index_url']}")
+    accounts_index = build_accounts_index(config, queue, date)
+    if accounts_index["index_file"]:
+        print(f"[OK] Accounts index: {accounts_index['index_file']}")
+        if accounts_index["index_url"]:
+            print(f"[OK] Accounts URL: {accounts_index['index_url']}")
+    dashboard_index = build_dashboard_index(config, queue, date)
+    if dashboard_index["index_file"]:
+        print(f"[OK] Dashboard index: {dashboard_index['index_file']}")
+    preview_portal = build_preview_portal(config)
+    if preview_portal["portal_file"]:
+        print(f"[OK] Preview portal: {preview_portal['portal_file']}")
+        if preview_portal["portal_url"]:
+            print(f"[OK] Preview portal URL: {preview_portal['portal_url']}")
+
+    sample_cfg = config.get("sample_video", {})
+    local_cfg = config.get("local_gpu", {})
+    cloud_cfg = config.get("cloud_media", {})
+    sample_results: list[dict[str, str]] = []
+    if local_cfg.get("enabled", False) and local_cfg.get("auto_export_on_plan_day", True):
+        sample_results = export_video_jobs_for_items(config, newly_created_items)
+        if sample_results:
+            print(f"[OK] Video jobs exported for local GPU: {len(sample_results)}")
+    elif sample_cfg.get("auto_render_on_plan_day", False):
+        sample_results = render_samples_for_items(
+            config,
+            newly_created_items,
+            include_blocked=bool(sample_cfg.get("include_blocked", False)),
+        )
+        if sample_results:
+            print(f"[OK] Sample videos rendered: {len(sample_results)}")
+
+    if cloud_cfg.get("enabled", False):
+        image_cfg = cloud_cfg.get("image", {})
+        video_cfg = cloud_cfg.get("video", {})
+        if image_cfg.get("enabled", False) and image_cfg.get("auto_render_on_plan_day", False):
+            image_results = render_cloud_illustrations_for_items(config, newly_created_items)
+            ok_count = len([x for x in image_results if x.get("status") == "ok"])
+            if ok_count:
+                print(f"[OK] Cloud illustrations rendered: {ok_count}")
+        if video_cfg.get("enabled", False) and video_cfg.get("auto_render_on_plan_day", False):
+            video_results = render_cloud_videos_for_items(
+                config,
+                newly_created_items,
+                include_blocked=bool(video_cfg.get("include_blocked", False)),
+            )
+            ok_count = len([x for x in video_results if x.get("status") == "ok"])
+            if ok_count:
+                print(f"[OK] Cloud videos rendered: {ok_count}")
+
+    save_queue(queue)
+    print(f"[DONE] Created {new_items} queue items.")
+
+    notified = False
+    guard_cfg = config.get("quality_guard", {})
+    if guard_result["blocked_items"] and guard_cfg.get("notify_on_block", True):
+        alert_body = build_block_alert(guard_result["blocked_items"])
+        try:
+            notified = send_feishu_webhook(config, alert_body) or notified
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[WARN] block alert feishu failed: {exc}")
+        try:
+            notified = send_email_digest(config, alert_body) or notified
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[WARN] block alert email failed: {exc}")
+
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+    if args.notify and not notified:
+        run_notify(config, queue)
+
+
+def command_list(_: argparse.Namespace) -> None:
+    ensure_dirs()
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+
+    print("ID           | STATUS                    | SCORE | ADVICE | PLATFORM         | TIME   | TITLE")
+    print("-" * 138)
+    for item in queue:
+        print(
+            f"{item['id']:<12} | "
+            f"{item['status']:<25} | "
+            f"{(str(item.get('quality_badge', '⚪')) + str(item.get('total_score', 0))).ljust(5)} | "
+            f"{str(item.get('publish_advice', '需改')):<5} | "
+            f"{item['platform']:<16} | "
+            f"{(item.get('publish_time') or '--'): <6} | "
+            f"{item.get('title', '')[:36]}"
+        )
+
+
+def command_approve(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    ok = update_item_status(queue, args.id, "approved", notes=args.note or "")
+    if not ok:
+        raise ValueError(f"Queue item not found: {args.id}")
+    save_queue(queue)
+    print(f"[OK] approved {args.id}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_reject(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    ok = update_item_status(queue, args.id, "rejected", notes=args.note or "")
+    if not ok:
+        raise ValueError(f"Queue item not found: {args.id}")
+    save_queue(queue)
+    print(f"[OK] rejected {args.id}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_publish(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    guard_result = apply_quality_guard(config, queue)
+    if guard_result["changed"]:
+        print(
+            f"[INFO] Quality guard auto-blocked {len(guard_result['blocked_items'])} item(s) before publish."
+        )
+    changed = 0
+    for item in queue:
+        if item["status"] != "approved":
+            continue
+
+        if item.get("auto_publish", False):
+            platform = item.get("platform", "")
+            if platform == "wechat_official":
+                adapter_cfg = get_platform_adapter_cfg(config, "wechat_official")
+                try:
+                    new_status, notes = auto_publish_wechat_official(item, adapter_cfg)
+                except Exception as exc:  # pylint: disable=broad-except
+                    new_status = "auto_publish_failed"
+                    notes = f"WeChat auto publish exception: {exc}"
+                item["status"] = new_status
+                item["notes"] = notes
+            else:
+                item["status"] = "auto_publish_pending_integration"
+                item["notes"] = (
+                    f"Enable official adapter under publish_adapters.{platform}."
+                )
+        else:
+            item["status"] = "ready_to_post"
+            item["notes"] = "Manual upload required. Content file already generated."
+
+        item["updated_at"] = now_local().isoformat()
+        changed += 1
+        print(f"[OK] publish action set for {item['id']} -> {item['status']}")
+
+    save_queue(queue)
+    print(f"[DONE] Updated {changed} queue items.")
+    guard_cfg = config.get("quality_guard", {})
+    if guard_result["blocked_items"] and guard_cfg.get("notify_on_block", True):
+        alert_body = build_block_alert(guard_result["blocked_items"])
+        try:
+            send_feishu_webhook(config, alert_body)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[WARN] block alert feishu failed: {exc}")
+        try:
+            send_email_digest(config, alert_body)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[WARN] block alert email failed: {exc}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_mark_posted(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    found = False
+    for item in queue:
+        if item["id"] != args.id:
+            continue
+        item["status"] = "posted"
+        item["post_url"] = args.url
+        item["updated_at"] = now_local().isoformat()
+        found = True
+        print(f"[OK] marked posted: {args.id}")
+        break
+    if not found:
+        raise ValueError(f"Queue item not found: {args.id}")
+    save_queue(queue)
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_email_digest(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    send_email_digest(config, build_queue_summary(queue))
+
+
+def command_publish_reminders(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    reminders = build_publish_reminders(
+        config,
+        queue,
+        window_minutes=max(1, int(args.window_minutes)),
+        include_all=bool(getattr(args, "all", False)),
+    )
+    if not reminders:
+        msg = f"{now_local().strftime('%Y-%m-%d %H:%M:%S')} [INFO] no publish reminders due"
+        print(msg)
+        append_reminder_log(msg)
+        return
+
+    state = load_json(REMINDER_STATE_FILE, {})
+    pending: list[dict[str, Any]] = []
+    for reminder in reminders:
+        key = reminder_key(reminder)
+        if not args.force and state.get(key):
+            continue
+        pending.append(reminder)
+
+    if not pending:
+        msg = f"{now_local().strftime('%Y-%m-%d %H:%M:%S')} [INFO] reminders already sent"
+        print(msg)
+        append_reminder_log(msg)
+        return
+
+    body = format_publish_reminders(pending)
+    results = send_publish_reminder_notifications(config, body)
+    log_body = (
+        f"{now_local().strftime('%Y-%m-%d %H:%M:%S')} [REMINDER] "
+        f"count={len(pending)} results={'; '.join(results)}\n{body}"
+    )
+    print(log_body)
+    append_reminder_log(log_body)
+    for reminder in pending:
+        state[reminder_key(reminder)] = now_local().isoformat()
+    save_json(REMINDER_STATE_FILE, state)
+
+
+def command_sync_feishu(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_notify(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    run_notify(config, queue)
+
+
+def command_reset_generated(args: argparse.Namespace) -> None:
+    if not bool(args.yes):
+        raise ValueError("Refusing to clear generated data without --yes")
+    for path in [DATA_DIR, OUTBOX_DIR, PREVIEW_DIR, VIDEO_JOBS_DIR]:
+        if path.exists():
+            shutil.rmtree(path)
+            print(f"[OK] removed {path}")
+    if QUEUE_FILE.exists():
+        QUEUE_FILE.unlink()
+        print(f"[OK] removed {QUEUE_FILE}")
+    ensure_dirs()
+    save_queue([])
+    print("[DONE] Generated data cleared. Config and Feishu mapping were preserved.")
+
+
+def command_generate_account(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    date = str(args.date or now_local().strftime("%Y-%m-%d"))
+    count = max(1, int(args.count))
+    platforms = find_platform_configs(
+        config,
+        account=str(args.account or "").strip(),
+        platform=str(args.platform or "").strip(),
+    )
+    if not platforms:
+        raise ValueError("No account matched. Use --account with account name or --platform.")
+    tracks: dict[str, Any] = config.get("tracks", {})
+    if not tracks:
+        raise ValueError("Config missing tracks.")
+
+    per_track_limit = max(count * len(platforms), int(config.get("generation", {}).get("topics_per_track", 6)))
+    track_topics: dict[str, list[dict[str, Any]]] = {}
+    for platform_cfg in platforms:
+        track_name = str(platform_cfg.get("track", "")).strip()
+        if track_name in track_topics:
+            continue
+        track_cfg = tracks.get(track_name)
+        if not track_cfg:
+            print(f"[WARN] missing track config: {track_name}")
+            continue
+        topics = collect_track_topics(track_name, track_cfg, per_track_limit)
+        track_topics[track_name] = topics
+        save_json(DATA_DIR / date / f"topics_{track_name}.json", topics)
+        print(f"[INFO] {track_name}: collected {len(topics)} topics")
+
+    queue = load_queue()
+    created_items: list[dict[str, Any]] = []
+    for platform_cfg in platforms:
+        track_name = str(platform_cfg.get("track", "")).strip()
+        track_cfg = tracks.get(track_name, {})
+        topics = track_topics.get(track_name, [])
+        if not topics:
+            print(f"[WARN] no topics for {platform_cfg.get('account_name')} ({track_name})")
+            continue
+        picked_topics = select_topics_for_generation(
+            topics, queue, track_name=track_name, count=count
+        )
+        for topic in picked_topics:
+            item = build_queue_item(config, date, platform_cfg, track_cfg, track_name, topic)
+            queue.append(item)
+            created_items.append(item)
+            print(
+                f"[OK] generated {item['account_name']} -> {item['id']} "
+                f"{item['quality_badge']}{item['total_score']} {item['title'][:42]}"
+            )
+
+    if not created_items:
+        print("[DONE] No content generated.")
+        return
+
+    guard_result = apply_quality_guard(config, created_items)
+    if guard_result["changed"]:
+        print(f"[INFO] Quality guard auto-blocked {len(guard_result['blocked_items'])} item(s).")
+
+    cloud_cfg = config.get("cloud_media", {})
+    image_cfg = cloud_cfg.get("image", {})
+    if bool(args.render_images) and cloud_cfg.get("enabled", False) and image_cfg.get("enabled", False):
+        image_results = render_cloud_illustrations_for_items(config, created_items)
+        ok_count = len([x for x in image_results if x.get("status") == "ok"])
+        print(f"[OK] illustrations ready: {ok_count}/{len(created_items)}")
+
+    for item in created_items:
+        generate_preview_for_item(config, item)
+
+    date_items = [item for item in queue if item.get("date") == date]
+    preview_index = build_preview_index(config, date_items, date)
+    accounts_index = build_accounts_index(config, queue, date)
+    build_dashboard_index(config, queue, date)
+    preview_portal = build_preview_portal(config)
+    save_queue(queue)
+
+    print(f"[OK] preview index: {preview_index.get('index_url') or preview_index.get('index_file')}")
+    print(f"[OK] accounts page: {accounts_index.get('index_url') or accounts_index.get('index_file')}")
+    if preview_portal.get("portal_url"):
+        print(f"[OK] preview portal: {preview_portal['portal_url']}")
+    print(f"[DONE] Generated {len(created_items)} item(s).")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_generate_football(args: argparse.Namespace) -> None:
+    """Generate a football match analysis article with optional user-provided match knowledge."""
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    date = str(args.date or now_local().strftime("%Y-%m-%d"))
+    match_knowledge = str(args.knowledge or "").strip()
+    no_illustrations = bool(args.no_illustrations)
+
+    for platform_cfg in config.get("platforms", []):
+        if platform_cfg.get("track") != "football":
+            continue
+        track_cfg = config.get("tracks", {}).get("football", {})
+        if not track_cfg:
+            print(f"[WARN] Track 'football' not found in config.")
+            continue
+        track_name = "football"
+
+        per_track_limit = int(config.get("generation", {}).get("topics_per_track", 6))
+        topics = collect_track_topics("football", track_cfg, per_track_limit)
+        print(f"[INFO] football: collected {len(topics)} topics from RSS feeds")
+
+        queue = load_queue()
+        created_items: list[dict[str, Any]] = []
+
+        if match_knowledge:
+            print(f"[INFO] Using user-provided match knowledge to guide generation.")
+            print(f"[INFO] Match info: {match_knowledge[:200]}")
+
+        selected_topics = topics[:1] if topics else []
+        if not selected_topics and match_knowledge:
+            # If no RSS topics but we have knowledge, create a placeholder topic
+            placeholder = {
+                "title": f"足球赛前分析 - {date}",
+                "link": "",
+                "description": match_knowledge,
+                "track": "football",
+                "source": "user_provided",
+                "score": 50.0,
+            }
+            selected_topics = [placeholder]
+            print("[INFO] No RSS topics, generating based on user-provided knowledge only.")
+        elif not selected_topics:
+            print("[WARN] No fresh football topics available from RSS feeds.")
+            print("[WARN] Consider using --knowledge to provide match information.")
+
+        for topic in selected_topics:
+            item = build_queue_item(
+                config, date, platform_cfg, track_cfg, track_name, topic,
+                match_knowledge=match_knowledge,
+            )
+            queue.append(item)
+            created_items.append(item)
+            print(
+                f"[OK] generated {item['account_name']} -> {item['id']} "
+                f"{item['quality_badge']}{item['total_score']} {item['title'][:60]}"
+            )
+
+        if not created_items:
+            print("[DONE] No content generated.")
+            return
+
+        guard_result = apply_quality_guard(config, created_items)
+        if guard_result["changed"]:
+            print(f"[INFO] Quality guard auto-blocked {len(guard_result['blocked_items'])} item(s).")
+
+        if not no_illustrations:
+            cloud_cfg = config.get("cloud_media", {})
+            image_cfg = cloud_cfg.get("image", {})
+            if cloud_cfg.get("enabled", False) and image_cfg.get("enabled", False):
+                image_results = render_cloud_illustrations_for_items(config, created_items)
+                ok_count = len([x for x in image_results if x.get("status") == "ok"])
+                print(f"[OK] illustrations ready: {ok_count}/{len(created_items)}")
+        else:
+            print("[INFO] Skipping cloud illustrations per --no-illustrations flag.")
+
+        for item in created_items:
+            generate_preview_for_item(config, item)
+
+        date_items = [item for item in queue if item.get("date") == date]
+        preview_index = build_preview_index(config, date_items, date)
+        accounts_index = build_accounts_index(config, queue, date)
+        build_dashboard_index(config, queue, date)
+        preview_portal = build_preview_portal(config)
+        save_queue(queue)
+
+        print(f"[OK] preview index: {preview_index.get('index_url') or preview_index.get('index_file')}")
+        print(f"[OK] accounts page: {accounts_index.get('index_url') or accounts_index.get('index_file')}")
+        if preview_portal.get("portal_url"):
+            print(f"[OK] preview portal: {preview_portal['portal_url']}")
+        print(f"[DONE] Generated {len(created_items)} football analysis item(s).")
+        if args.sync_feishu:
+            sync_queue_to_feishu_bitable(config, queue)
+
+        break  # Only process the first football platform (wechat_official)
+
+
+def command_serve_review(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config_path = str(args.config)
+    host = str(args.host)
+    port = int(args.port)
+    jobs: dict[str, dict[str, Any]] = {}
+    jobs_lock = threading.Lock()
+
+    class JobLogWriter:
+        def __init__(self, job_id: str) -> None:
+            self.job_id = job_id
+            self._buffer = ""
+
+        def write(self, text: str) -> int:
+            self._buffer += text
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                if line.strip():
+                    with jobs_lock:
+                        jobs[self.job_id].setdefault("lines", []).append(line)
+            return len(text)
+
+        def flush(self) -> None:
+            if self._buffer.strip():
+                with jobs_lock:
+                    jobs[self.job_id].setdefault("lines", []).append(self._buffer.strip())
+            self._buffer = ""
+
+    def start_generation_job(account: str, platform: str, count: int, sync_feishu: bool, date: str = "") -> str:
+        job_id = uuid.uuid4().hex[:10]
+        with jobs_lock:
+            jobs[job_id] = {
+                "status": "running",
+                "lines": [
+                    f"[START] 账号={account or '全部'} 平台={platform or '全部'} 日期={date or '今天'} 数量={count}",
+                    "[STEP] 收集选题 -> 生成文案 -> DashScope配图 -> 重建预览/素材包",
+                ],
+                "created_at": now_local().isoformat(),
+            }
+
+        def runner() -> None:
+            writer = JobLogWriter(job_id)
+            try:
+                with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+                    command_generate_account(
+                        argparse.Namespace(
+                            config=config_path,
+                            account=account,
+                            platform=platform,
+                            date=date or None,
+                            count=count,
+                            render_images=True,
+                            sync_feishu=sync_feishu,
+                        )
+                    )
+                writer.flush()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "done"
+                    jobs[job_id].setdefault("lines", []).append("[DONE] 生成完成")
+            except Exception as exc:  # pylint: disable=broad-except
+                writer.flush()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "failed"
+                    jobs[job_id].setdefault("lines", []).append(f"[ERROR] {exc}")
+
+        threading.Thread(target=runner, daemon=True).start()
+        return job_id
+
+    def start_free_generation_job(idea: str, content_type: str, render_images: bool) -> str:
+        job_id = uuid.uuid4().hex[:10]
+        with jobs_lock:
+            jobs[job_id] = {
+                "status": "running",
+                "lines": [
+                    f"[START] 自由生成 类型={content_type} 配图={'是' if render_images else '否'}",
+                    f"[IDEA] {idea[:160]}",
+                    "[STEP] DeepSeek生成内容 -> DashScope配图 -> 重建预览/素材包",
+                ],
+                "created_at": now_local().isoformat(),
+            }
+
+        def runner() -> None:
+            writer = JobLogWriter(job_id)
+            try:
+                with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+                    config = load_config(Path(config_path))
+                    queue = load_queue()
+                    item = create_free_content_item(
+                        config,
+                        idea,
+                        content_type,
+                        render_images=render_images,
+                    )
+                    queue.append(item)
+                    date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+                    build_preview_index(config, [entry for entry in queue if entry.get("date") == date], date)
+                    build_accounts_index(config, queue, date)
+                    build_dashboard_index(config, queue, date)
+                    build_preview_portal(config)
+                    save_queue(queue)
+                    print(f"[OK] 自由内容已生成 -> {item.get('id')} {item.get('title')}")
+                    print(f"[OK] 预览链接: {item.get('preview_url')}")
+                    print(f"[OK] 素材包: {item.get('asset_pack_url')}")
+                writer.flush()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "done"
+                    jobs[job_id].setdefault("lines", []).append("[DONE] 生成完成")
+            except Exception as exc:  # pylint: disable=broad-except
+                writer.flush()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "failed"
+                    jobs[job_id].setdefault("lines", []).append(f"[ERROR] {exc}")
+
+        threading.Thread(target=runner, daemon=True).start()
+        return job_id
+
+    def start_football_generation_job(account: str, knowledge: str, date: str = "") -> str:
+        """Start an async football match analysis generation job."""
+        job_id = uuid.uuid4().hex[:10]
+        with jobs_lock:
+            jobs[job_id] = {
+                "status": "running",
+                "lines": [
+                    f"[START] 足球分析 账号={account}",
+                    f"[KNOWLEDGE] {knowledge[:200]}" if knowledge else "[INFO] 未提供比赛信息",
+                ],
+                "created_at": now_local().isoformat(),
+            }
+
+        def runner() -> None:
+            writer = JobLogWriter(job_id)
+            try:
+                with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+                    config = load_config(Path(config_path))
+                    queue = load_queue()
+                    actual_date = date or now_local().strftime("%Y-%m-%d")
+                    platform_cfgs = find_platform_configs(config, account=account)
+                    for platform_cfg in platform_cfgs:
+                        if platform_cfg.get("track") != "football":
+                            continue
+                        track_cfg = config.get("tracks", {}).get("football", {})
+                        per_track_limit = int(
+                            config.get("generation", {}).get("topics_per_track", 6)
+                        )
+                        topics = collect_track_topics("football", track_cfg, per_track_limit)
+                        match_knowledge = knowledge.strip()
+                        selected_topics = topics[:1] if topics else []
+                        if not selected_topics:
+                            if match_knowledge:
+                                desc = match_knowledge
+                                title = f"足球赛前分析 - {actual_date}"
+                            else:
+                                desc = "今日足球赛事汇总，包括关键对战分析、伤停信息和战术看点。"
+                                title = f"今日足球赛前热点分析 - {actual_date}"
+                            placeholder = {
+                                "title": title,
+                                "link": "",
+                                "description": desc,
+                                "track": "football",
+                                "source": "user_provided" if match_knowledge else "auto_fallback",
+                                "score": 50.0,
+                            }
+                            selected_topics = [placeholder]
+                            print(f"[INFO] 未找到RSS选题，使用占位主题: {title}")
+                        for topic in selected_topics:
+                            item = build_queue_item(
+                                config, actual_date, platform_cfg, track_cfg, "football", topic,
+                                match_knowledge=match_knowledge,
+                            )
+                            queue.append(item)
+                            print(
+                                f"[OK] generated {item['account_name']} -> {item['id']} "
+                                f"{item['quality_badge']}{item['total_score']} {item['title'][:60]}"
+                            )
+                        cloud_cfg = config.get("cloud_media", {})
+                        image_cfg = cloud_cfg.get("image", {})
+                        if cloud_cfg.get("enabled", False) and image_cfg.get("enabled", False):
+                            recent_items = [
+                                it for it in queue
+                                if it.get("date") == actual_date and it.get("track") == "football"
+                            ][-len(selected_topics):]
+                            render_cloud_illustrations_for_items(config, recent_items)
+                        for item in queue:
+                            if item.get("date") == actual_date and item.get("track") == "football":
+                                generate_preview_for_item(config, item)
+                        date_items = [it for it in queue if it.get("date") == actual_date]
+                        build_preview_index(config, date_items, actual_date)
+                        build_accounts_index(config, queue, actual_date)
+                        build_dashboard_index(config, queue, actual_date)
+                        build_preview_portal(config)
+                        save_queue(queue)
+                        print(f"[DONE] 足球分析生成完成")
+                        break
+                writer.flush()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "done"
+                    jobs[job_id].setdefault("lines", []).append("[DONE] 足球分析生成完成")
+            except Exception as exc:  # pylint: disable=broad-except
+                writer.flush()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "failed"
+                    jobs[job_id].setdefault("lines", []).append(f"[ERROR] {exc}")
+
+        threading.Thread(target=runner, daemon=True).start()
+        return job_id
+
+    class ReviewHandler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *handler_args: Any, **handler_kwargs: Any) -> None:
+            super().__init__(*handler_args, directory=str(PREVIEW_DIR), **handler_kwargs)
+
+        def end_headers(self) -> None:
+            self.send_header("Cache-Control", "no-store")
+            super().end_headers()
+
+        def do_GET(self) -> None:  # noqa: N802 - stdlib API
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/generate":
+                params = urllib.parse.parse_qs(parsed.query)
+                account = (params.get("account") or [""])[0]
+                platform = (params.get("platform") or [""])[0]
+                date = (params.get("date") or [""])[0]
+                count = safe_int((params.get("count") or ["3"])[0], default=3)
+                sync_feishu = (params.get("sync_feishu") or ["1"])[0] not in {"0", "false", "False"}
+                async_mode = (params.get("async") or ["0"])[0] in {"1", "true", "True"}
+                if async_mode:
+                    try:
+                        job_id = start_generation_job(account, platform, count, sync_feishu, date)
+                        payload = {"job_id": job_id, "status": "running"}
+                        self.send_response(200)
+                    except Exception as exc:  # pylint: disable=broad-except
+                        payload = {"error": str(exc)}
+                        self.send_response(500)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+                    return
+                buffer = io.StringIO()
+                status = 200
+                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                    try:
+                        command_generate_account(
+                            argparse.Namespace(
+                                config=config_path,
+                                account=account,
+                                platform=platform,
+                                date=date or None,
+                                count=count,
+                                render_images=True,
+                                sync_feishu=sync_feishu,
+                            )
+                        )
+                    except Exception as exc:  # pylint: disable=broad-except
+                        status = 500
+                        print(f"[ERROR] {exc}")
+                payload = buffer.getvalue()
+                self.send_response(status)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(payload.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/job-status":
+                params = urllib.parse.parse_qs(parsed.query)
+                job_id = (params.get("id") or [""])[0]
+                with jobs_lock:
+                    payload = dict(jobs.get(job_id) or {"status": "missing", "lines": ["任务不存在或服务已重启"]})
+                    payload["lines"] = list(payload.get("lines", []))[-120:]
+                self.send_response(200 if payload.get("status") != "missing" else 404)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+                return
+            if parsed.path == "/free-generate":
+                params = urllib.parse.parse_qs(parsed.query)
+                idea = (params.get("idea") or [""])[0]
+                content_type = (params.get("type") or ["graphic"])[0]
+                if content_type not in {"graphic", "video"}:
+                    content_type = "graphic"
+                render_images = (params.get("render_images") or ["1"])[0] not in {"0", "false", "False"}
+                try:
+                    job_id = start_free_generation_job(idea, content_type, render_images)
+                    payload = {"job_id": job_id, "status": "running"}
+                    self.send_response(200)
+                except Exception as exc:  # pylint: disable=broad-except
+                    payload = {"error": str(exc)}
+                    self.send_response(500)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+                return
+            if parsed.path == "/status":
+                params = urllib.parse.parse_qs(parsed.query)
+                item_id = (params.get("id") or [""])[0]
+                status = (params.get("status") or [""])[0]
+                allowed = {"pending_review", "approved", "ready_to_post", "posted", "rejected"}
+                if not item_id or status not in allowed:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write("参数错误".encode("utf-8"))
+                    return
+                try:
+                    config = load_config(Path(config_path))
+                    queue = load_queue()
+                    found = False
+                    for item in queue:
+                        if item.get("id") != item_id:
+                            continue
+                        item["status"] = status
+                        item["updated_at"] = now_local().isoformat()
+                        generate_preview_for_item(config, item)
+                        found = True
+                        item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+                        build_preview_index(config, [entry for entry in queue if entry.get("date") == item_date], item_date)
+                        build_accounts_index(config, queue, item_date)
+                        build_dashboard_index(config, queue, item_date)
+                        build_preview_portal(config)
+                        break
+                    if not found:
+                        raise ValueError(f"Queue item not found: {item_id}")
+                    save_queue(queue)
+                    message = f"已更新为 {status_label(status)}"
+                    self.send_response(200)
+                except Exception as exc:  # pylint: disable=broad-except
+                    message = f"更新失败：{exc}"
+                    self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(message.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/action":
+                params = urllib.parse.parse_qs(parsed.query)
+                item_id = (params.get("id") or [""])[0]
+                action = (params.get("action") or [""])[0]
+                if not item_id or action not in {"images", "pack", "draft", "draft_images"}:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write("参数错误".encode("utf-8"))
+                    return
+                try:
+                    config = load_config(Path(config_path))
+                    queue = load_queue()
+                    item = next((entry for entry in queue if entry.get("id") == item_id), None)
+                    if item is None:
+                        raise ValueError(f"Queue item not found: {item_id}")
+                    if action == "draft":
+                        result = rewrite_queue_item_draft(config, item, render_images=False)
+                        message = f"文案已重写：{result.get('score')}分"
+                    elif action == "draft_images":
+                        result = rewrite_queue_item_draft(config, item, render_images=True)
+                        message = f"文案和配图已重写：{result.get('score')}分"
+                    elif action == "images":
+                        render_cloud_illustrations_for_items(config, [item])
+                        message = "已重新配图"
+                    else:
+                        build_asset_pack_for_item(config, item)
+                        message = "素材包已重建"
+                    generate_preview_for_item(config, item)
+                    item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+                    build_preview_index(config, [entry for entry in queue if entry.get("date") == item_date], item_date)
+                    build_accounts_index(config, queue, item_date)
+                    build_dashboard_index(config, queue, item_date)
+                    build_preview_portal(config)
+                    save_queue(queue)
+                    self.send_response(200)
+                except Exception as exc:  # pylint: disable=broad-except
+                    message = f"操作失败：{exc}"
+                    self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(message.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/generate-football":
+                params = urllib.parse.parse_qs(parsed.query)
+                account = (params.get("account") or [""])[0]
+                knowledge = (params.get("knowledge") or [""])[0]
+                date = (params.get("date") or [""])[0]
+                async_mode = (params.get("async") or ["1"])[0] in {"1", "true", "True"}
+                if not account:
+                    account = next(
+                        (p.get("account_name", "") for p in config.get("platforms", [])
+                         if p.get("track") == "football"),
+                        "涛哥儿聊个球"
+                    )
+                if async_mode:
+                    try:
+                        job_id = start_football_generation_job(account, knowledge, date)
+                        payload = {"job_id": job_id, "status": "running"}
+                        self.send_response(200)
+                    except Exception as exc:
+                        payload = {"error": str(exc)}
+                        self.send_response(500)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+                    return
+                buffer = io.StringIO()
+                status_code = 200
+                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                    try:
+                        command_generate_football(
+                            argparse.Namespace(
+                                config=config_path,
+                                date=date or None,
+                                knowledge=knowledge,
+                                no_illustrations=False,
+                                sync_feishu=False,
+                            )
+                        )
+                    except Exception as exc:
+                        status_code = 500
+                        print(f"[ERROR] {exc}")
+                self.send_response(status_code)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(buffer.getvalue().encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/regenerate-images":
+                params = urllib.parse.parse_qs(parsed.query)
+                item_id = (params.get("id") or [""])[0]
+                if not item_id:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write("参数错误：缺少 id".encode("utf-8"))
+                    return
+                buffer = io.StringIO()
+                status_code = 200
+                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                    try:
+                        config = load_config(Path(config_path))
+                        queue = load_queue()
+                        item = next((entry for entry in queue if entry.get("id") == item_id), None)
+                        if item is None:
+                            raise ValueError(f"Queue item not found: {item_id}")
+                        render_cloud_illustrations_for_items(config, [item])
+                        generate_preview_for_item(config, item)
+                        item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+                        build_preview_index(config, [entry for entry in queue if entry.get("date") == item_date], item_date)
+                        build_accounts_index(config, queue, item_date)
+                        build_dashboard_index(config, queue, item_date)
+                        build_preview_portal(config)
+                        save_queue(queue)
+                        print(f"[OK] Images regenerated for {item_id}")
+                    except Exception as exc:
+                        status_code = 500
+                        print(f"[ERROR] {exc}")
+                payload = buffer.getvalue()
+                self.send_response(status_code)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(payload.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/export-selected":
+                params = urllib.parse.parse_qs(parsed.query)
+                date = (params.get("date") or [""])[0]
+                account = (params.get("account") or [""])[0]
+                platform = (params.get("platform") or [""])[0]
+                buffer = io.StringIO()
+                status_code = 200
+                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                    try:
+                        command_export_selected(
+                            argparse.Namespace(
+                                config=config_path,
+                                date=date,
+                                account=account,
+                                platform=platform,
+                            )
+                        )
+                    except Exception as exc:  # pylint: disable=broad-except
+                        status_code = 500
+                        print(f"[ERROR] {exc}")
+                self.send_response(status_code)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(buffer.getvalue().encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/daily-log":
+                log_path = BASE_DIR / "daily_generate_summary.log"
+                detail_path = BASE_DIR / "daily_generate.log"
+                parts = ["# 每日自动生成日志", ""]
+                if log_path.exists():
+                    parts.append("## 摘要")
+                    parts.append(log_path.read_text(encoding="utf-8", errors="replace")[-8000:])
+                else:
+                    parts.append("暂无摘要日志。")
+                if detail_path.exists():
+                    parts.append("\n## 最近详细日志")
+                    parts.append(detail_path.read_text(encoding="utf-8", errors="replace")[-8000:])
+                payload = "\n".join(parts)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(payload.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/reminders":
+                parts = ["# 发布提醒记录", ""]
+                if REMINDER_LOG_FILE.exists():
+                    parts.extend(REMINDER_LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-160:])
+                else:
+                    parts.append("暂无发布提醒。")
+                payload = "\n".join(parts)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(payload.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/free-list":
+                try:
+                    cfg = load_config(Path(config_path))
+                    q = load_queue()
+                    free_items = [
+                        item for item in q
+                        if item.get("free_content") or item.get("notes") == "自由生成内容"
+                    ]
+                    free_items.sort(
+                        key=lambda x: str(x.get("updated_at") or x.get("created_at", "")),
+                        reverse=True,
+                    )
+                    result = []
+                    for item in free_items[:30]:
+                        preview_file = Path(str(item.get("preview_file", "")).strip() or "#")
+                        href = ""
+                        if preview_file.exists():
+                            try:
+                                href = preview_file.relative_to(PREVIEW_DIR).as_posix()
+                            except ValueError:
+                                href = preview_file.name
+                        result.append({
+                            "id": str(item.get("id", "")),
+                            "title": str(item.get("title", ""))[:50],
+                            "status": status_label(item.get("status")),
+                            "preview_url": href,
+                            "updated_at": display_datetime(item.get("updated_at") or item.get("created_at")) or "-",
+                        })
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(result, ensure_ascii=False).encode("utf-8"))
+                except Exception as exc:
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"))
+                return
+            if parsed.path == "/delete-item":
+                params = urllib.parse.parse_qs(parsed.query)
+                item_id = (params.get("id") or [""])[0]
+                if not item_id:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write("缺少 id 参数".encode("utf-8"))
+                    return
+                try:
+                    q = load_queue()
+                    q = [it for it in q if it.get("id") != item_id]
+                    save_queue(q)
+                    config_obj = load_config(Path(config_path))
+                    build_preview_portal(config_obj)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write("已删除".encode("utf-8"))
+                except Exception as exc:
+                    self.send_response(500)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(f"删除失败：{exc}".encode("utf-8"))
+                return
+            if parsed.path == "/health":
+                lines: list[str] = ["# 系统健康检查", ""]
+                lines.append(f"- 检查时间：{now_local().strftime('%Y-%m-%d %H:%M:%S')}")
+                lines.append(f"- 工作目录：{BASE_DIR.parent}")
+                lines.append(f"- DeepSeek Key：{'已配置' if os.getenv('DEEPSEEK_API_KEY') else '未配置'}")
+                lines.append(f"- DashScope Key：{'已配置' if os.getenv('DASHSCOPE_API_KEY') else '未配置'}")
+                try:
+                    health_config = load_config(Path(config_path))
+                    email_cfg = health_config.get("notification", {}).get("email", {})
+                    lines.append(f"- 邮件提醒：{'已启用' if email_cfg.get('enabled') else '未启用'}")
+                    lines.append(f"- 发件邮箱：{email_cfg.get('sender', '-')}")
+                    lines.append(f"- 收件邮箱：{', '.join(email_cfg.get('receivers', [])) or '-'}")
+                    lines.append(f"- SMTP授权码：{'已配置' if os.getenv(email_cfg.get('password_env', 'SMTP_PASSWORD')) else '未配置'}")
+                except Exception as exc:  # pylint: disable=broad-except
+                    lines.append(f"- 邮件配置检查失败：{exc}")
+                try:
+                    cron = subprocess.run(
+                        ["crontab", "-l"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    ).stdout
+                except Exception as exc:  # pylint: disable=broad-except
+                    cron = f"crontab 读取失败：{exc}"
+                lines.extend(["", "## 定时任务", "```", cron.strip() or "无", "```"])
+
+                try:
+                    queue = load_queue()
+                    lines.extend(["", "## 队列与素材覆盖"])
+                    lines.append(f"- 总内容数：{len(queue)}")
+                    by_account: dict[str, dict[str, Any]] = {}
+                    for item in queue:
+                        account = str(item.get("account_name", ""))
+                        data = by_account.setdefault(
+                            account,
+                            {"items": 0, "images": 0, "packs": 0, "latest": ""},
+                        )
+                        data["items"] += 1
+                        if len(item.get("illustration_urls") or []) > 0:
+                            data["images"] += 1
+                        if item.get("asset_pack_file") and Path(str(item.get("asset_pack_file"))).exists():
+                            data["packs"] += 1
+                        data["latest"] = max(
+                            str(data["latest"]),
+                            str(item.get("updated_at") or item.get("created_at") or ""),
+                        )
+                    for account, data in sorted(by_account.items()):
+                        lines.append(
+                            f"- {account}：内容 {data['items']} / 有图 {data['images']} / "
+                            f"素材包 {data['packs']} / 最近 {display_datetime(data['latest']) or '-'}"
+                        )
+                except Exception as exc:  # pylint: disable=broad-except
+                    lines.append(f"- 队列检查失败：{exc}")
+
+                lines.extend(["", "## 最近自动生成日志"])
+                log_path = BASE_DIR / "daily_generate_summary.log"
+                if log_path.exists():
+                    lines.extend(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-30:])
+                else:
+                    lines.append("暂无自动生成日志。")
+
+                lines.extend(["", "## 最近发布提醒"])
+                if REMINDER_LOG_FILE.exists():
+                    lines.extend(REMINDER_LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-30:])
+                else:
+                    lines.append("暂无发布提醒。")
+
+                lines.extend(["", "## 关键文件"])
+                for path in [
+                    BASE_DIR / "pipeline.py",
+                    BASE_DIR / "config.json",
+                    BASE_DIR / "daily_generate.sh",
+                    PREVIEW_DIR / "dashboard.html",
+                    PREVIEW_DIR / "index.html",
+                ]:
+                    lines.append(f"- {path}: {'存在' if path.exists() else '缺失'}")
+
+                payload = "\n".join(lines)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(payload.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/download-packs":
+                params = urllib.parse.parse_qs(parsed.query)
+                date = (params.get("date") or [""])[0]
+                status = (params.get("status") or ["all"])[0]
+                try:
+                    config = load_config(Path(config_path))
+                    queue = load_queue()
+                    result = build_bulk_asset_pack(
+                        config, queue, date=date, status=status, rebuild_items=False
+                    )
+                    pack_path = Path(result["bulk_pack_file"])
+                    payload = pack_path.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.send_header(
+                        "Content-Disposition",
+                        f"attachment; filename*=UTF-8''{urllib.parse.quote(pack_path.name)}",
+                    )
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                except Exception as exc:  # pylint: disable=broad-except
+                    self.send_response(500)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(f"批量打包失败：{exc}".encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/":
+                self.path = "/index.html"
+            return super().do_GET()
+
+    try:
+        preview_portal = build_preview_portal(load_config(Path(config_path)))
+        if preview_portal.get("portal_url"):
+            print(f"[OK] preview portal: {preview_portal['portal_url']}")
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] Could not build preview portal: {exc}")
+
+    server = http.server.ThreadingHTTPServer((host, port), ReviewHandler)
+    print(f"[OK] Review server running: http://{host}:{port}")
+    server.serve_forever()
+
+
+def command_export_selected(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    selected = filter_queue_items(
+        queue,
+        date=str(args.date or "").strip(),
+        account=str(args.account or "").strip(),
+        platform=str(args.platform or "").strip(),
+        include_blocked=True,
+    )
+    selected = [item for item in selected if item.get("status") in {"approved", "ready_to_post", "posted"}]
+    if not selected:
+        print("No selected/publishable items matched filters.")
+        return
+    export_date = str(args.date or now_local().strftime("%Y-%m-%d"))
+    out_file = OUTBOX_DIR / export_date / "selected_publish_list.md"
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"# 已选发布内容清单 {export_date}", ""]
+    for item in selected:
+        content = extract_content_payload(item)
+        lines.extend(
+            [
+                f"## {item.get('account_name', '')} / {item.get('platform', '')} / {item.get('id', '')}",
+                "",
+                f"- 状态：{status_label(item.get('status'))}",
+                f"- 下一步：{next_step_for_item(item)}",
+                f"- 预览：{item.get('preview_url', '')}",
+                f"- 素材包：{item.get('asset_pack_url', '')}",
+                "",
+                f"### 标题\n{item.get('title', '')}",
+                "",
+                f"### 正文\n{content.get('body_markdown', '')}",
+                "",
+                f"### 配图\n" + "\n".join([f"- {url}" for url in item.get("illustration_urls", [])]),
+                "",
+            ]
+        )
+    out_file.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[OK] exported selected list: {out_file}")
+
+
+def command_export_packs(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    result = build_bulk_asset_pack(
+        config,
+        queue,
+        date=str(args.date or "").strip(),
+        status=str(args.status or "all").strip(),
+    )
+    print(f"[OK] bulk asset pack: {result['bulk_pack_file']}")
+    if result.get("bulk_pack_url"):
+        print(f"[OK] bulk asset pack URL: {result['bulk_pack_url']}")
+
+
+def command_preview(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+
+    selected = filter_queue_items(
+        queue,
+        item_id=str(args.id or "").strip(),
+        date=str(args.date or "").strip(),
+        account=str(getattr(args, "account", "") or "").strip(),
+        platform=str(getattr(args, "platform", "") or "").strip(),
+        limit=int(args.limit),
+    )
+    if not selected:
+        print("No queue items matched preview filters.")
+        return
+
+    grouped_by_date: dict[str, list[dict[str, Any]]] = {}
+    for item in selected:
+        generate_preview_for_item(config, item)
+        item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+        grouped_by_date.setdefault(item_date, []).append(item)
+
+    for item_date, items in grouped_by_date.items():
+        preview_index = build_preview_index(config, items, item_date)
+        print(f"[OK] preview index ({item_date}): {preview_index['index_file']}")
+        if preview_index["index_url"]:
+            print(f"[OK] preview url ({item_date}): {preview_index['index_url']}")
+        accounts_index = build_accounts_index(config, queue, item_date)
+        print(f"[OK] accounts index ({item_date}): {accounts_index['index_file']}")
+        dashboard_index = build_dashboard_index(config, queue, item_date)
+        print(f"[OK] dashboard index ({item_date}): {dashboard_index['index_file']}")
+
+    preview_portal = build_preview_portal(config)
+    if preview_portal["portal_file"]:
+        print(f"[OK] preview portal: {preview_portal['portal_file']}")
+        if preview_portal["portal_url"]:
+            print(f"[OK] preview portal url: {preview_portal['portal_url']}")
+
+    save_queue(queue)
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_render_samples(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+
+    selected = filter_queue_items(
+        queue,
+        item_id=str(args.id or "").strip(),
+        date=str(args.date or "").strip(),
+        limit=int(args.limit),
+        only_pending=bool(args.only_pending),
+        include_blocked=bool(args.include_blocked),
+        post_format="short_video_script",
+    )
+    if not selected:
+        print("No queue items matched render-samples filters.")
+        return
+
+    results = render_samples_for_items(
+        config,
+        selected,
+        include_blocked=bool(args.include_blocked),
+    )
+    save_queue(queue)
+    print(f"[DONE] Sample render complete. success={len(results)}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_render_illustrations(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    if not cloud_media_enabled(config):
+        print("[WARN] cloud_media.enabled is false. Enable it to render illustrations.")
+        return
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+    selected = filter_queue_items(
+        queue,
+        item_id=str(args.id or "").strip(),
+        date=str(args.date or "").strip(),
+        account=str(getattr(args, "account", "") or "").strip(),
+        platform=str(getattr(args, "platform", "") or "").strip(),
+        limit=int(args.limit),
+        only_pending=bool(args.only_pending),
+        include_blocked=bool(args.include_blocked),
+    )
+    if not selected:
+        print("No queue items matched render-illustrations filters.")
+        return
+    results = render_cloud_illustrations_for_items(config, selected)
+    grouped_by_date: dict[str, list[dict[str, Any]]] = {}
+    for item in selected:
+        generate_preview_for_item(config, item)
+        item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+        grouped_by_date.setdefault(item_date, []).append(item)
+    for item_date, items in grouped_by_date.items():
+        build_preview_index(config, [item for item in queue if item.get("date") == item_date], item_date)
+        build_accounts_index(config, queue, item_date)
+    build_preview_portal(config)
+    save_queue(queue)
+    ok_count = len([x for x in results if x.get("status") == "ok"])
+    print(f"[DONE] Cloud illustration render complete. success={ok_count}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_render_cloud_videos(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    if not cloud_media_enabled(config):
+        print("[WARN] cloud_media.enabled is false. Enable it to render cloud videos.")
+        return
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+    selected = filter_queue_items(
+        queue,
+        item_id=str(args.id or "").strip(),
+        date=str(args.date or "").strip(),
+        limit=int(args.limit),
+        only_pending=bool(args.only_pending),
+        include_blocked=bool(args.include_blocked),
+        post_format="short_video_script",
+    )
+    if not selected:
+        print("No queue items matched render-cloud-videos filters.")
+        return
+    results = render_cloud_videos_for_items(
+        config, selected, include_blocked=bool(args.include_blocked)
+    )
+    for item in selected:
+        generate_preview_for_item(config, item)
+    save_queue(queue)
+    ok_count = len([x for x in results if x.get("status") == "ok"])
+    print(f"[DONE] Cloud video render complete. success={ok_count}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_export_video_jobs(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    if not local_gpu_enabled(config):
+        print("[WARN] local_gpu.enabled is false. Enable it in config to use export-video-jobs.")
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+
+    selected = filter_queue_items(
+        queue,
+        item_id=str(args.id or "").strip(),
+        date=str(args.date or "").strip(),
+        limit=int(args.limit),
+        only_pending=bool(args.only_pending),
+        include_blocked=bool(args.include_blocked),
+        post_format="short_video_script",
+    )
+    if not selected:
+        print("No queue items matched export-video-jobs filters.")
+        return
+
+    results = export_video_jobs_for_items(config, selected)
+    save_queue(queue)
+    print(f"[DONE] Video job export complete. exported={len(results)}")
+    pending_dir = video_jobs_pending_dir(config)
+    print(f"[INFO] Pending jobs directory: {pending_dir}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_import_local_video(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    queue = load_queue()
+    if not queue:
+        print("Queue is empty.")
+        return
+
+    job_id = str(args.id or "").strip()
+    if not job_id:
+        print("--id is required.")
+        return
+
+    video_path = Path(args.video_path).expanduser() if args.video_path else None
+    result = import_local_video_for_item(config, queue, job_id, video_path)
+    save_queue(queue)
+    print(f"[OK] Imported local video {job_id} -> {result.get('video_file', '')}")
+    if result.get("video_url"):
+        print(f"[OK] Sample video URL: {result['video_url']}")
+
+    preview_portal = build_preview_portal(config)
+    if preview_portal.get("portal_url"):
+        print(f"[OK] Preview portal url: {preview_portal['portal_url']}")
+    if args.sync_feishu:
+        sync_queue_to_feishu_bitable(config, queue)
+
+
+def command_list_video_jobs(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    ensure_video_job_dirs(config)
+    status = str(args.status or "all").strip().lower()
+    dirs: list[tuple[str, Path]] = []
+    if status in {"all", "pending"}:
+        dirs.append(("pending", video_jobs_pending_dir(config)))
+    if status in {"all", "completed"}:
+        dirs.append(("completed", video_jobs_completed_dir(config)))
+    if status in {"all", "failed"}:
+        dirs.append(("failed", video_jobs_failed_dir(config)))
+
+    total = 0
+    for label, directory in dirs:
+        jobs = sorted(directory.glob("*.json"))
+        if not jobs:
+            print(f"[{label}] (empty)")
+            continue
+        print(f"[{label}] {len(jobs)} job(s)")
+        for job_file in jobs:
+            payload = load_json(job_file, {})
+            total += 1
+            print(
+                f"  - {payload.get('job_id', job_file.stem)} | "
+                f"{payload.get('date', '')} | "
+                f"{payload.get('platform', '')} | "
+                f"{payload.get('status', label)} | "
+                f"{payload.get('title', '')[:42]}"
+            )
+    if total == 0:
+        print("No video jobs found.")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Multi-platform content automation")
+    parser.add_argument(
+        "--config",
+        default=str(BASE_DIR / "config.json"),
+        help="Path to config JSON file.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_plan = sub.add_parser("plan-day", help="Collect topics and generate drafts")
+    p_plan.add_argument("--date", default=None, help="Date in YYYY-MM-DD")
+    p_plan.add_argument(
+        "--sync-feishu", action="store_true", help="Sync queue to Feishu Bitable after run"
+    )
+    p_plan.add_argument(
+        "--notify", action="store_true", help="Send reminder after queue generation"
+    )
+    p_plan.add_argument(
+        "--track", default="", help="Only generate for this track (e.g. football)"
+    )
+    p_plan.set_defaults(func=command_plan_day)
+
+    p_list = sub.add_parser("list", help="List queue items")
+    p_list.set_defaults(func=command_list)
+
+    p_approve = sub.add_parser("approve", help="Approve one queue item")
+    p_approve.add_argument("--id", required=True, help="Queue item ID")
+    p_approve.add_argument("--note", default="", help="Optional note")
+    p_approve.add_argument(
+        "--sync-feishu", action="store_true", help="Sync queue to Feishu Bitable"
+    )
+    p_approve.set_defaults(func=command_approve)
+
+    p_reject = sub.add_parser("reject", help="Reject one queue item")
+    p_reject.add_argument("--id", required=True, help="Queue item ID")
+    p_reject.add_argument("--note", default="", help="Optional note")
+    p_reject.add_argument(
+        "--sync-feishu", action="store_true", help="Sync queue to Feishu Bitable"
+    )
+    p_reject.set_defaults(func=command_reject)
+
+    p_publish = sub.add_parser("publish", help="Prepare publishing actions")
+    p_publish.add_argument(
+        "--sync-feishu", action="store_true", help="Sync queue to Feishu Bitable"
+    )
+    p_publish.set_defaults(func=command_publish)
+
+    p_mark = sub.add_parser("mark-posted", help="Mark one item as posted")
+    p_mark.add_argument("--id", required=True, help="Queue item ID")
+    p_mark.add_argument("--url", default="", help="Published post URL")
+    p_mark.add_argument(
+        "--sync-feishu", action="store_true", help="Sync queue to Feishu Bitable"
+    )
+    p_mark.set_defaults(func=command_mark_posted)
+
+    p_mail = sub.add_parser("email-digest", help="Send digest email summary")
+    p_mail.set_defaults(func=command_email_digest)
+
+    p_remind = sub.add_parser("publish-reminders", help="Send publish-time reminders")
+    p_remind.add_argument("--window-minutes", type=int, default=20, help="Upcoming publish window")
+    p_remind.add_argument("--force", action="store_true", help="Send even if already sent")
+    p_remind.add_argument("--all", action="store_true", help="Include all configured accounts for manual test")
+    p_remind.set_defaults(func=command_publish_reminders)
+
+    p_sync = sub.add_parser("sync-feishu", help="Sync queue to Feishu Bitable")
+    p_sync.set_defaults(func=command_sync_feishu)
+
+    p_notify = sub.add_parser("notify", help="Send queue summary to notification channels")
+    p_notify.set_defaults(func=command_notify)
+
+    p_reset = sub.add_parser("reset-generated", help="Clear generated queue/outbox/preview data")
+    p_reset.add_argument("--yes", action="store_true", help="Required confirmation")
+    p_reset.set_defaults(func=command_reset_generated)
+
+    p_gen_account = sub.add_parser(
+        "generate-account",
+        help="Generate several candidate posts for one account and render images",
+    )
+    p_gen_account.add_argument("--account", default="", help="Account name or account id")
+    p_gen_account.add_argument("--platform", default="", help="Optional exact platform filter")
+    p_gen_account.add_argument("--date", default=None, help="Date in YYYY-MM-DD")
+    p_gen_account.add_argument("--count", type=int, default=3, help="How many candidates per account")
+    p_gen_account.add_argument(
+        "--no-render-images", dest="render_images", action="store_false", help="Skip DashScope images"
+    )
+    p_gen_account.add_argument(
+        "--sync-feishu", action="store_true", help="Sync generated items to Feishu Bitable"
+    )
+    p_gen_account.set_defaults(func=command_generate_account, render_images=True)
+
+    p_gen_football = sub.add_parser(
+        "generate-football",
+        help="Generate football match analysis for 涛哥儿聊个球 with optional match knowledge",
+    )
+    p_gen_football.add_argument("--date", default=None, help="Date in YYYY-MM-DD")
+    p_gen_football.add_argument(
+        "--knowledge", default="", help="Match info: teams, time, context etc."
+    )
+    p_gen_football.add_argument(
+        "--no-illustrations", action="store_true", help="Skip cloud image rendering"
+    )
+    p_gen_football.add_argument(
+        "--sync-feishu", action="store_true", help="Sync generated items to Feishu Bitable"
+    )
+    p_gen_football.set_defaults(func=command_generate_football)
+
+    p_serve = sub.add_parser("serve-review", help="Serve preview UI with click-to-generate endpoint")
+    p_serve.add_argument("--host", default="0.0.0.0", help="Bind host")
+    p_serve.add_argument("--port", type=int, default=8787, help="Bind port")
+    p_serve.set_defaults(func=command_serve_review)
+
+    p_export_selected = sub.add_parser("export-selected", help="Export approved/posted content list")
+    p_export_selected.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_export_selected.add_argument("--account", default="", help="Account filter")
+    p_export_selected.add_argument("--platform", default="", help="Exact platform filter")
+    p_export_selected.set_defaults(func=command_export_selected)
+
+    p_export_packs = sub.add_parser("export-packs", help="Export a bulk ZIP of asset packs")
+    p_export_packs.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_export_packs.add_argument(
+        "--status",
+        default="all",
+        choices=["all", "selected", "pending_review", "approved", "ready_to_post", "posted", "rejected"],
+        help="Which items to include",
+    )
+    p_export_packs.set_defaults(func=command_export_packs)
+
+    p_preview = sub.add_parser("preview", help="Generate visual preview HTML pages")
+    p_preview.add_argument("--id", default="", help="Queue item ID")
+    p_preview.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_preview.add_argument("--account", default="", help="Account filter")
+    p_preview.add_argument("--platform", default="", help="Exact platform filter")
+    p_preview.add_argument("--limit", type=int, default=10, help="How many recent items")
+    p_preview.add_argument(
+        "--sync-feishu", action="store_true", help="Sync preview fields to Feishu Bitable"
+    )
+    p_preview.set_defaults(func=command_preview)
+
+    p_sample = sub.add_parser("render-samples", help="Render auto samples with subtitles and TTS")
+    p_sample.add_argument("--id", default="", help="Queue item ID")
+    p_sample.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_sample.add_argument("--limit", type=int, default=10, help="How many recent items")
+    p_sample.add_argument(
+        "--only-pending", action="store_true", help="Only process pending/approved items"
+    )
+    p_sample.add_argument(
+        "--include-blocked", action="store_true", help="Include auto-blocked items"
+    )
+    p_sample.add_argument(
+        "--sync-feishu", action="store_true", help="Sync sample video fields to Feishu Bitable"
+    )
+    p_sample.set_defaults(func=command_render_samples)
+
+    p_ill = sub.add_parser(
+        "render-illustrations",
+        help="Render cloud illustrations for article/graphic posts",
+    )
+    p_ill.add_argument("--id", default="", help="Queue item ID")
+    p_ill.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_ill.add_argument("--account", default="", help="Account filter")
+    p_ill.add_argument("--platform", default="", help="Exact platform filter")
+    p_ill.add_argument("--limit", type=int, default=10, help="How many recent items")
+    p_ill.add_argument(
+        "--only-pending", action="store_true", help="Only process pending/approved items"
+    )
+    p_ill.add_argument(
+        "--include-blocked", action="store_true", help="Include auto-blocked items"
+    )
+    p_ill.add_argument(
+        "--sync-feishu", action="store_true", help="Sync illustration fields to Feishu Bitable"
+    )
+    p_ill.set_defaults(func=command_render_illustrations)
+
+    p_cloud_video = sub.add_parser(
+        "render-cloud-videos",
+        help="Render short videos via cloud provider",
+    )
+    p_cloud_video.add_argument("--id", default="", help="Queue item ID")
+    p_cloud_video.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_cloud_video.add_argument("--limit", type=int, default=10, help="How many recent items")
+    p_cloud_video.add_argument(
+        "--only-pending", action="store_true", help="Only process pending/approved items"
+    )
+    p_cloud_video.add_argument(
+        "--include-blocked", action="store_true", help="Include auto-blocked items"
+    )
+    p_cloud_video.add_argument(
+        "--sync-feishu", action="store_true", help="Sync cloud video fields to Feishu Bitable"
+    )
+    p_cloud_video.set_defaults(func=command_render_cloud_videos)
+
+    p_export = sub.add_parser(
+        "export-video-jobs",
+        help="Export short-video jobs for local ComfyUI rendering",
+    )
+    p_export.add_argument("--id", default="", help="Queue item ID")
+    p_export.add_argument("--date", default="", help="Date filter YYYY-MM-DD")
+    p_export.add_argument("--limit", type=int, default=10, help="How many recent items")
+    p_export.add_argument(
+        "--only-pending", action="store_true", help="Only process pending/approved items"
+    )
+    p_export.add_argument(
+        "--include-blocked", action="store_true", help="Include auto-blocked items"
+    )
+    p_export.add_argument(
+        "--sync-feishu", action="store_true", help="Sync queue fields to Feishu Bitable"
+    )
+    p_export.set_defaults(func=command_export_video_jobs)
+
+    p_import = sub.add_parser(
+        "import-local-video",
+        help="Import a locally rendered MP4 into preview media and queue",
+    )
+    p_import.add_argument("--id", required=True, help="Queue item ID")
+    p_import.add_argument(
+        "--video-path",
+        default="",
+        help="Local MP4 path. If omitted, uses completed job metadata or existing media file.",
+    )
+    p_import.add_argument(
+        "--sync-feishu", action="store_true", help="Sync sample video fields to Feishu Bitable"
+    )
+    p_import.set_defaults(func=command_import_local_video)
+
+    p_jobs = sub.add_parser("list-video-jobs", help="List exported local GPU video jobs")
+    p_jobs.add_argument(
+        "--status",
+        default="all",
+        choices=["all", "pending", "completed", "failed"],
+        help="Filter by job status directory",
+    )
+    p_jobs.set_defaults(func=command_list_video_jobs)
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,53 @@
+{
+  "jobs_dir": "D:/content-ops/video_jobs",
+  "output_dir": "D:/content-ops/rendered_videos",
+  "comfyui_url": "http://127.0.0.1:8000",
+  "comfyui": {
+    "url": "http://127.0.0.1:8000",
+    "render_mode": "slideshow",
+    "workflow_file": "short_video.api.json",
+    "workflow_dir": "D:/content-ops/workflows",
+    "checkpoint_name": "",
+    "checkpoint_candidates": [
+      "dreamshaper_8.safetensors",
+      "majicmixRealistic_v7.safetensors",
+      "v1-5-pruned-emaonly.safetensors",
+      "sd_xl_base_1.0.safetensors"
+    ],
+    "width": 720,
+    "height": 1280,
+    "max_segments": 6,
+    "tts_voice": "zh-CN-XiaoxiaoNeural",
+      "base_seed": 42,
+      "allow_plain_fallback": true,
+      "poll_interval_seconds": 3,
+    "timeout_seconds": 3600
+  },
+  "pull_jobs_from_server": {
+    "enabled": true,
+    "server_host": "118.25.178.116",
+    "server_user": "root",
+    "server_port": 22,
+    "remote_jobs_dir": "/opt/fa/automation/state/video_jobs/pending",
+    "ssh_identity_file": "D:/content-ops/ssh/worker_key"
+  },
+  "upload": {
+    "enabled": true,
+    "method": "scp",
+    "server_host": "118.25.178.116",
+    "server_user": "root",
+    "server_port": 22,
+    "remote_media_dir": "/opt/fa/automation/previews/media",
+    "remote_pipeline_dir": "/opt/fa",
+    "remote_python": "/opt/fa/.venv/bin/python",
+    "remote_config": "/opt/fa/automation/config.json",
+    "ssh_identity_file": "D:/content-ops/ssh/worker_key",
+    "run_remote_import": true,
+    "remote_env_script": "/etc/profile.d/content_ops_env.sh",
+    "remote_sync_feishu": false,
+    "remote_import_required": false
+  },
+  "keep_local_copy": true,
+  "poll_once": false,
+  "poll_interval_seconds": 60
+}

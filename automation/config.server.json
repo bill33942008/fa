@@ -1,0 +1,280 @@
+{
+  "llm": {
+    "enabled": true,
+    "provider": "openai-compatible",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "base_url": "https://api.deepseek.com/chat/completions",
+    "model": "deepseek-chat",
+    "temperature": 0.7,
+    "max_tokens": 2600,
+    "reasoning_model": "deepseek-reasoner",
+    "reasoning_api_key_env": "DEEPSEEK_API_KEY",
+    "reasoning_max_tokens": 4000,
+    "reasoning_timeout": 120,
+    "reasoning_effort": "high"
+  },
+  "notification": {
+    "feishu": {
+      "enabled": false,
+      "webhook_url": ""
+    },
+    "email": {
+      "enabled": true,
+      "smtp_host": "smtp.qq.com",
+      "smtp_port": 465,
+      "sender": "124151121@qq.com",
+      "password_env": "SMTP_PASSWORD",
+      "receivers": ["124151121@qq.com"]
+    }
+  },
+  "feishu_bitable": {
+    "enabled": true,
+    "app_id_env": "FEISHU_APP_ID",
+    "app_secret_env": "FEISHU_APP_SECRET",
+    "app_token": "",
+    "table_id": "",
+    "auto_create_fields": true
+  },
+  "generation": {
+    "topics_per_track": 6,
+    "default_timezone": "Asia/Shanghai"
+  },
+  "preview": {
+    "enabled": true,
+    "public_base_url": "http://118.25.178.116:8787"
+  },
+  "cloud_media": {
+    "enabled": true,
+    "image": {
+      "enabled": true,
+      "provider": "dashscope",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "base_url": "https://dashscope.aliyuncs.com/api/v1",
+      "model": "wanx-v1",
+      "model_candidates": ["wanx-v1", "wan2.5-t2i-preview", "wan2.2-t2i-flash", "wan2.2-t2i-plus"],
+      "allow_placeholder_fallback": true,
+      "images_per_item": 1,
+      "size": "1024*1024",
+      "negative_prompt": "low quality, blurry, watermark, text, deformed",
+      "output_format": "jpg",
+      "auto_render_on_plan_day": false,
+      "svg_fallback": true,
+      "max_retries": 4,
+      "retry_backoff_seconds": 2,
+      "item_delay_seconds": 1.5,
+      "poll_interval_seconds": 3,
+      "timeout_seconds": 600
+    },
+    "video": {
+      "enabled": true,
+      "provider": "dashscope",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "base_url": "https://dashscope.aliyuncs.com/api/v1",
+      "model": "wan2.6-t2v",
+      "model_candidates": ["wan2.6-t2v", "wan2.7-t2v-2026-04", "wanx2.1-t2v-turbo"],
+      "allow_server_fallback": true,
+      "duration_seconds": 8,
+      "size": "720*1280",
+      "include_blocked": false,
+      "auto_render_on_plan_day": false,
+      "max_retries": 4,
+      "retry_backoff_seconds": 2,
+      "item_delay_seconds": 2.5,
+      "poll_interval_seconds": 5,
+      "timeout_seconds": 1200
+    }
+  },
+  "local_gpu": {
+    "enabled": false,
+    "auto_export_on_plan_day": false,
+    "jobs_dir": "state/video_jobs",
+    "comfyui_url": "http://127.0.0.1:8000",
+    "comfyui": {
+      "url": "http://127.0.0.1:8000",
+      "render_mode": "slideshow",
+      "workflow_file": "short_video.api.json",
+      "workflow_dir": "workflows",
+      "checkpoint_name": "",
+      "checkpoint_candidates": ["dreamshaper_8.safetensors", "majicmixRealistic_v7.safetensors", "v1-5-pruned-emaonly.safetensors", "sd_xl_base_1.0.safetensors"],
+      "width": 720,
+      "height": 1280,
+      "max_segments": 6,
+      "tts_voice": "zh-CN-XiaoxiaoNeural",
+      "base_seed": 42,
+      "poll_interval_seconds": 3,
+      "timeout_seconds": 3600
+    },
+    "upload": {
+      "enabled": false,
+      "method": "scp",
+      "server_host": "118.25.178.116",
+      "server_user": "root",
+      "server_port": 22,
+      "remote_media_dir": "/opt/fa/automation/previews/media",
+      "remote_pipeline_dir": "/opt/fa",
+      "remote_python": "/opt/fa/.venv/bin/python",
+      "remote_config": "/opt/fa/automation/config.json",
+      "ssh_identity_file": ""
+    }
+  },
+  "sample_video": {
+    "enabled": true,
+    "auto_render_on_plan_day": false,
+    "include_blocked": false,
+    "public_base_url": "http://118.25.178.116:8787",
+    "tts_engine": "edge-tts",
+    "tts_binary": "/opt/fa/.venv/bin/edge-tts",
+    "tts_voice": "zh-CN-XiaoxiaoNeural",
+    "tts_speed": 165,
+    "segment_gap_seconds": 0.25,
+    "lead_in_seconds": 0.4,
+    "min_duration_seconds": 8,
+    "max_segments": 8,
+    "width": 720,
+    "height": 1280,
+    "fps": 25,
+    "background_color": "#111827"
+  },
+  "quality_scoring": {
+    "enabled": true,
+    "llm_review_enabled": true,
+    "publish_threshold": 80,
+    "revise_threshold": 60
+  },
+  "quality_guard": {
+    "enabled": true,
+    "block_score_threshold": 60,
+    "min_body_chars": 120,
+    "min_hook_chars": 10,
+    "notify_on_block": true,
+    "target_statuses": ["pending_review", "approved", "ready_to_post"],
+    "placeholder_patterns": [
+      "围绕以上选题，结合账号定位给出可执行观点，避免空泛结论。",
+      "用一个反常识观点开场，提升完播和阅读意愿。",
+      "无摘要，建议补充自己的观察。"
+    ]
+  },
+  "tracks": {
+    "football": {
+      "description": "time-sensitive football match preview, fixtures, injuries, tactical and odds analysis for Jingcai followers",
+      "keywords": ["竞彩","足球","football","soccer","preview","fixture","injury","今日","明日","赛程","赛前","前瞻","战术","伤停","首发","盘口","xG","欧赔","联赛"],
+      "topic_boost_keywords": ["preview","fixtures","fixture","injury","team news","lineup","今日","明日","今晚","赛程","赛前","前瞻","伤停","首发","阵容","ahead of","to face","host","visit","ready to go","set to face","squad","group stage","last 16","knockout"],
+      "topic_exclude_keywords": ["回放","录像","集锦","进球集锦","全场回放","赛果","战报","夺冠回顾","历史","highlights","match report","match recap","full time","full-time","post-match","postmatch","final score","scoreline","round-up","round up","beats","defeats","victory","完场","绝杀","破门","险胜","不敌","大胜","惨败","赛后","eliminated from","grades for every","copy of","celebrities at","snooker","斯诺克","billiard"],
+      "topic_require_any_keywords": false,
+      "topic_football_only": true,
+      "filter_post_match_topics": true,
+      "require_pub_date": true,
+      "max_topic_age_hours": 18,
+      "rss_sources": [
+        "https://www.espn.com/espn/rss/soccer/news",
+        "https://news.google.com/rss/search?q=football+fixtures+today+preview+injury+lineup+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E4%BB%8A%E6%97%A5+%E8%B6%B3%E7%90%83+%E8%B5%9B%E7%A8%8B+%E8%B5%9B%E5%89%8D+%E4%BC%A4%E5%81%9C+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E7%AB%9E%E5%BD%A9+%E8%B6%B3%E7%90%83+%E8%B5%9B%E7%A8%8B+%E8%B5%9B%E5%89%8D+%E4%BC%A4%E5%81%9C+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      ],
+      "system_prompt": "你是专业足球比赛分析专家，为微信公众号「涛哥儿聊个球」写赛前深度分析。风格：有理有据、数据支撑、战术洞察、画龙点睛。不要写通用信息核实清单。每篇文章必须：1）指明具体的对阵、时间、赛事背景；2）分析双方战术风格（阵型、打法、核心球员）；3）讨论关键对位和伤停影响；4）给出明确的看点和分析方向。即便信息来源有限，也要基于已知的球队特点和比赛形势做合理推演。配图：仅用「【配图1】」「【配图2】」「【配图3】」标注位置即可，不要写配图建议、配图描述或「插入配图0」之类的说明文字。免责声明：所有「此为分析推演」「建议核实」等提示统一放在文末「---」分隔线之后，不要散落在正文各处。禁止编造比分、进球人、具体伤停细节。禁止承诺收益或诱导下注。保持理性、专业、对读者有价值。"
+    },
+    "child_education": {
+      "description": "evidence-based parenting strategies, child psychology insights, study habit techniques, and age-specific education tips",
+      "keywords": ["育儿","家庭教育","亲子教育","儿童教育","正面管教","情绪管理","专注力","学习习惯","时间管理","小学生","初中生","青春期","英语启蒙","数学思维","阅读习惯","兴趣培养","习惯养成","能力培养","亲子沟通","父母成长","儿童心理","家校共育","parenting","child education","early childhood"],
+      "topic_boost_keywords": ["育儿","家庭教育","亲子","正面管教","情绪管理","专注力","学习习惯","小学生","青春期","英语启蒙","习惯养成","亲子沟通","儿童心理","父母必读","育儿知识","家庭教育方法","儿童教育","早教","启蒙","parenting tips","child development","preschool","primary school","study skills","screen time","growth mindset","emotional intelligence","social skills"],
+      "topic_exclude_keywords": ["高考","中考","分数线","录取","招生","学区房","升学率","排名","培训机构广告","补习班推荐","胎教","备孕","不孕不育","疫苗接种","疾病症状","药品推荐","食谱推荐","辅食制作","团购","促销","保健品","sponsored","ad","advertisement","affiliate"],
+      "topic_require_any_keywords": true,
+      "max_topic_age_hours": 72,
+      "rss_sources": [
+        "https://news.google.com/rss/search?q=%E5%AE%B6%E5%BA%AD%E6%95%99%E8%82%B2+%E8%82%B2%E5%84%BF+%E6%96%B9%E6%B3%95&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E5%B0%8F%E5%AD%A6%E7%94%9F+%E5%AD%A6%E4%B9%A0%E4%B9%A0%E6%83%AF+%E4%B8%93%E6%B3%A8%E5%8A%9B&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E4%BA%B2%E5%AD%90%E6%B2%9F%E9%80%9A+%E6%83%85%E7%BB%AA%E7%AE%A1%E7%90%86+%E6%AD%A3%E9%9D%A2%E7%AE%A1%E6%95%99&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E9%9D%92%E6%98%A5%E6%9C%9F+%E5%84%BF%E7%AB%A5%E5%BF%83%E7%90%86+%E7%88%B6%E6%AF%8D+%E6%95%99%E8%82%B2&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=child+parenting+education+tips+psychology&hl=en&gl=US&ceid=US:en"
+      ],
+      "system_prompt": "你是「育见成长研究所」的主编，专注为中国父母提供科学、实用、可操作的育儿和家庭教育内容。\n\n内容风格：温暖理性、循证依据、拒绝焦虑贩卖。每篇文章要让家长读完就有「今天就能试试」的具体行动。\n\n每篇文章必须包含：1）一个具体的育儿场景或痛点（如：孩子写作业拖拉、沉迷手机、不愿沟通），让家长产生「这不就是我家孩子吗」的共鸣；2）基于儿童心理学或教育学的科学解释（为什么孩子会这样，不要只给结论要讲原理）；3）2-3个具体可执行的解决方法（步骤清晰，家长能照着做）；4）适龄范围说明（这个方法适合几岁到几岁的孩子）。\n\n禁止内容：贩卖焦虑（「千万别错过关键期」「再不XX就晚了」）、夸大承诺（「三天见效」）、替代专业医疗建议、推荐具体药物或保健品。\n\n保持客观、有温度、真正对家长有帮助。"
+    },
+    "travel": {
+      "description": "weekend getaway itineraries, budget travel guides, real-experience pitfall warnings, photo spot recommendations, and destination deep-dives",
+      "keywords": ["周末游","周边游","旅行攻略","旅游","自由行","自驾游","避坑","预算","穷游","小众景点","打卡","拍照","美食","民宿","亲子游","户外","徒步","露营","路线","周末去哪儿","travel","weekend getaway","itinerary","budget travel"],
+      "topic_boost_keywords": ["周末","攻略","避坑","预算","小众","打卡","拍照","民宿","自驾","路线","景点","美食","亲子游","露营","徒步","周末去哪儿","周末好去处","一日游","两日游","周边游","行程安排","自由行攻略","穷游攻略","旅行清单","itinerary","travel guide","budget","hidden gem","off the beaten path"],
+      "topic_exclude_keywords": ["出国","海外","签证","移民","留学","代购","免税店","奢侈品","跟团游","购物团","低价团","强制消费","旅行社推荐","酒店推广","sponsored","ad","advertisement","affiliate","promo","coupon","discount code","长期旅居","数字游民","环球旅行"],
+      "topic_require_any_keywords": true,
+      "max_topic_age_hours": 120,
+      "rss_sources": [
+        "https://news.google.com/rss/search?q=%E5%91%A8%E6%9C%AB+%E6%97%85%E6%B8%B8+%E6%94%BB%E7%95%A5+%E9%81%BF%E5%9D%91&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E8%87%AA%E9%A9%BE%E6%B8%B8+%E5%91%A8%E8%BE%B9%E6%B8%B8+%E5%B0%8F%E4%BC%97%E6%99%AF%E7%82%B9&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E6%B0%91%E5%AE%BF+%E6%89%93%E5%8D%A1+%E6%8B%8D%E7%85%A7+%E6%97%85%E6%B8%B8&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E9%9C%B2%E8%90%A5+%E6%88%B7%E5%A4%96+%E5%BE%92%E6%AD%A5+%E8%A1%8C%E7%A8%8B&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=weekend+getaway+travel+guide+itinerary+budget&hl=en&gl=US&ceid=US:en"
+      ],
+      "system_prompt": "你是「周末出走研究所」的内容策划，专门为小红书用户提供高质量、真实可用的周末旅行攻略。\n\n内容定位：只做国内周末/短途旅行（1-3天），注重真实体验和实操性，不做「照骗」攻略。\n\n每篇文章必须包含：1）明确的行程路线（从哪里出发、怎么去、每天的具体安排），可按DAY1/DAY2分段呈现；2）真实预算明细（交通、住宿、餐饮、门票等分项费用，给出人均参考价）；3）至少2个避坑提醒（容易被坑的地方、不值得去的网红点、旺季排队技巧等，必须是真实经验）；4）拍照/打卡点位推荐（具体位置、最佳拍摄时间、构图建议）。\n\n风格要求：语言简洁明了、信息密度高、小红书图文友好。善用emoji做信息分层，段落短小精悍，重点信息加粗或标出。\n\n禁止内容：虚假滤镜照、夸大描述、旅行社/酒店付费推广、未核实的美食推荐。\n\n保持真实、实用、让读者看了就能直接出发。"
+    },
+    "ai_funny": {
+      "description": "AI-powered short comedy scripts with trending topics, internet memes, unexpected punchlines, and sharp social observations",
+      "keywords": ["搞笑","段子","脱口秀","喜剧","反转","热梗","网络流行语","嘲讽","幽默","整活","抽象","发疯文学","精神状态","职场吐槽","生活段子","AI搞笑","comedy","funny","humor","meme","sketch","standup","punchline","satire"],
+      "topic_boost_keywords": ["搞笑","段子","热梗","反转","脱口秀","整活","抽象","发疯","精神状态","吐槽","幽默","沙雕","离谱","笑死","太好笑了","爆笑","神反转","年度最佳","笑点","meme","funny","comedy","sketch","satire","parody","punchline","viral","trending","relatable","dark humor"],
+      "topic_exclude_keywords": ["政治","时政","领导人","敏感","色情","低俗","暴力","血腥","恐怖","宗教","种族","地域歧视","性别对立","极端言论","谣言","fake news","conspiracy","tragedy","death","disaster","战争","灾难","疫情"],
+      "topic_require_any_keywords": true,
+      "max_topic_age_hours": 48,
+      "rss_sources": [
+        "https://news.google.com/rss/search?q=%E7%83%AD%E6%A2%97+%E6%90%9E%E7%AC%91+%E8%A7%86%E9%A2%91+%E7%9F%AD%E8%A7%86%E9%A2%91&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E8%84%B1%E5%8F%A3%E7%A7%80+%E6%AE%B5%E5%AD%90+%E5%B9%BD%E9%BB%98+%E5%8F%8D%E8%BD%AC&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E7%BD%91%E7%BB%9C%E6%B5%81%E8%A1%8C%E8%AF%AD+%E8%99%9A%E6%9E%84+%E6%90%9E%E7%AC%91&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E8%81%8C%E5%9C%BA%E5%90%90%E6%A7%BD+%E7%94%9F%E6%B4%BB%E6%AE%B5%E5%AD%90+%E5%B9%BD%E9%BB%98&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=viral+comedy+sketch+funny+meme+trending&hl=en&gl=US&ceid=US:en"
+      ],
+      "system_prompt": "你是「AI笑点工厂」的首席喜剧编剧，为快手平台创作AI生成的爆笑短剧脚本。目标受众是18-35岁年轻网民，熟悉网络热梗、喜欢出其不意的反转和犀利的社会观察。\n\n每篇脚本必须遵循以下结构：1）前3秒钩子（hook）——用一个反常识的画面、对话或自白开场，瞬间抓住注意力；2）15-25秒内必须有第一个反转——剧情朝意想不到的方向发展，打破观众的预期；3）30-40秒内达到笑点/包袱——可以是双关、callback、夸张的误会或犀利的讽刺；4）结尾余味——最好有一个「细思极笑」的结尾。\n\n热门题材方向：职场荒诞日常、AI与人类的尴尬互动、社交媒体的魔幻现象、情侣/朋友间的神操作、生活中那些离谱但真实的小事。\n\n节奏要求：每句台词不超过15字，对话密集、信息密度高。善用网络流行语和热梗，但不要堆砌。\n\n禁止内容：政治敏感、人身攻击、低俗色情、暴力血腥、恶意嘲讽弱势群体。\n\n保持幽默、犀利、紧跟热梗，让观众笑着看完后忍不住转发。"
+    }
+  },
+  "platforms": [
+    {
+      "platform": "wechat_official",
+      "account_name": "涛哥儿聊个球",
+      "track": "football",
+      "publish_time": "12:20",
+      "auto_publish": true,
+      "post_format": "long_article"
+    },
+    {
+      "platform": "douyin",
+      "account_name": "育见成长研究所",
+      "track": "child_education",
+      "publish_time": "18:40",
+      "auto_publish": false,
+      "post_format": "short_video_script"
+    },
+    {
+      "platform": "wechat_channels",
+      "account_name": "育见成长研究所视频号",
+      "track": "child_education",
+      "publish_time": "19:20",
+      "auto_publish": false,
+      "post_format": "short_video_script"
+    },
+    {
+      "platform": "xiaohongshu",
+      "account_name": "周末出走研究所",
+      "track": "travel",
+      "publish_time": "21:00",
+      "auto_publish": false,
+      "post_format": "graphic_post"
+    },
+    {
+      "platform": "kuaishou",
+      "account_name": "AI笑点工厂",
+      "track": "ai_funny",
+      "publish_time": "20:30",
+      "auto_publish": false,
+      "post_format": "short_video_script"
+    }
+  ],
+  "publish_adapters": {
+    "wechat_official": {
+      "enabled": false,
+      "appid_env": "WECHAT_OFFICIAL_APPID",
+      "appsecret_env": "WECHAT_OFFICIAL_APPSECRET",
+      "thumb_media_id": "",
+      "author": "涛哥儿聊个球",
+      "digest_max_length": 110,
+      "submit_to_publish": true,
+      "need_open_comment": 1,
+      "only_fans_can_comment": 0
+    }
+  }
+}

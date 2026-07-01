@@ -1,0 +1,294 @@
+{
+  "llm": {
+    "enabled": true,
+    "provider": "openai-compatible",
+    "api_key_env": "OPENAI_API_KEY",
+    "base_url": "https://api.openai.com/v1/chat/completions",
+    "model": "gpt-4.1-mini",
+    "temperature": 0.7,
+    "max_tokens": 1400
+  },
+  "notification": {
+    "feishu": {
+      "enabled": false,
+      "webhook_url": ""
+    },
+    "email": {
+      "enabled": false,
+      "smtp_host": "smtp.example.com",
+      "smtp_port": 465,
+      "sender": "bot@example.com",
+      "password_env": "SMTP_PASSWORD",
+      "receivers": [
+        "you@example.com"
+      ]
+    }
+  },
+  "feishu_bitable": {
+    "enabled": false,
+    "app_id_env": "FEISHU_APP_ID",
+    "app_secret_env": "FEISHU_APP_SECRET",
+    "app_token": "",
+    "table_id": "",
+    "auto_create_fields": true
+  },
+  "generation": {
+    "topics_per_track": 6,
+    "default_timezone": "Asia/Shanghai"
+  },
+  "preview": {
+    "enabled": true,
+    "public_base_url": "http://YOUR_SERVER_IP:8787"
+  },
+  "cloud_media": {
+    "enabled": false,
+    "image": {
+      "enabled": false,
+      "provider": "dashscope",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "base_url": "https://dashscope.aliyuncs.com/api/v1",
+      "model": "wanx-v1",
+      "model_candidates": [
+        "wanx-v1",
+        "wan2.5-t2i-preview",
+        "wan2.2-t2i-flash",
+        "wan2.2-t2i-plus"
+      ],
+      "allow_placeholder_fallback": true,
+      "images_per_item": 3,
+      "size": "1024*1024",
+      "negative_prompt": "低质量，模糊，文字水印，畸形",
+      "output_format": "jpg",
+      "auto_render_on_plan_day": false,
+      "max_retries": 4,
+      "retry_backoff_seconds": 2,
+      "item_delay_seconds": 1.5,
+      "poll_interval_seconds": 3,
+      "timeout_seconds": 600
+    },
+    "video": {
+      "enabled": false,
+      "provider": "dashscope",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "base_url": "https://dashscope.aliyuncs.com/api/v1",
+      "model": "wan2.6-t2v",
+      "model_candidates": [
+        "wan2.6-t2v",
+        "wan2.7-t2v-2026-04",
+        "wanx2.1-t2v-turbo"
+      ],
+      "allow_server_fallback": true,
+      "duration_seconds": 8,
+      "size": "720*1280",
+      "include_blocked": false,
+      "auto_render_on_plan_day": false,
+      "max_retries": 4,
+      "retry_backoff_seconds": 2,
+      "item_delay_seconds": 2.5,
+      "poll_interval_seconds": 5,
+      "timeout_seconds": 1200
+    }
+  },
+  "local_gpu": {
+    "enabled": false,
+    "auto_export_on_plan_day": true,
+    "jobs_dir": "state/video_jobs",
+    "comfyui_url": "http://127.0.0.1:8000",
+    "comfyui": {
+      "url": "http://127.0.0.1:8000",
+      "render_mode": "slideshow",
+      "workflow_file": "short_video.api.json",
+      "workflow_dir": "workflows",
+      "checkpoint_name": "",
+      "checkpoint_candidates": [
+        "dreamshaper_8.safetensors",
+        "majicmixRealistic_v7.safetensors",
+        "v1-5-pruned-emaonly.safetensors",
+        "sd_xl_base_1.0.safetensors"
+      ],
+      "width": 720,
+      "height": 1280,
+      "max_segments": 6,
+      "tts_voice": "zh-CN-XiaoxiaoNeural",
+      "base_seed": 42,
+      "poll_interval_seconds": 3,
+      "timeout_seconds": 3600
+    },
+    "upload": {
+      "enabled": true,
+      "method": "scp",
+      "server_host": "YOUR_SERVER_IP",
+      "server_user": "root",
+      "server_port": 22,
+      "remote_media_dir": "/opt/fa/automation/previews/media",
+      "remote_pipeline_dir": "/opt/fa",
+      "remote_python": "/opt/fa/.venv/bin/python",
+      "remote_config": "/opt/fa/automation/config.json",
+      "ssh_identity_file": ""
+    }
+  },
+  "sample_video": {
+    "enabled": true,
+    "auto_render_on_plan_day": false,
+    "include_blocked": false,
+    "public_base_url": "http://YOUR_SERVER_IP:8787",
+    "tts_engine": "edge-tts",
+    "tts_binary": "edge-tts",
+    "tts_voice": "zh-CN-XiaoxiaoNeural",
+    "tts_speed": 165,
+    "segment_gap_seconds": 0.25,
+    "lead_in_seconds": 0.4,
+    "min_duration_seconds": 8,
+    "max_segments": 8,
+    "width": 720,
+    "height": 1280,
+    "fps": 25,
+    "background_color": "#111827"
+  },
+  "quality_scoring": {
+    "enabled": true,
+    "llm_review_enabled": true,
+    "publish_threshold": 80,
+    "revise_threshold": 60
+  },
+  "quality_guard": {
+    "enabled": true,
+    "block_score_threshold": 60,
+    "min_body_chars": 120,
+    "min_hook_chars": 10,
+    "notify_on_block": true,
+    "target_statuses": [
+      "pending_review",
+      "approved",
+      "ready_to_post"
+    ],
+    "placeholder_patterns": [
+      "围绕以上选题，结合账号定位给出可执行观点，避免空泛结论。",
+      "用一个反常识观点开场，提升完播和阅读意愿。",
+      "无摘要，建议补充自己的观察。"
+    ]
+  },
+  "tracks": {
+    "football": {
+      "description": "football tactical analysis with data interpretation for竞彩关注人群",
+      "keywords": [
+        "竞彩",
+        "足球",
+        "战术",
+        "伤停",
+        "盘口",
+        "xG",
+        "欧赔",
+        "联赛"
+      ],
+      "rss_sources": [
+        "https://news.google.com/rss/search?q=%E7%AB%9E%E5%BD%A9+%E8%B6%B3%E7%90%83&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E8%8B%B1%E8%B6%85+%E8%B5%9B%E5%89%8D+%E5%88%86%E6%9E%90&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      ],
+      "system_prompt": "你是专业足球数据分析编辑，必须输出理性分析，不得承诺收益，不得诱导下注。"
+    },
+    "child_education": {
+      "description": "practical parenting and child education short-form content",
+      "keywords": [
+        "儿童教育",
+        "育儿",
+        "专注力",
+        "学习习惯",
+        "亲子",
+        "家长"
+      ],
+      "rss_sources": [
+        "https://news.google.com/rss/search?q=%E5%84%BF%E7%AB%A5+%E6%95%99%E8%82%B2+%E5%AE%B6%E9%95%BF&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E5%B0%8F%E5%AD%A6+%E5%AD%A6%E4%B9%A0%E4%B9%A0%E6%83%AF&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      ],
+      "system_prompt": "你是儿童教育内容策划，风格温和、可执行，避免夸大承诺。"
+    },
+    "travel": {
+      "description": "travel guides with routes, budget, tips and pitfalls",
+      "keywords": [
+        "旅游",
+        "周末",
+        "攻略",
+        "避坑",
+        "预算",
+        "拍照"
+      ],
+      "rss_sources": [
+        "https://news.google.com/rss/search?q=%E5%91%A8%E6%9C%AB+%E6%97%85%E6%B8%B8+%E6%94%BB%E7%95%A5&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E6%97%85%E8%A1%8C+%E9%81%BF%E5%9D%91&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      ],
+      "system_prompt": "你是旅行攻略编辑，强调真实体验、预算清晰、信息实用。"
+    },
+    "ai_funny": {
+      "description": "AI generated comedy script with strong punchlines",
+      "keywords": [
+        "搞笑",
+        "段子",
+        "AI",
+        "短视频",
+        "热梗",
+        "反转"
+      ],
+      "rss_sources": [
+        "https://news.google.com/rss/search?q=AI+%E6%90%9E%E7%AC%91+%E7%9F%AD%E8%A7%86%E9%A2%91&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E7%83%AD%E6%A2%97+%E7%9F%AD%E8%A7%86%E9%A2%91&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+      ],
+      "system_prompt": "你是短视频喜剧编剧，要求前3秒有钩子，15-25秒内有反转。"
+    }
+  },
+  "platforms": [
+    {
+      "platform": "wechat_official",
+      "account_name": "涛哥儿聊个球",
+      "track": "football",
+      "publish_time": "12:20",
+      "auto_publish": true,
+      "post_format": "long_article"
+    },
+    {
+      "platform": "douyin",
+      "account_name": "育见成长研究所",
+      "track": "child_education",
+      "publish_time": "18:40",
+      "auto_publish": false,
+      "post_format": "short_video_script"
+    },
+    {
+      "platform": "wechat_channels",
+      "account_name": "育见成长研究所视频号",
+      "track": "child_education",
+      "publish_time": "19:20",
+      "auto_publish": false,
+      "post_format": "short_video_script"
+    },
+    {
+      "platform": "xiaohongshu",
+      "account_name": "周末出走研究所",
+      "track": "travel",
+      "publish_time": "21:00",
+      "auto_publish": false,
+      "post_format": "graphic_post"
+    },
+    {
+      "platform": "kuaishou",
+      "account_name": "AI笑点工厂",
+      "track": "ai_funny",
+      "publish_time": "20:30",
+      "auto_publish": false,
+      "post_format": "short_video_script"
+    }
+  ],
+  "publish_adapters": {
+    "wechat_official": {
+      "enabled": false,
+      "appid_env": "WECHAT_OFFICIAL_APPID",
+      "appsecret_env": "WECHAT_OFFICIAL_APPSECRET",
+      "thumb_media_id": "",
+      "author": "涛哥儿聊个球",
+      "digest_max_length": 110,
+      "submit_to_publish": true,
+      "need_open_comment": 1,
+      "only_fans_can_comment": 0
+    }
+  }
+}
