@@ -686,6 +686,13 @@ NON_FOOTBALL_MARKERS = [
     "sky sports racing",
     "open championship",
     "final qualifying",
+    "snooker",
+    "斯诺克",
+    "billiard",
+    "台球",
+    "world grand prix",
+    "players championship",
+    "tour championship",
 ]
 
 
@@ -859,7 +866,11 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
 
 
 def llm_generate(
-    llm_cfg: dict[str, Any], system_prompt: str, user_prompt: str
+    llm_cfg: dict[str, Any], system_prompt: str, user_prompt: str,
+    *,
+    model_override: str | None = None,
+    use_reasoning: bool = False,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any] | None:
     if not llm_cfg.get("enabled", False):
         return None
@@ -873,22 +884,34 @@ def llm_generate(
         print("[WARN] LLM base_url missing, fallback mode enabled.")
         return None
 
-    payload = {
-        "model": llm_cfg.get("model", "gpt-4.1-mini"),
-        "temperature": llm_cfg.get("temperature", 0.7),
-        "max_tokens": llm_cfg.get("max_tokens", 1400),
+    payload: dict[str, Any] = {
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
     }
 
+    if use_reasoning:
+        payload["model"] = model_override or llm_cfg.get("reasoning_model", "deepseek-reasoner")
+        payload["max_tokens"] = llm_cfg.get("reasoning_max_tokens", 4000)
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        reasoning_key = os.getenv(llm_cfg.get("reasoning_api_key_env", "DEEPSEEK_REASONER_API_KEY"), "")
+        if reasoning_key:
+            api_key = reasoning_key
+    else:
+        payload["model"] = model_override or llm_cfg.get("model", "gpt-4.1-mini")
+        payload["temperature"] = llm_cfg.get("temperature", 0.7)
+        payload["max_tokens"] = llm_cfg.get("max_tokens", 1400)
+
+    timeout = llm_cfg.get("reasoning_timeout", 120) if use_reasoning else llm_cfg.get("timeout", 35)
+
     try:
         raw = http_post_json(
             endpoint,
             payload,
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=35,
+            timeout=timeout,
         )
     except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
         print(f"[WARN] LLM request failed, fallback mode enabled: {exc}")
@@ -972,6 +995,9 @@ def generate_draft(
     platform_cfg: dict[str, Any],
     track_cfg: dict[str, Any],
     topic: dict[str, Any],
+    *,
+    match_knowledge: str = "",
+    use_reasoning: bool | None = None,
 ) -> dict[str, Any]:
     system_prompt = track_cfg.get(
         "system_prompt", "你是内容运营编辑，输出可发布草稿。"
@@ -1021,16 +1047,19 @@ def generate_draft(
         format_requirements = "生成可直接发布的中文内容，结构清晰，避免空话。"
     topic_title = str(topic.get("title", "")).strip()
     topic_description = str(topic.get("description", "")).strip()
-    source_plain = strip_markdown(f"{topic_title} {topic_description}".strip())
-    thin_source_note = ""
-    if len(source_plain) < 200:
-        thin_source_note = textwrap.dedent(
-            """
-            来源摘要较短，请从选题标题识别具体比赛/球队/赛事背景，写成针对该热点的赛前分析文章。
-            标题必须体现具体对阵或赛事，不要写成泛泛的「信息核实清单」。
-            未在来源中明确写出的伤停、首发、比分、赔率，一律标注「待官方确认」。
+
+    knowledge_section = ""
+    if match_knowledge.strip():
+        knowledge_section = textwrap.dedent(
+            f"""
+            【用户提供的比赛信息，请优先使用这些信息做深度分析】
+            {match_knowledge.strip()}
+
             """
         ).strip()
+
+    is_football = "football" in str(track_cfg.get("description", "")).lower() or "足球" in str(track_cfg.get("system_prompt", ""))
+
     user_prompt = textwrap.dedent(
         f"""
         请根据以下信息生成一个高质量、可直接发布的草稿，并且仅输出 JSON 对象，不要输出 Markdown 代码块：
@@ -1042,22 +1071,25 @@ def generate_draft(
           "hashtags": ["#标签1", "#标签2"]
         }}
 
+        {knowledge_section}
+
         通用质量要求：
         - 标题要具体，有传播点，不要标题党。
-        - hook 要能放在正文/视频开头直接使用。
+        - hook 要能放在正文开头直接使用，吸引读者继续阅读。
         - 内容必须贴合账号定位和平台语气。
-        - 不要出现“作为AI”“以下是”等提示词痕迹。
-        - 不要只复述新闻，要提炼判断、清单、避坑或可执行建议。
-        - 如果信息不足，合理标注“建议发布前核实”，不要编造具体数据。
-        - 严禁编造来源没有明确给出的事实，包括人名、比分、进球人、伤停、首发、赔率、时间地点。
-        - 足球内容优先做赛前/今日赛程/伤停/阵容/盘口分析；不要拿旧赛果或历史回放当今日热点。
-        - 如果选题看起来是赛后战报/旧比赛复盘，必须转成“风险提示/信息核实”角度，不能编造进球过程。
-        - 当前日期是 {now_local().strftime('%Y-%m-%d')}，不得写与当前日期冲突的时效表述。
-        - 已知事实：托马斯·图赫尔已于 2025-01-01 正式执教英格兰队；不得写“还没上任”“即将上任”“首秀未开始”等错误表述，除非来源明确是当时历史材料。
+        - 不要出现“作为AI”“以下是”“让我们来看看”等提示词痕迹。
+        - 不要只复述新闻，要给出深度判断、战术分析、数据洞察或可执行建议。
+        - 如果信息不足，标注“建议发布前核实”，但不要用核实清单代替正文。
+        - 严禁编造来源没有明确给出的事实（人名、比分、进球人、伤停、首发、赔率、时间地点），
+          但允许基于已知战术风格和球员特点做合理分析推演，并标注「此为分析推演」。
+        - 足球内容必须做赛前/即将开始的比赛分析：分析对阵形势、战术博弈、关键球员对位、伤停影响。
+        - 如果选题标题明确是即将开始的比赛（含日期、对阵双方），必须围绕该比赛做深度分析，
+          不得写成通用风险提示或信息核实清单。
+        - 当前日期是 {now_local().strftime('%Y-%m-%d')}，确保时效表述正确。
+        - 已知事实：托马斯·图赫尔已于 2025-01-01 正式执教英格兰队；不得写“还没上任”“即将上任”等错误表述。
 
         内容形式专项要求：
         {format_requirements}
-        {thin_source_note}
 
         账号名: {platform_cfg["account_name"]}
         平台: {platform_cfg["platform"]}
@@ -1071,7 +1103,13 @@ def generate_draft(
         """
     ).strip()
 
-    generated = llm_generate(config.get("llm", {}), system_prompt, user_prompt)
+    should_use_reasoning = use_reasoning if use_reasoning is not None else is_football
+    generated = llm_generate(
+        config.get("llm", {}),
+        system_prompt,
+        user_prompt,
+        use_reasoning=should_use_reasoning,
+    )
     if generated:
         return sanitize_draft_for_accuracy(generated, platform_cfg, track_cfg, topic)
     return sanitize_draft_for_accuracy(fallback_draft(platform_cfg, track_cfg, topic), platform_cfg, track_cfg, topic)
@@ -1118,56 +1156,15 @@ def sanitize_draft_for_accuracy(
         title = title.replace(bad, good)
         body = body.replace(bad, good)
     draft["title"] = title
-    source_text = f"{topic.get('title', '')} {topic.get('description', '')}".strip()
-    source_plain = strip_markdown(source_text)
     topic_title = str(topic.get("title", "")).strip()
-    thin_source = len(source_plain) < 200
     generic_titles = {
         "足球赛前信息核实清单：先看伤停、阵容和盘口变化",
         "足球赛前信息核实清单",
+        "赛前信息核实清单",
+        "信息核实清单",
     }
     if not title.strip() or title.strip() in generic_titles:
-        draft["title"] = f"{topic_title}：赛前看点与理性分析" if topic_title else title
-    caution = textwrap.dedent(
-        f"""
-        ## 赛前信息边界
-        本文基于当前选题来源做赛前分析。来源：{source_text or topic_title}
-
-        发布前必须二次核实：
-        - 官方首发名单和替补名单
-        - 赛前发布会与俱乐部伤停更新
-        - 盘口/赔率的最新变化
-
-        未在来源中明确出现的球员姓名、进球人、比分过程、具体伤停原因，不能当作确定事实发布。
-        """
-    ).strip()
-    if thin_source:
-        caution = textwrap.dedent(
-            f"""
-            ## 赛前信息边界
-            来源摘要较短，正文主要依据选题标题「{topic_title}」展开分析。
-            具体首发、伤停、赔率细节发布前请二次核实；未确认信息请标注「待官方确认」。
-
-            原始来源：{source_text or topic_title}
-            """
-        ).strip()
-    body = replace_markdown_sections_by_keywords(
-        body,
-        ["伤病名单", "伤停名单", "伤停", "首发", "阵容深度", "预计阵容", "谁来填补"],
-        caution,
-    )
-    body = replace_markdown_sections_by_keywords(
-        body,
-        ["进球", "比分", "战报", "赛果", "绝杀", "破门", "扳平"],
-        textwrap.dedent(
-            """
-            ## 比赛事实核实
-            如果本文涉及比分、进球或赛果，请以官方赛果和权威数据源为准。当前自动稿不直接给出进球人和具体进球过程，避免误报。
-            """
-        ).strip(),
-    )
-    if "## 赛前信息边界" not in body:
-        body = f"{body}\n\n{caution}"
+        draft["title"] = f"{topic_title}：赛前深度分析" if topic_title else title
     draft["body_markdown"] = body
     return draft
 
@@ -1951,9 +1948,11 @@ def build_queue_item(
     track_cfg: dict[str, Any],
     track_name: str,
     topic: dict[str, Any],
+    *,
+    match_knowledge: str = "",
 ) -> dict[str, Any]:
     queue_id = uuid.uuid4().hex[:12]
-    draft = generate_draft(config, platform_cfg, track_cfg, topic)
+    draft = generate_draft(config, platform_cfg, track_cfg, topic, match_knowledge=match_knowledge)
     quality = evaluate_draft_quality(config, platform_cfg, track_cfg, topic, draft)
     output_dir = OUTBOX_DIR / date / platform_cfg["platform"]
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -5014,6 +5013,102 @@ def command_generate_account(args: argparse.Namespace) -> None:
         sync_queue_to_feishu_bitable(config, queue)
 
 
+def command_generate_football(args: argparse.Namespace) -> None:
+    """Generate a football match analysis article with optional user-provided match knowledge."""
+    ensure_dirs()
+    config = load_config(Path(args.config))
+    date = str(args.date or now_local().strftime("%Y-%m-%d"))
+    match_knowledge = str(args.knowledge or "").strip()
+    no_illustrations = bool(args.no_illustrations)
+
+    for platform_cfg in config.get("platforms", []):
+        if platform_cfg.get("track") != "football":
+            continue
+        track_cfg = config.get("tracks", {}).get("football", {})
+        if not track_cfg:
+            print(f"[WARN] Track 'football' not found in config.")
+            continue
+        track_name = "football"
+
+        per_track_limit = int(config.get("generation", {}).get("topics_per_track", 6))
+        topics = collect_track_topics("football", track_cfg, per_track_limit)
+        print(f"[INFO] football: collected {len(topics)} topics from RSS feeds")
+
+        queue = load_queue()
+        created_items: list[dict[str, Any]] = []
+
+        if match_knowledge:
+            print(f"[INFO] Using user-provided match knowledge to guide generation.")
+            print(f"[INFO] Match info: {match_knowledge[:200]}")
+
+        selected_topics = topics[:1] if topics else []
+        if not selected_topics and match_knowledge:
+            # If no RSS topics but we have knowledge, create a placeholder topic
+            placeholder = {
+                "title": f"足球赛前分析 - {date}",
+                "link": "",
+                "description": match_knowledge,
+                "track": "football",
+                "source": "user_provided",
+                "score": 50.0,
+            }
+            selected_topics = [placeholder]
+            print("[INFO] No RSS topics, generating based on user-provided knowledge only.")
+        elif not selected_topics:
+            print("[WARN] No fresh football topics available from RSS feeds.")
+            print("[WARN] Consider using --knowledge to provide match information.")
+
+        for topic in selected_topics:
+            item = build_queue_item(
+                config, date, platform_cfg, track_cfg, track_name, topic,
+                match_knowledge=match_knowledge,
+            )
+            queue.append(item)
+            created_items.append(item)
+            print(
+                f"[OK] generated {item['account_name']} -> {item['id']} "
+                f"{item['quality_badge']}{item['total_score']} {item['title'][:60]}"
+            )
+
+        if not created_items:
+            print("[DONE] No content generated.")
+            return
+
+        guard_result = apply_quality_guard(config, created_items)
+        if guard_result["changed"]:
+            print(f"[INFO] Quality guard auto-blocked {len(guard_result['blocked_items'])} item(s).")
+
+        if not no_illustrations:
+            cloud_cfg = config.get("cloud_media", {})
+            image_cfg = cloud_cfg.get("image", {})
+            if cloud_cfg.get("enabled", False) and image_cfg.get("enabled", False):
+                image_results = render_cloud_illustrations_for_items(config, created_items)
+                ok_count = len([x for x in image_results if x.get("status") == "ok"])
+                print(f"[OK] illustrations ready: {ok_count}/{len(created_items)}")
+        else:
+            print("[INFO] Skipping cloud illustrations per --no-illustrations flag.")
+
+        for item in created_items:
+            generate_preview_for_item(config, item)
+
+        date_items = [item for item in queue if item.get("date") == date]
+        preview_index = build_preview_index(config, date_items, date)
+        accounts_index = build_accounts_index(config, queue, date)
+        build_dashboard_index(config, queue, date)
+        preview_portal = build_preview_portal(config)
+        save_queue(queue)
+
+        print(f"[OK] preview index: {preview_index.get('index_url') or preview_index.get('index_file')}")
+        print(f"[OK] accounts page: {accounts_index.get('index_url') or accounts_index.get('index_file')}")
+        if preview_portal.get("portal_url"):
+            print(f"[OK] preview portal: {preview_portal['portal_url']}")
+        print(f"[DONE] Generated {len(created_items)} football analysis item(s).")
+        if args.sync_feishu:
+            sync_queue_to_feishu_bitable(config, queue)
+
+        break  # Only process the first football platform (wechat_official)
+
+
 def command_serve_review(args: argparse.Namespace) -> None:
     ensure_dirs()
     config_path = str(args.config)
@@ -5859,6 +5954,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--sync-feishu", action="store_true", help="Sync generated items to Feishu Bitable"
     )
     p_gen_account.set_defaults(func=command_generate_account, render_images=True)
+
+    p_gen_football = sub.add_parser(
+        "generate-football",
+        help="Generate football match analysis for 涛哥儿聊个球 with optional match knowledge",
+    )
+    p_gen_football.add_argument("--date", default=None, help="Date in YYYY-MM-DD")
+    p_gen_football.add_argument(
+        "--knowledge", default="", help="Match info: teams, time, context etc."
+    )
+    p_gen_football.add_argument(
+        "--no-illustrations", action="store_true", help="Skip cloud image rendering"
+    )
+    p_gen_football.add_argument(
+        "--sync-feishu", action="store_true", help="Sync generated items to Feishu Bitable"
+    )
+    p_gen_football.set_defaults(func=command_generate_football)
 
     p_serve = sub.add_parser("serve-review", help="Serve preview UI with click-to-generate endpoint")
     p_serve.add_argument("--host", default="0.0.0.0", help="Bind host")
