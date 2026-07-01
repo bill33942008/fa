@@ -6,8 +6,9 @@ After=network.target
 Type=simple
 WorkingDirectory=/opt/fa
 Environment=FA_ROOT=/opt/fa
-EnvironmentFile=-/etc/profile.d/content_ops_env.sh
-ExecStart=/opt/fa/.venv/bin/python /opt/fa/automation/pipeline.py --config /opt/fa/automation/config.json serve-review --host 0.0.0.0 --port 8787
+# profile.d uses "export KEY=..." which systemd EnvironmentFile cannot parse.
+# serve_preview.sh sources that file correctly before starting Python.
+ExecStart=/opt/fa/automation/serve_preview.sh
 Restart=on-failure
 RestartSec=5
 
