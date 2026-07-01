@@ -2138,18 +2138,18 @@ def build_cloud_image_prompts(item: dict[str, Any], count: int = 3) -> list[str]
     title = str(item.get("title", "")).strip()
     track = str(item.get("track", "")).strip()
     style_map = {
-        "football": "sports editorial illustration, tactical board, dramatic stadium lighting, realistic style",
-        "child_education": "warm parenting education scene, lifestyle photography style, soft lighting",
-        "travel": "travel guide editorial illustration, cinematic destination view, vibrant colors",
-        "ai_funny": "comic digital illustration, vivid expressive characters, humorous style",
+        "football": "sports editorial photography, close-up of football match action, dramatic stadium lighting, depth of field, cinematic composition, 8K",
+        "child_education": "warm parenting scene, soft natural lighting, lifestyle photography, cozy indoor setting, happy family atmosphere, professional photo",
+        "travel": "travel destination photography, scenic landscape, golden hour lighting, vibrant colors, wide angle view, National Geographic style",
+        "ai_funny": "comic illustration, expressive cartoon characters, humorous situation, bright colors, digital art style, funny scene",
     }
-    style = style_map.get(track, "editorial illustration, clean visual storytelling")
+    style = style_map.get(track, "editorial photography, clean composition, professional lighting")
     prompts: list[str] = []
     for idx in range(count):
         seed_text = segments[idx] if idx < len(segments) else title
         prompts.append(
-            f"Chinese social media article illustration, no text overlay, {style}. "
-            f"Topic: {title}. Scene: {seed_text[:200]}"
+            f"Chinese social media article illustration, photographic style, no text overlay, {style}. "
+            f"Topic: {title[:100]}. Scene: {seed_text[:200]}"
         )
     return prompts
 
