@@ -58,7 +58,7 @@
       "negative_prompt": "低质量，模糊，文字水印，畸形",
       "output_format": "jpg",
       "auto_render_on_plan_day": false,
-      "svg_fallback": false,
+      "svg_fallback": true,
       "max_retries": 4,
       "retry_backoff_seconds": 2,
       "item_delay_seconds": 1.5,

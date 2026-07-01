@@ -2155,119 +2155,324 @@ def build_cloud_image_prompts(item: dict[str, Any], count: int = 3) -> list[str]
 
 
 def generate_svg_illustration(track: str, title: str, scene: str, idx: int) -> str:
-    """Generate a richer SVG illustration as fallback when cloud image API fails."""
+    """Generate a rich scene-based SVG illustration for content articles."""
     import hashlib
-    colors = {
-        "football": {"bg": "#0f172a", "accent1": "#3b82f6", "accent2": "#10b981", "text": "#f1f5f9", "muted": "#64748b"},
-        "child_education": {"bg": "#fefce8", "accent1": "#f59e0b", "accent2": "#10b981", "text": "#713f12", "muted": "#a16207"},
-        "travel": {"bg": "#f0f9ff", "accent1": "#0ea5e9", "accent2": "#f97316", "text": "#0c4a6e", "muted": "#0369a1"},
-        "ai_funny": {"bg": "#fdf2f8", "accent1": "#ec4899", "accent2": "#8b5cf6", "text": "#831843", "muted": "#be185d"},
-    }
-    c = colors.get(track, {"bg": "#f8fafc", "accent1": "#6366f1", "accent2": "#a855f7", "text": "#1e293b", "muted": "#64748b"})
-    preview = html.escape(scene[:120])
-    title_esc = html.escape(title[:60])
-    seed_hash = hashlib.md5(f"{title}{scene}{idx}".encode()).hexdigest()[:8]
+    title_esc = html.escape(title[:50])
+    scene_esc = html.escape(scene[:100])
+    seed = hashlib.md5(f"{title}{scene}{idx}".encode()).hexdigest()[:8]
 
-    scene_lower = scene.lower()
-    # Decide decorative elements based on scene keywords
-    has_field = any(w in scene_lower for w in ["pitch", "field", "stadium", "球场", "赛场", "体育场"])
-    has_players = any(w in scene_lower for w in ["player", "footballer", "球员", "前锋", "后卫", "门将"])
-    has_tactics = any(w in scene_lower for w in ["tactic", "formation", "阵型", "战术", "对位", "lineup"])
-    has_landscape = any(w in scene_lower for w in ["landscape", "mountain", "beach", "风景", "山", "海", "城市", "古城"])
-    has_map = any(w in scene_lower for w in ["map", "route", "路线", "行程", "地图", "itinerary"])
-    has_kids = any(w in scene_lower for w in ["kid", "child", "parent", "孩子", "儿童", "亲子", "家长", "育儿"])
-    has_humor = any(w in scene_lower for w in ["comedy", "funny", "搞笑", "段子", "笑话", "幽默"])
+    return _render_track_svg(track, title_esc, scene_esc, scene, seed, idx)
 
-    decorations = ""
-    if track == "football" or has_field or has_players or has_tactics:
-        # Football scene decorations
-        decorations = f'''
-  <!-- Pitch background -->
-  <rect x="60" y="80" width="600" height="340" rx="16" fill="{c["accent1"]}" opacity="0.08"/>
-  <rect x="100" y="140" width="520" height="220" rx="8" fill="none" stroke="{c["accent1"]}" stroke-width="1.5" opacity="0.2"/>
-  <line x1="360" y1="140" x2="360" y2="360" stroke="{c["accent1"]}" stroke-width="1.5" opacity="0.2"/>
-  <circle cx="360" cy="250" r="40" fill="none" stroke="{c["accent1"]}" stroke-width="1.5" opacity="0.2"/>
-  <circle cx="360" cy="250" r="6" fill="{c["accent1"]}" opacity="0.3"/>
-  <!-- Goal areas -->
-  <rect x="100" y="210" width="50" height="80" rx="4" fill="none" stroke="{c["accent2"]}" stroke-width="2" opacity="0.25"/>
-  <rect x="570" y="210" width="50" height="80" rx="4" fill="none" stroke="{c["accent2"]}" stroke-width="2" opacity="0.25"/>
-  <!-- Players as dots -->
-  <circle cx="200" cy="200" r="8" fill="{c["accent2"]}" opacity="0.4"/><circle cx="230" cy="230" r="8" fill="{c["accent2"]}" opacity="0.4"/>
-  <circle cx="250" cy="180" r="8" fill="{c["accent2"]}" opacity="0.4"/><circle cx="280" cy="220" r="8" fill="{c["accent2"]}" opacity="0.4"/>
-  <circle cx="420" cy="200" r="8" fill="{c["accent1"]}" opacity="0.4"/><circle cx="450" cy="230" r="8" fill="{c["accent1"]}" opacity="0.4"/>
-  <circle cx="470" cy="180" r="8" fill="{c["accent1"]}" opacity="0.4"/><circle cx="500" cy="220" r="8" fill="{c["accent1"]}" opacity="0.4"/>
-  <!-- Ball -->
-  <circle cx="360" cy="280" r="10" fill="none" stroke="{c["accent1"]}" stroke-width="2" opacity="0.5"/>
-  <path d="M360 270 L360 290 M350 280 L370 280 M353 273 L367 287 M353 287 L367 273" stroke="{c["accent1"]}" stroke-width="1" opacity="0.4"/>'''
-    elif track == "travel" or has_landscape or has_map:
-        decorations = f'''
-  <!-- Mountain scene -->
-  <polygon points="100,420 200,180 300,420" fill="{c["accent1"]}" opacity="0.1"/>
-  <polygon points="250,420 380,140 510,420" fill="{c["accent2"]}" opacity="0.08"/>
-  <polygon points="400,420 500,200 600,420" fill="{c["accent1"]}" opacity="0.06"/>
-  <circle cx="480" cy="160" r="30" fill="{c["accent2"]}" opacity="0.12"/>
-  <circle cx="480" cy="160" r="22" fill="{c["accent2"]}" opacity="0.08"/>
-  <!-- Route dotted line -->
-  <path d="M120,380 Q220,340 320,360 Q420,380 520,340 Q600,320 660,360" fill="none" stroke="{c["accent1"]}" stroke-width="2" stroke-dasharray="6,4" opacity="0.3"/>
-  <!-- Pins -->
-  <circle cx="120" cy="380" r="8" fill="{c["accent2"]}" opacity="0.4"/>
-  <circle cx="320" cy="360" r="8" fill="{c["accent2"]}" opacity="0.4"/>
-  <circle cx="520" cy="340" r="8" fill="{c["accent2"]}" opacity="0.4"/>'''
-    elif track == "child_education" or has_kids:
-        decorations = f'''
-  <!-- Books/learning scene -->
-  <rect x="160" y="220" width="80" height="100" rx="4" fill="{c["accent1"]}" opacity="0.12"/>
-  <rect x="180" y="240" width="60" height="8" rx="2" fill="{c["accent2"]}" opacity="0.2"/>
-  <rect x="180" y="260" width="50" height="8" rx="2" fill="{c["accent2"]}" opacity="0.15"/>
-  <rect x="180" y="280" width="55" height="8" rx="2" fill="{c["accent2"]}" opacity="0.1"/>
-  <rect x="280" y="200" width="90" height="120" rx="4" fill="{c["accent1"]}" opacity="0.08"/>
-  <rect x="300" y="220" width="60" height="8" rx="2" fill="{c["accent2"]}" opacity="0.15"/>
-  <rect x="300" y="240" width="50" height="8" rx="2" fill="{c["accent2"]}" opacity="0.12"/>
-  <!-- Star stickers -->
-  <polygon points="420,210 425,225 440,225 428,233 432,248 420,240 408,248 412,233 400,225 415,225" fill="{c["accent2"]}" opacity="0.2"/>
-  <polygon points="460,260 464,270 475,270 466,276 469,287 460,280 451,287 454,276 445,270 456,270" fill="{c["accent1"]}" opacity="0.15"/>
-  <!-- Heart -->
-  <path d="M500,240 C500,230 510,220 520,230 C530,220 540,230 540,240 C540,255 520,270 520,270 C520,270 500,255 500,240Z" fill="{c["accent2"]}" opacity="0.12"/>'''
-    elif track == "ai_funny" or has_humor:
-        decorations = f'''
-  <!-- Comedy stage -->
-  <rect x="100" y="300" width="520" height="100" rx="8" fill="{c["accent1"]}" opacity="0.06"/>
-  <rect x="100" y="300" width="520" height="8" rx="4" fill="{c["accent2"]}" opacity="0.15"/>
-  <!-- Spotlights -->
-  <polygon points="200,80 160,300 240,300" fill="{c["accent2"]}" opacity="0.04"/>
-  <polygon points="520,80 480,300 560,300" fill="{c["accent1"]}" opacity="0.04"/>
-  <!-- Speech bubbles -->
-  <ellipse cx="280" cy="190" rx="70" ry="40" fill="{c["accent1"]}" opacity="0.1"/>
-  <ellipse cx="440" cy="170" rx="60" ry="35" fill="{c["accent2"]}" opacity="0.08"/>
-  <polygon points="340,225 360,250 370,220" fill="{c["accent1"]}" opacity="0.1"/>
-  <!-- Confetti dots -->
-  <circle cx="150" cy="150" r="4" fill="{c["accent2"]}" opacity="0.3"/>
-  <circle cx="200" cy="120" r="3" fill="{c["accent1"]}" opacity="0.25"/>
-  <circle cx="450" cy="130" r="4" fill="{c["accent2"]}" opacity="0.2"/>
-  <circle cx="550" cy="160" r="3" fill="{c["accent1"]}" opacity="0.3"/>
-  <circle cx="580" cy="200" r="5" fill="{c["accent2"]}" opacity="0.15"/>'''
-    else:
-        # Generic decorative elements
-        decorations = f'''
-  <circle cx="200" cy="200" r="80" fill="{c["accent1"]}" opacity="0.06"/>
-  <circle cx="520" cy="280" r="60" fill="{c["accent2"]}" opacity="0.05"/>
-  <rect x="300" y="150" width="120" height="160" rx="12" fill="{c["accent1"]}" opacity="0.04"/>
-  <line x1="180" y1="120" x2="540" y2="360" stroke="{c["accent1"]}" stroke-width="2" opacity="0.08" stroke-dasharray="8,4"/>
-  <line x1="180" y1="360" x2="540" y2="120" stroke="{c["accent2"]}" stroke-width="2" opacity="0.06" stroke-dasharray="8,4"/>'''
 
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="720" height="480" viewBox="0 0 720 480">
+def _render_track_svg(track: str, title_esc: str, scene_esc: str, scene_raw: str, seed: str, idx: int) -> str:
+    """Dispatch to the correct SVG illustrator based on track."""
+    if track == "football":
+        return _svg_football(title_esc, scene_esc, scene_raw, seed, idx)
+    if track == "travel":
+        return _svg_travel(title_esc, scene_esc, scene_raw, seed, idx)
+    if track == "child_education":
+        return _svg_education(title_esc, scene_esc, scene_raw, seed, idx)
+    if track == "ai_funny":
+        return _svg_comedy(title_esc, scene_esc, scene_raw, seed, idx)
+    return _svg_generic(title_esc, scene_esc, scene_raw, seed, idx)
+
+
+def _svg_football(title: str, scene: str, _raw: str, seed: str, _idx: int) -> str:
+    """Football illustration: dynamic match scene with stadium, pitch, and action."""
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="bg-grad-{seed_hash}" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="{c["bg"]}"/>
-      <stop offset="100%" stop-color="{c["bg"]}" stop-opacity="0.95"/>
-    </linearGradient>
+    <linearGradient id="sky-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#0c1445"/><stop offset="50%" stop-color="#1a237e"/><stop offset="100%" stop-color="#283593"/></linearGradient>
+    <linearGradient id="grass-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#2e7d32"/><stop offset="100%" stop-color="#1b5e20"/></linearGradient>
+    <linearGradient id="flood-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fff9c4" stop-opacity="0.6"/><stop offset="100%" stop-color="#fff9c4" stop-opacity="0"/></linearGradient>
+    <radialGradient id="moon-{seed}"><stop offset="0%" stop-color="#fff9c4"/><stop offset="100%" stop-color="#fbc02d"/></radialGradient>
   </defs>
-  <rect width="720" height="480" fill="url(#bg-grad-{seed_hash})"/>
-  {decorations}
-  <!-- Title overlay box -->
-  <rect x="60" y="380" width="600" height="70" rx="12" fill="{c["bg"]}" opacity="0.85"/>
-  <text x="360" y="412" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="18" fill="{c["text"]}" font-weight="700">{title_esc}</text>
-  <text x="360" y="436" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="12" fill="{c["muted"]}">配图 #{idx + 1} · {seed_hash}</text>
+  <!-- Sky -->
+  <rect width="1024" height="1024" fill="url(#sky-{seed})"/>
+  <!-- Stadium floodlights glow -->
+  <ellipse cx="512" cy="200" rx="400" ry="100" fill="url(#flood-{seed})" opacity="0.15"/>
+  <!-- Moon -->
+  <circle cx="800" cy="100" r="35" fill="url(#moon-{seed})" opacity="0.5"/>
+  <circle cx="810" cy="90" r="30" fill="#0c1445" opacity="0.4"/>
+  <!-- Pitch -->
+  <rect x="62" y="350" width="900" height="500" rx="8" fill="url(#grass-{seed})"/>
+  <rect x="62" y="350" width="900" height="500" rx="8" fill="none" stroke="#4caf50" stroke-width="3"/>
+  <!-- Pitch lines -->
+  <line x1="512" y1="350" x2="512" y2="850" stroke="#4caf50" stroke-width="2" opacity="0.6"/>
+  <circle cx="512" cy="600" r="60" fill="none" stroke="#4caf50" stroke-width="2" opacity="0.6"/>
+  <!-- Penalty areas -->
+  <rect x="62" y="450" width="120" height="300" rx="4" fill="none" stroke="#4caf50" stroke-width="2" opacity="0.5"/>
+  <rect x="842" y="450" width="120" height="300" rx="4" fill="none" stroke="#4caf50" stroke-width="2" opacity="0.5"/>
+  <!-- Goals -->
+  <rect x="62" y="540" width="20" height="120" rx="2" fill="none" stroke="#fff" stroke-width="3" opacity="0.7"/>
+  <rect x="942" y="540" width="20" height="120" rx="2" fill="none" stroke="#fff" stroke-width="3" opacity="0.7"/>
+  <!-- Player silhouettes - team A (blue) -->
+  <g opacity="0.7">
+    <circle cx="200" cy="480" r="10" fill="#42a5f5"/><circle cx="280" cy="520" r="10" fill="#42a5f5"/>
+    <circle cx="350" cy="460" r="10" fill="#42a5f5"/><circle cx="380" cy="550" r="10" fill="#42a5f5"/>
+    <circle cx="450" cy="500" r="10" fill="#42a5f5"/><circle cx="500" cy="580" r="10" fill="#42a5f5"/>
+    <circle cx="550" cy="490" r="10" fill="#42a5f5"/>
+  </g>
+  <!-- Player silhouettes - team B (red) -->
+  <g opacity="0.7">
+    <circle cx="820" cy="480" r="10" fill="#ef5350"/><circle cx="740" cy="520" r="10" fill="#ef5350"/>
+    <circle cx="670" cy="460" r="10" fill="#ef5350"/><circle cx="640" cy="550" r="10" fill="#ef5350"/>
+    <circle cx="570" cy="500" r="10" fill="#ef5350"/><circle cx="520" cy="580" r="10" fill="#ef5350"/>
+    <circle cx="470" cy="490" r="10" fill="#ef5350"/>
+  </g>
+  <!-- Football -->
+  <circle cx="460" cy="560" r="12" fill="#f5f5f5" stroke="#bbb" stroke-width="1"/>
+  <path d="M460 548 L460 572 M448 560 L472 560" stroke="#bbb" stroke-width="1.5" opacity="0.6"/>
+  <!-- Action trails -->
+  <path d="M460,560 Q420,540 380,530" fill="none" stroke="#fff" stroke-width="2" stroke-dasharray="4,3" opacity="0.3"/>
+  <!-- Stadium stands (background) -->
+  <rect x="62" y="280" width="900" height="70" rx="4" fill="#1a237e" opacity="0.6"/>
+  <line x1="62" y1="300" x2="962" y2="300" stroke="#283593" stroke-width="1" opacity="0.5"/>
+  <line x1="62" y1="320" x2="962" y2="320" stroke="#283593" stroke-width="1" opacity="0.3"/>
+  <!-- Crowd dots -->
+  <g opacity="0.3">{''.join(f'<circle cx="{70+i*30}" cy="{285+(i%3)*10}" r="3" fill="#e8eaf6"/>' for i in range(30))}</g>
+  <!-- Title card -->
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="rgba(12,20,69,0.85)"/>
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="none" stroke="#42a5f5" stroke-width="1" opacity="0.3"/>
+  <text x="512" y="916" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="22" fill="#fff" font-weight="700">{title}</text>
+  <text x="512" y="956" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#90caf9">{scene}</text>
+  <text x="512" y="976" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#546e7a">Illustration #{idx + 1}</text>
+</svg>'''
+
+
+def _svg_travel(title: str, scene: str, _raw: str, seed: str, _idx: int) -> str:
+    """Travel illustration: scenic landscape with mountains, sun, route markers."""
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="sky-t-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#87ceeb"/><stop offset="60%" stop-color="#e0f7fa"/><stop offset="100%" stop-color="#fff9c4"/></linearGradient>
+    <linearGradient id="sun-t-{seed}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ffeb3b"/><stop offset="100%" stop-color="#ff9800"/></linearGradient>
+    <linearGradient id="sea-t-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#0288d1"/><stop offset="100%" stop-color="#01579b"/></linearGradient>
+  </defs>
+  <!-- Sky -->
+  <rect width="1024" height="600" fill="url(#sky-t-{seed})"/>
+  <!-- Sun -->
+  <circle cx="820" cy="150" r="60" fill="url(#sun-t-{seed})" opacity="0.9"/>
+  <circle cx="820" cy="150" r="70" fill="#ffeb3b" opacity="0.15"/>
+  <circle cx="820" cy="150" r="85" fill="#ffeb3b" opacity="0.08"/>
+  <!-- Clouds -->
+  <g opacity="0.6">
+    <ellipse cx="250" cy="120" rx="80" ry="25" fill="#fff"/>
+    <ellipse cx="300" cy="110" rx="50" ry="20" fill="#fff"/>
+    <ellipse cx="600" cy="160" rx="70" ry="20" fill="#fff"/>
+    <ellipse cx="650" cy="150" rx="40" ry="15" fill="#fff"/>
+  </g>
+  <!-- Distant mountains -->
+  <polygon points="0,500 120,280 250,500" fill="#90caf9" opacity="0.5"/>
+  <polygon points="150,500 320,220 480,500" fill="#64b5f6" opacity="0.5"/>
+  <polygon points="380,500 540,250 700,500" fill="#42a5f5" opacity="0.4"/>
+  <polygon points="580,500 750,200 920,500" fill="#1e88e5" opacity="0.35"/>
+  <polygon points="820,500 1024,280 1024,500" fill="#1565c0" opacity="0.3"/>
+  <!-- Snow caps -->
+  <polygon points="320,220 300,260 340,260" fill="#fff" opacity="0.5"/>
+  <polygon points="750,200 730,240 770,240" fill="#fff" opacity="0.4"/>
+  <!-- Sea -->
+  <rect y="500" width="1024" height="200" fill="url(#sea-t-{seed})" opacity="0.6"/>
+  <!-- Waves -->
+  <path d="M0,530 Q50,520 100,530 Q150,540 200,530 Q250,520 300,530 Q350,540 400,530 Q450,520 500,530 Q550,540 600,530 Q650,520 700,530 Q750,540 800,530 Q850,520 900,530 Q950,540 1000,530 L1024,530" fill="none" stroke="#81d4fa" stroke-width="2" opacity="0.4"/>
+  <!-- Foreground beach/land -->
+  <path d="M0,700 Q200,650 400,700 Q600,750 800,700 Q900,680 1024,720 L1024,1024 L0,1024 Z" fill="#f5deb3"/>
+  <path d="M0,720 Q200,680 400,720 Q600,760 800,720 Q900,700 1024,740 L1024,1024 L0,1024 Z" fill="#deb887" opacity="0.5"/>
+  <!-- Route markers -->
+  <circle cx="200" cy="780" r="15" fill="#ff5722" opacity="0.8"/>
+  <circle cx="200" cy="780" r="8" fill="#fff"/>
+  <circle cx="520" cy="800" r="15" fill="#ff5722" opacity="0.7"/>
+  <circle cx="520" cy="800" r="8" fill="#fff"/>
+  <circle cx="820" cy="760" r="15" fill="#ff5722" opacity="0.6"/>
+  <circle cx="820" cy="760" r="8" fill="#fff"/>
+  <!-- Dotted route line -->
+  <path d="M200,780 Q360,820 520,800 Q670,770 820,760" fill="none" stroke="#ff5722" stroke-width="3" stroke-dasharray="8,6" opacity="0.5"/>
+  <!-- Trees -->
+  <g opacity="0.6">
+    <polygon points="120,700 140,640 160,700" fill="#388e3c"/>
+    <polygon points="420,720 445,650 470,720" fill="#43a047"/>
+    <polygon points="700,690 720,630 740,690" fill="#2e7d32"/>
+    <polygon points="900,710 920,660 940,710" fill="#388e3c"/>
+  </g>
+  <!-- Title card -->
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="rgba(13,71,161,0.85)"/>
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="none" stroke="#4fc3f7" stroke-width="1" opacity="0.3"/>
+  <text x="512" y="916" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="22" fill="#fff" font-weight="700">{title}</text>
+  <text x="512" y="956" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#b3e5fc">{scene}</text>
+  <text x="512" y="976" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#546e7a">Illustration #{idx + 1}</text>
+</svg>'''
+
+
+def _svg_education(title: str, scene: str, _raw: str, seed: str, _idx: int) -> str:
+    """Education illustration: warm study scene with books, lamp, and plants."""
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="wall-e-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fef9e7"/><stop offset="100%" stop-color="#fdf2e9"/></linearGradient>
+    <linearGradient id="lamp-e-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fff9c4"/><stop offset="100%" stop-color="#fdd835"/></linearGradient>
+    <radialGradient id="glow-e-{seed}"><stop offset="0%" stop-color="#fdd835" stop-opacity="0.4"/><stop offset="100%" stop-color="#fdd835" stop-opacity="0"/></radialGradient>
+  </defs>
+  <!-- Wall -->
+  <rect width="1024" height="1024" fill="url(#wall-e-{seed})"/>
+  <!-- Warm glow -->
+  <ellipse cx="350" cy="500" rx="300" ry="250" fill="url(#glow-e-{seed})"/>
+  <!-- Window -->
+  <rect x="700" y="100" width="240" height="320" rx="12" fill="#bbdefb" stroke="#8d6e63" stroke-width="6"/>
+  <line x1="820" y1="100" x2="820" y2="420" stroke="#8d6e63" stroke-width="4"/>
+  <line x1="700" y1="240" x2="940" y2="240" stroke="#8d6e63" stroke-width="4"/>
+  <!-- Sky outside window -->
+  <rect x="706" y="106" width="108" height="130" rx="6" fill="#87ceeb"/>
+  <rect x="826" y="106" width="108" height="130" rx="6" fill="#87ceeb"/>
+  <rect x="706" y="244" width="228" height="170" fill="#a5d6a7"/>
+  <!-- Bookshelf -->
+  <rect x="80" y="180" width="300" height="380" rx="8" fill="#5d4037"/>
+  <rect x="90" y="190" width="280" height="8" rx="2" fill="#4e342e"/>
+  <rect x="90" y="315" width="280" height="8" rx="2" fill="#4e342e"/>
+  <rect x="90" y="440" width="280" height="8" rx="2" fill="#4e342e"/>
+  <!-- Books on shelf -->
+  <g opacity="0.9">
+    <rect x="100" y="203" width="22" height="110" rx="2" fill="#e53935"/>
+    <rect x="126" y="210" width="18" height="103" rx="2" fill="#43a047"/>
+    <rect x="148" y="205" width="25" height="108" rx="2" fill="#1e88e5"/>
+    <rect x="177" y="215" width="20" height="98" rx="2" fill="#fb8c00"/>
+    <rect x="201" y="208" width="24" height="105" rx="2" fill="#8e24aa"/>
+    <rect x="229" y="203" width="18" height="110" rx="2" fill="#00897b"/>
+    <rect x="251" y="218" width="22" height="95" rx="2" fill="#c62828"/>
+    <rect x="277" y="208" width="20" height="105" rx="2" fill="#1565c0"/>
+    <rect x="100" y="328" width="24" height="110" rx="2" fill="#00897b"/>
+    <rect x="128" y="335" width="20" height="103" rx="2" fill="#e53935"/>
+    <rect x="152" y="325" width="26" height="113" rx="2" fill="#fb8c00"/>
+    <rect x="182" y="340" width="18" height="98" rx="2" fill="#43a047"/>
+    <rect x="204" y="328" width="22" height="110" rx="2" fill="#8e24aa"/>
+  </g>
+  <!-- Desk -->
+  <rect x="150" y="550" width="500" height="20" rx="4" fill="#8d6e63"/>
+  <rect x="160" y="570" width="16" height="200" fill="#6d4c41"/>
+  <rect x="620" y="570" width="16" height="200" fill="#6d4c41"/>
+  <!-- Lamp -->
+  <rect x="420" y="470" width="8" height="80" fill="#424242"/>
+  <path d="M380,470 Q424,450 468,470" fill="#fdd835" stroke="#f9a825" stroke-width="2"/>
+  <ellipse cx="424" cy="470" rx="44" ry="12" fill="#f57f17" opacity="0.6"/>
+  <!-- Open book on desk -->
+  <g transform="translate(250,500)">
+    <path d="M0,50 Q60,-10 120,50 L120,0 Q60,-10 0,0 Z" fill="#fff" stroke="#e0e0e0" stroke-width="1"/>
+    <path d="M120,50 Q180,-10 240,50 L240,0 Q180,-10 120,0 Z" fill="#fafafa" stroke="#e0e0e0" stroke-width="1"/>
+    <line x1="120" y1="0" x2="120" y2="50" stroke="#e0e0e0" stroke-width="2"/>
+    <!-- Text lines -->
+    <line x1="20" y1="15" x2="95" y2="15" stroke="#e0e0e0" stroke-width="2"/>
+    <line x1="20" y1="28" x2="100" y2="28" stroke="#e0e0e0" stroke-width="2"/>
+    <line x1="20" y1="41" x2="90" y2="41" stroke="#e0e0e0" stroke-width="2"/>
+    <line x1="140" y1="15" x2="215" y2="15" stroke="#e0e0e0" stroke-width="2"/>
+    <line x1="140" y1="28" x2="220" y2="28" stroke="#e0e0e0" stroke-width="2"/>
+    <line x1="140" y1="41" x2="210" y2="41" stroke="#e0e0e0" stroke-width="2"/>
+  </g>
+  <!-- Potted plant -->
+  <g transform="translate(600,480)">
+    <polygon points="20,70 -10,0 50,0" fill="#6d4c41"/>
+    <ellipse cx="20" cy="70" rx="30" ry="8" fill="#5d4037"/>
+    <circle cx="20" cy="-20" r="18" fill="#43a047" opacity="0.8"/>
+    <circle cx="5" cy="-35" r="14" fill="#66bb6a" opacity="0.7"/>
+    <circle cx="35" cy="-30" r="12" fill="#4caf50" opacity="0.7"/>
+    <circle cx="20" cy="-45" r="16" fill="#81c784" opacity="0.6"/>
+  </g>
+  <!-- Title card -->
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="rgba(93,64,55,0.9)"/>
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="none" stroke="#ffb74d" stroke-width="1" opacity="0.3"/>
+  <text x="512" y="916" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="22" fill="#fff" font-weight="700">{title}</text>
+  <text x="512" y="956" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#ffcc80">{scene}</text>
+  <text x="512" y="976" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#a1887f">Illustration #{idx + 1}</text>
+</svg>'''
+
+
+def _svg_comedy(title: str, scene: str, _raw: str, seed: str, _idx: int) -> str:
+    """Comedy illustration: stage performance with audience, mic, and spotlights."""
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg-c-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1a0033"/><stop offset="50%" stop-color="#2d1b69"/><stop offset="100%" stop-color="#4a148c"/></linearGradient>
+    <linearGradient id="spot1-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#e040fb" stop-opacity="0.5"/><stop offset="100%" stop-color="#e040fb" stop-opacity="0"/></linearGradient>
+    <linearGradient id="spot2-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ffeb3b" stop-opacity="0.4"/><stop offset="100%" stop-color="#ffeb3b" stop-opacity="0"/></linearGradient>
+    <linearGradient id="stage-c-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6d1b00"/><stop offset="100%" stop-color="#3e0a00"/></linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="1024" height="1024" fill="url(#bg-c-{seed})"/>
+  <!-- Spotlight beams -->
+  <polygon points="256,0 100,550 412,550" fill="url(#spot1-{seed})"/>
+  <polygon points="768,0 612,550 924,550" fill="url(#spot2-{seed})"/>
+  <!-- Curtains -->
+  <path d="M0,0 Q80,200 0,500 Z" fill="#b71c1c" opacity="0.8"/>
+  <path d="M1024,0 Q944,200 1024,500 Z" fill="#b71c1c" opacity="0.8"/>
+  <path d="M0,0 Q50,100 0,300 Z" fill="#d32f2f" opacity="0.6"/>
+  <path d="M1024,0 Q974,100 1024,300 Z" fill="#d32f2f" opacity="0.6"/>
+  <!-- Curtain top -->
+  <rect x="0" y="0" width="1024" height="40" fill="#b71c1c"/>
+  <path d="M0,40 Q40,70 80,40 Q120,70 160,40 Q200,70 240,40 Q280,70 320,40 Q360,70 400,40 Q440,70 480,40 Q520,70 560,40 Q600,70 640,40 Q680,70 720,40 Q760,70 800,40 Q840,70 880,40 Q920,70 960,40 Q1000,70 1024,40" fill="none" stroke="#c62828" stroke-width="3"/>
+  <!-- Stage floor -->
+  <rect x="80" y="520" width="864" height="180" fill="url(#stage-c-{seed})"/>
+  <rect x="80" y="520" width="864" height="8" fill="#ff6d00" opacity="0.5"/>
+  <!-- Microphone stand -->
+  <line x1="512" y1="520" x2="512" y2="420" stroke="#424242" stroke-width="4"/>
+  <circle cx="512" cy="415" r="12" fill="#616161"/>
+  <circle cx="512" cy="415" r="8" fill="#757575"/>
+  <!-- Mic glow -->
+  <circle cx="512" cy="415" r="25" fill="#e040fb" opacity="0.15"/>
+  <!-- Speech bubbles -->
+  <g transform="translate(350,280)" opacity="0.85">
+    <ellipse cx="70" cy="30" rx="80" ry="35" fill="#fff" opacity="0.9"/>
+    <polygon points="100,65 120,95 130,60" fill="#fff" opacity="0.9"/>
+    <text x="70" y="28" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#333" font-weight="bold">😂</text>
+  </g>
+  <g transform="translate(540,230)" opacity="0.7">
+    <ellipse cx="60" cy="25" rx="70" ry="30" fill="#fff" opacity="0.7"/>
+    <polygon points="30,55 10,85 70,55" fill="#fff" opacity="0.7"/>
+    <text x="60" y="23" text-anchor="middle" font-family="sans-serif" font-size="24" fill="#333">💀</text>
+  </g>
+  <!-- Confetti -->
+  <g opacity="0.6">
+    <rect x="200" y="120" width="10" height="10" rx="2" fill="#e040fb" transform="rotate(30 205 125)"/>
+    <rect x="350" y="90" width="10" height="10" rx="2" fill="#ffeb3b" transform="rotate(45 355 95)"/>
+    <rect x="550" y="110" width="10" height="10" rx="2" fill="#00e5ff" transform="rotate(15 555 115)"/>
+    <rect x="700" y="130" width="10" height="10" rx="2" fill="#ff4081" transform="rotate(60 705 135)"/>
+    <rect x="450" y="70" width="8" height="8" rx="2" fill="#76ff03" transform="rotate(20 454 74)"/>
+    <rect x="300" y="160" width="8" height="8" rx="2" fill="#ffeb3b" transform="rotate(35 304 164)"/>
+    <rect x="650" y="100" width="8" height="8" rx="2" fill="#e040fb" transform="rotate(50 654 104)"/>
+  </g>
+  <!-- Stars / sparkles -->
+  <g opacity="0.5">
+    <polygon points="300,200 303,210 313,210 305,216 308,226 300,220 292,226 295,216 287,210 297,210" fill="#ffeb3b"/>
+    <polygon points="680,160 682,167 689,167 683,171 685,178 680,174 675,178 677,171 671,167 678,167" fill="#e040fb"/>
+    <polygon points="180,250 182,257 189,257 183,261 185,268 180,264 175,268 177,261 171,257 178,257" fill="#00e5ff"/>
+  </g>
+  <!-- Audience silhouettes -->
+  <g opacity="0.3">{''.join(f'<circle cx="{80+i*20}" cy="{550+(i%3)*8}" r="6" fill="#e0e0e0"/>' for i in range(44))}</g>
+  <!-- Title card -->
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="rgba(26,0,51,0.9)"/>
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="none" stroke="#e040fb" stroke-width="1" opacity="0.3"/>
+  <text x="512" y="916" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="22" fill="#fff" font-weight="700">{title}</text>
+  <text x="512" y="956" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#ce93d8">{scene}</text>
+  <text x="512" y="976" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#7b1fa2">Illustration #{idx + 1}</text>
+</svg>'''
+
+
+def _svg_generic(title: str, scene: str, _raw: str, seed: str, _idx: int) -> str:
+    """Generic illustration: abstract artistic composition."""
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg-g-{seed}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#e8eaf6"/><stop offset="100%" stop-color="#f3e5f5"/></linearGradient>
+    <linearGradient id="circ1-{seed}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#5c6bc0"/><stop offset="100%" stop-color="#7c4dff"/></linearGradient>
+    <linearGradient id="circ2-{seed}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#26a69a"/><stop offset="100%" stop-color="#00bfa5"/></linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg-g-{seed})"/>
+  <circle cx="300" cy="250" r="180" fill="url(#circ1-{seed})" opacity="0.15"/>
+  <circle cx="700" cy="600" r="220" fill="url(#circ2-{seed})" opacity="0.12"/>
+  <circle cx="512" cy="400" r="120" fill="#7c4dff" opacity="0.06"/>
+  <rect x="200" y="300" width="600" height="8" rx="4" fill="#5c6bc0" opacity="0.15" transform="rotate(-30 500 304)"/>
+  <rect x="150" y="450" width="700" height="8" rx="4" fill="#26a69a" opacity="0.12" transform="rotate(20 500 454)"/>
+  <rect x="250" y="200" width="500" height="8" rx="4" fill="#7c4dff" opacity="0.1" transform="rotate(-10 500 204)"/>
+  <!-- Dots pattern -->
+  <g opacity="0.08">{''.join(f'<circle cx="{x}" cy="{y}" r="4" fill="#5c6bc0"/>' for x in range(60, 965, 60) for y in range(60, 965, 60))}</g>
+  <!-- Title card -->
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="rgba(255,255,255,0.92)"/>
+  <rect x="100" y="870" width="824" height="120" rx="16" fill="none" stroke="#5c6bc0" stroke-width="1" opacity="0.3"/>
+  <text x="512" y="916" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="22" fill="#37474f" font-weight="700">{title}</text>
+  <text x="512" y="956" text-anchor="middle" font-family="system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="13" fill="#78909c">{scene}</text>
+  <text x="512" y="976" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#b0bec5">Illustration #{idx + 1}</text>
 </svg>'''
 
 
