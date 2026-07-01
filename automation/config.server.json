@@ -174,6 +174,11 @@
       "keywords": [
         "竞彩",
         "足球",
+        "football",
+        "soccer",
+        "preview",
+        "fixture",
+        "injury",
         "今日",
         "明日",
         "赛程",
@@ -188,6 +193,12 @@
         "联赛"
       ],
       "topic_boost_keywords": [
+        "preview",
+        "fixtures",
+        "fixture",
+        "injury",
+        "team news",
+        "lineup",
         "今日",
         "明日",
         "今晚",
@@ -214,10 +225,10 @@
         "巴西 2-1 日本"
       ],
       "rss_sources": [
-        "https://news.google.com/rss/search?q=%E4%BB%8A%E6%97%A5+%E8%B6%B3%E7%90%83+%E8%B5%9B%E7%A8%8B+%E8%B5%9B%E5%89%8D+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=%E7%AB%9E%E5%BD%A9+%E8%B6%B3%E7%90%83+%E4%BC%A4%E5%81%9C+%E9%A6%96%E5%8F%91+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=%E8%B6%B3%E7%90%83+%E5%89%8D%E7%9E%BB+%E8%B5%94%E7%8E%87+%E7%9B%98%E5%8F%A3+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=football+fixtures+today+preview+injury+news+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+        "https://www.skysports.com/rss/12040",
+        "https://www.espn.com/espn/rss/soccer/news",
+        "https://news.google.com/rss/search?q=football+fixtures+today+preview+injury+news+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "https://news.google.com/rss/search?q=%E4%BB%8A%E6%97%A5+%E8%B6%B3%E7%90%83+%E8%B5%9B%E7%A8%8B+%E8%B5%9B%E5%89%8D+when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
       ],
       "system_prompt": "你是专业足球赛前数据分析编辑，只做时效性强的赛前/赛程/伤停/阵容/盘口分析。必须核实来源，不得编造比分、进球人、伤停、首发和赔率；来源未明确写出的事实必须用“待官方确认/需赛前核实”表述。必须理性分析，不得承诺收益，不得诱导下注。"
     },
