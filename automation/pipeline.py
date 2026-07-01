@@ -4156,8 +4156,10 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
     return {"index_file": str(index_file), "index_url": build_preview_url(config, index_file)}
 
 
-def build_free_content_page(config: dict[str, Any]) -> dict[str, str]:
+def build_free_content_page(config: dict[str, Any], queue: list[dict[str, Any]] | None = None) -> dict[str, str]:
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    if queue is None:
+        queue = load_queue()
     page_html = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>自由生成内容</title>
@@ -4174,6 +4176,13 @@ button{border:0;background:#2563eb;color:#fff;border-radius:10px;padding:11px 15
 pre{display:none;white-space:pre-wrap;background:#0f172a;color:#dbeafe;border-radius:12px;padding:14px;max-height:420px;overflow:auto;}
 .hint{color:#64748b;font-size:13px;line-height:1.7;}
 a{color:#2563eb;text-decoration:none;}
+.table-wrap{overflow-x:auto;border-radius:10px;border:1px solid #e2e8f0;margin-top:10px;}
+.free-table{width:100%;border-collapse:collapse;font-size:13px;}
+.free-table th{background:#f8fafc;padding:8px 10px;text-align:left;font-weight:600;color:#475569;border-bottom:1px solid #e2e8f0;white-space:nowrap;}
+.free-table td{padding:8px 10px;border-bottom:1px solid #f1f5f9;vertical-align:middle;color:#1e293b;}
+.free-table tr:last-child td{border-bottom:0;}
+.free-table tr:hover{background:#f8fafc;}
+.btn-sm{display:inline-block;border:0;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;text-decoration:none;background:#2563eb;color:#fff;}
 </style></head><body><div class="wrap">
 <div class="hero"><h1>自由生成内容</h1><p>输入你的想法，选择图文或视频脚本。系统会用 DeepSeek 生成内容，并用 DashScope 自动配图。</p></div>
 <div class="card">
@@ -4187,6 +4196,7 @@ a{color:#2563eb;text-decoration:none;}
 <p class="hint">生成完成后会返回预览链接。若不满意，进入内容页点击“重写文案”或“重写文案+配图”。</p>
 <pre id="log"></pre>
 </div></div>
+<div id="free-history" style="margin-top:20px;"></div>
 <script>
 async function parseJsonResponse(resp) {
   const text = await resp.text();
@@ -4229,6 +4239,39 @@ async function pollJob(jobId, log){
     await new Promise(resolve => setTimeout(resolve, 1500));
   }
 }
+async function loadFreeList() {
+  const container = document.getElementById('free-history');
+  if (!container) return;
+  try {
+    const resp = await fetch('/free-list');
+    if (!resp.ok) throw new Error('Failed to load');
+    const items = await resp.json();
+    if (!items || items.length === 0) {
+      container.innerHTML = '<div class="card"><p style="color:#64748b;text-align:center;">暂无自由生成历史内容。</p></div>';
+      return;
+    }
+    let rows = '';
+    for (const item of items) {
+      const previewLink = item.preview_url
+        ? '<a class="btn-sm" href="' + item.preview_url + '" target="_blank">\u9884\u89c8</a>'
+        : '<span style="color:#94a3b8;font-size:12px;">\u65e0\u9884\u89c8</span>';
+      rows += '<tr>'
+        + '<td><a href="' + item.preview_url + '" target="_blank" style="font-weight:600;">' + item.title + '</a></td>'
+        + '<td>' + item.status + '</td>'
+        + '<td style="color:#64748b;font-size:12px;">' + item.updated_at + '</td>'
+        + '<td>' + previewLink + '</td>'
+        + '</tr>';
+    }
+    container.innerHTML = '<div class="card"><h3 style="margin:0 0 12px;font-size:16px;">\U0001F4CB \u5386\u53F2\u81EA\u7531\u751F\u6210\u5185\u5BB9</h3>'
+      + '<div class="table-wrap"><table class="free-table">'
+      + '<thead><tr><th>\u6807\u9898</th><th>\u72B6\u6001</th><th>\u65F6\u95F4</th><th>\u64CD\u4F5C</th></tr></thead>'
+      + '<tbody>' + rows + '</tbody>'
+      + '</table></div></div>';
+  } catch (err) {
+    container.innerHTML = '<div class="card"><p style="color:#dc2626;">\u52A0\u8F7D\u5386\u53F2\u5185\u5BB9\u5931\u8D25\uFF1A' + err.message + '</p></div>';
+  }
+}
+loadFreeList();
 </script></body></html>"""
     page_file = PREVIEW_DIR / "free.html"
     page_file.write_text(page_html, encoding="utf-8")
@@ -4662,7 +4705,14 @@ pointer-events: none;
 <div class="app-layout">
 <aside class="side">
 <div class="side-brand">🎛️ 控制台 <small>内容生产 Dashboard</small></div>
-<nav>{''.join(sidebar_links)}</nav>
+<nav>
+  <a class="sidebar-link" href="/free.html" target="_blank" style="border-bottom:1px solid #334155;margin-bottom:8px;padding-bottom:12px;">
+    <span class="sidebar-emoji">✏️</span>
+    <span class="sidebar-name">自由生成内容</span>
+    <span class="sidebar-count">创意</span>
+  </a>
+  {''.join(sidebar_links)}
+</nav>
 </aside>
 <main class="main">
 <div class="hero-header">
@@ -4827,6 +4877,7 @@ setInterval(function() {{
     portal_file = PREVIEW_DIR / "index.html"
     portal_file.write_text(portal_html, encoding="utf-8")
     portal_url = build_preview_url(config, portal_file)
+    build_free_content_page(config, queue)
     return {"portal_file": str(portal_file), "portal_url": portal_url}
 
 
@@ -6650,6 +6701,69 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(payload.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/free-list":
+                try:
+                    cfg = load_config(Path(config_path))
+                    q = load_queue()
+                    free_items = [
+                        item for item in q
+                        if item.get("free_content") or item.get("notes") == "自由生成内容"
+                    ]
+                    free_items.sort(
+                        key=lambda x: str(x.get("updated_at") or x.get("created_at", "")),
+                        reverse=True,
+                    )
+                    result = []
+                    for item in free_items[:30]:
+                        preview_file = Path(str(item.get("preview_file", "")).strip() or "#")
+                        href = ""
+                        if preview_file.exists():
+                            try:
+                                href = preview_file.relative_to(PREVIEW_DIR).as_posix()
+                            except ValueError:
+                                href = preview_file.name
+                        result.append({
+                            "id": str(item.get("id", "")),
+                            "title": str(item.get("title", ""))[:50],
+                            "status": status_label(item.get("status")),
+                            "preview_url": href,
+                            "updated_at": display_datetime(item.get("updated_at") or item.get("created_at")) or "-",
+                        })
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(result, ensure_ascii=False).encode("utf-8"))
+                except Exception as exc:
+                    self.send_response(500)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"))
+                return
+            if parsed.path == "/delete-item":
+                params = urllib.parse.parse_qs(parsed.query)
+                item_id = (params.get("id") or [""])[0]
+                if not item_id:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write("缺少 id 参数".encode("utf-8"))
+                    return
+                try:
+                    q = load_queue()
+                    q = [it for it in q if it.get("id") != item_id]
+                    save_queue(q)
+                    config_obj = load_config(Path(config_path))
+                    build_preview_portal(config_obj)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write("已删除".encode("utf-8"))
+                except Exception as exc:
+                    self.send_response(500)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(f"删除失败：{exc}".encode("utf-8"))
                 return
             if parsed.path == "/health":
                 lines: list[str] = ["# 系统健康检查", ""]
