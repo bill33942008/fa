@@ -2702,15 +2702,17 @@ def write_cloud_asset_from_url(url: str, target: Path) -> Path:
 
 
 def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    """Render illustrations with fallback chain: DashScope -> Replicate -> SVG."""
     media_cfg = config.get("cloud_media", {})
     image_cfg = media_cfg.get("image", {})
     if not media_cfg.get("enabled", False) or not image_cfg.get("enabled", False):
         return {"status": "disabled"}
-    provider = str(image_cfg.get("provider", "replicate")).lower().strip()
+    primary_provider = str(image_cfg.get("provider", "dashscope")).lower().strip()
+    backup_provider = "replicate" if primary_provider == "dashscope" else "dashscope"
 
     queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
     item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
-    count = max(1, int(image_cfg.get("images_per_item", 3)))
+    count = max(1, int(image_cfg.get("images_per_item", 1)))
     track = str(item.get("track", ""))
     title = str(item.get("title", ""))
     prompts = build_cloud_image_prompts(item, count=count)
@@ -2718,82 +2720,135 @@ def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, 
     urls: list[str] = []
     files: list[str] = []
     used_model = ""
-    use_svg_fallback = bool(image_cfg.get("svg_fallback", True))
+    use_svg_fallback = bool(image_cfg.get("svg_fallback", False))
 
     for idx, prompt in enumerate(prompts, start=1):
         out_urls: list[str] = []
         last_error: Exception | None = None
 
-        if use_svg_fallback or provider not in {"replicate", "dashscope"}:
-            svg_content = generate_svg_illustration(track, title, prompt, idx)
-            svg_file = media_dir / f"{queue_id}_{idx}.svg"
-            svg_file.parent.mkdir(parents=True, exist_ok=True)
-            svg_file.write_text(svg_content, encoding="utf-8")
-            files.append(str(svg_file))
-            urls.append(build_preview_url(config, svg_file))
-            print(f"[OK] SVG illustration {queue_id}_{idx} generated")
-            used_model = "svg"
-            continue
-
-        if provider == "replicate":
-            input_candidates = [
-                {"prompt": prompt, "aspect_ratio": "9:16", "output_format": "jpg", "num_outputs": 1},
-                {"prompt": prompt, "num_outputs": 1},
-                {"prompt": prompt},
-            ]
-            prediction = replicate_create_prediction_candidates(image_cfg, input_candidates)
-            prediction_id = str(prediction.get("id", "")).strip()
-            if not prediction_id:
-                raise RuntimeError(f"Replicate image prediction failed: {prediction}")
-            done = replicate_poll_prediction(image_cfg, prediction_id)
-            out_urls = normalize_prediction_urls(done.get("output"))
+        # === Try primary provider ===
+        if primary_provider == "replicate":
+            try:
+                input_candidates = [
+                    {"prompt": prompt, "aspect_ratio": "9:16", "output_format": "jpg", "num_outputs": 1},
+                    {"prompt": prompt, "num_outputs": 1},
+                    {"prompt": prompt},
+                ]
+                prediction = replicate_create_prediction_candidates(image_cfg, input_candidates)
+                prediction_id = str(prediction.get("id", "")).strip()
+                if prediction_id:
+                    done = replicate_poll_prediction(image_cfg, prediction_id)
+                    out_urls = normalize_prediction_urls(done.get("output"))
+                    used_model = f"replicate-{image_cfg.get('model', 'sdxl')}"
+            except Exception as exc:
+                last_error = exc
+                print(f"[WARN] Replicate primary failed for {queue_id}_{idx}: {exc}")
         else:
-            image_models = dashscope_model_candidates(
-                image_cfg,
-                defaults=["wanx-v1", "wan2.5-t2i-preview", "wan2.2-t2i-flash", "wan2.2-t2i-plus"],
-            )
-            created: dict[str, Any] | None = None
-            for candidate_model in image_models:
-                payload = {
-                    "model": candidate_model,
-                    "input": {"prompt": prompt},
-                    "parameters": {
-                        "size": str(image_cfg.get("size", "1024*1024")),
-                        "n": 1,
-                        "negative_prompt": str(image_cfg.get("negative_prompt", "")),
-                    },
-                }
+            try:
+                image_models = dashscope_model_candidates(
+                    image_cfg,
+                    defaults=["wanx-v1", "wan2.5-t2i-preview", "wan2.2-t2i-flash", "wan2.2-t2i-plus"],
+                )
+                created: dict[str, Any] | None = None
+                for candidate_model in image_models:
+                    payload = {
+                        "model": candidate_model,
+                        "input": {"prompt": prompt},
+                        "parameters": {
+                            "size": str(image_cfg.get("size", "1024*1024")),
+                            "n": 1,
+                            "negative_prompt": str(image_cfg.get("negative_prompt", "")),
+                        },
+                    }
+                    try:
+                        created = dashscope_create_task(
+                            image_cfg, "/services/aigc/text2image/image-synthesis", payload
+                        )
+                        used_model = f"dashscope-{candidate_model}"
+                        break
+                    except Exception as exc:
+                        last_error = exc
+                        if is_dashscope_model_retryable_error(exc):
+                            continue
+                        break
+                if created is not None:
+                    task_id = dashscope_extract_task_id(created)
+                    if task_id:
+                        done = dashscope_poll_task(image_cfg, task_id)
+                        out_urls = normalize_prediction_urls(done)
+            except Exception as exc:
+                last_error = exc
+                print(f"[WARN] DashScope primary failed for {queue_id}_{idx}: {exc}")
+
+        # === Try backup provider if primary failed ===
+        if not out_urls:
+            if backup_provider == "replicate":
                 try:
-                    created = dashscope_create_task(
-                        image_cfg, "/services/aigc/text2image/image-synthesis", payload
-                    )
-                    used_model = candidate_model
-                    break
+                    input_candidates = [
+                        {"prompt": prompt, "aspect_ratio": "9:16", "output_format": "jpg", "num_outputs": 1},
+                        {"prompt": prompt, "num_outputs": 1},
+                        {"prompt": prompt},
+                    ]
+                    prediction = replicate_create_prediction_candidates(image_cfg, input_candidates)
+                    prediction_id = str(prediction.get("id", "")).strip()
+                    if prediction_id:
+                        done = replicate_poll_prediction(image_cfg, prediction_id)
+                        out_urls = normalize_prediction_urls(done.get("output"))
+                        used_model = f"replicate-{image_cfg.get('model', 'sdxl')}"
                 except Exception as exc:
                     last_error = exc
-                    if is_dashscope_model_retryable_error(exc):
-                        continue
-                    break
-            if created is None:
-                if use_svg_fallback:
-                    svg_content = generate_svg_illustration(track, title, prompt, idx)
-                    svg_file = media_dir / f"{queue_id}_{idx}.svg"
-                    svg_file.parent.mkdir(parents=True, exist_ok=True)
-                    svg_file.write_text(svg_content, encoding="utf-8")
-                    files.append(str(svg_file))
-                    urls.append(build_preview_url(config, svg_file))
-                    print(f"[WARN] DashScope unavailable, SVG fallback for {queue_id}_{idx}")
-                    used_model = "svg_fallback"
-                    continue
-                raise RuntimeError(f"DashScope models unavailable: {last_error}")
-            task_id = dashscope_extract_task_id(created)
-            if not task_id:
-                raise RuntimeError(f"DashScope task create failed: {created}")
-            done = dashscope_poll_task(image_cfg, task_id)
-            out_urls = normalize_prediction_urls(done)
+                    print(f"[WARN] Replicate backup also failed for {queue_id}_{idx}: {exc}")
+            else:
+                try:
+                    image_models = dashscope_model_candidates(
+                        image_cfg,
+                        defaults=["wanx-v1", "wan2.5-t2i-preview", "wan2.2-t2i-flash", "wan2.2-t2i-plus"],
+                    )
+                    created = None
+                    for candidate_model in image_models:
+                        payload = {
+                            "model": candidate_model,
+                            "input": {"prompt": prompt},
+                            "parameters": {
+                                "size": str(image_cfg.get("size", "1024*1024")),
+                                "n": 1,
+                                "negative_prompt": str(image_cfg.get("negative_prompt", "")),
+                            },
+                        }
+                        try:
+                            created = dashscope_create_task(
+                                image_cfg, "/services/aigc/text2image/image-synthesis", payload
+                            )
+                            used_model = f"dashscope-{candidate_model}"
+                            break
+                        except Exception as exc:
+                            last_error = exc
+                            if is_dashscope_model_retryable_error(exc):
+                                continue
+                            break
+                    if created is not None:
+                        task_id = dashscope_extract_task_id(created)
+                        if task_id:
+                            done = dashscope_poll_task(image_cfg, task_id)
+                            out_urls = normalize_prediction_urls(done)
+                except Exception as exc:
+                    last_error = exc
+                    print(f"[WARN] DashScope backup also failed for {queue_id}_{idx}: {exc}")
 
+        # === SVG fallback if all cloud providers failed ===
         if not out_urls:
-            raise RuntimeError(f"No image URL from provider. raw={json.dumps(done, ensure_ascii=False)[:1200]}")
+            if use_svg_fallback:
+                svg_content = generate_svg_illustration(track, title, prompt, idx)
+                svg_file = media_dir / f"{queue_id}_{idx}.svg"
+                svg_file.parent.mkdir(parents=True, exist_ok=True)
+                svg_file.write_text(svg_content, encoding="utf-8")
+                files.append(str(svg_file))
+                urls.append(build_preview_url(config, svg_file))
+                print(f"[WARN] All providers failed, SVG fallback for {queue_id}_{idx}: {last_error}")
+                used_model = "svg_fallback"
+                continue
+            raise RuntimeError(f"All image providers failed. Last error: {last_error}")
+
         source_url = out_urls[0]
         ext = ".jpg" if image_cfg.get("output_format", "jpg") == "jpg" else f".{image_cfg.get('output_format')}"
         local_file = media_dir / f"{queue_id}_{idx}{ext}"
@@ -2909,7 +2964,7 @@ def render_cloud_illustrations_for_items(
     image_cfg = config.get("cloud_media", {}).get("image", {})
     item_delay = float(image_cfg.get("item_delay_seconds", 1.5))
     for item in items:
-        if item.get("post_format") not in {"long_article", "graphic_post", "short_video_script"}:
+        if item.get("post_format") not in {"long_article", "graphic_post"}:
             continue
         try:
             result = render_cloud_illustrations_for_item(config, item)
