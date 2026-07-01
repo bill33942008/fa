@@ -2138,10 +2138,10 @@ def build_cloud_image_prompts(item: dict[str, Any], count: int = 3) -> list[str]
     title = str(item.get("title", "")).strip()
     track = str(item.get("track", "")).strip()
     style_map = {
-        "football": "sports editorial illustration, tactical board, dramatic stadium lighting",
-        "child_education": "warm parenting education scene, lifestyle photography style",
-        "travel": "travel guide editorial illustration, cinematic destination view",
-        "ai_funny": "comic digital illustration, vivid expressive characters",
+        "football": "sports editorial illustration, tactical board, dramatic stadium lighting, realistic style",
+        "child_education": "warm parenting education scene, lifestyle photography style, soft lighting",
+        "travel": "travel guide editorial illustration, cinematic destination view, vibrant colors",
+        "ai_funny": "comic digital illustration, vivid expressive characters, humorous style",
     }
     style = style_map.get(track, "editorial illustration, clean visual storytelling")
     prompts: list[str] = []
@@ -2149,9 +2149,32 @@ def build_cloud_image_prompts(item: dict[str, Any], count: int = 3) -> list[str]
         seed_text = segments[idx] if idx < len(segments) else title
         prompts.append(
             f"Chinese social media article illustration, no text overlay, {style}. "
-            f"Topic: {title}. Scene: {seed_text[:160]}"
+            f"Topic: {title}. Scene: {seed_text[:200]}"
         )
     return prompts
+
+
+def generate_svg_illustration(track: str, title: str, scene: str, idx: int) -> str:
+    """Generate a styled SVG illustration as fallback when cloud image API fails."""
+    import hashlib
+    colors = {
+        "football": {"bg": "#1a365d", "accent": "#48bb78", "text": "#fff"},
+        "child_education": {"bg": "#fef3c7", "accent": "#f59e0b", "text": "#92400e"},
+        "travel": {"bg": "#e0f2fe", "accent": "#0ea5e9", "text": "#0c4a6e"},
+        "ai_funny": {"bg": "#fce7f3", "accent": "#ec4899", "text": "#9d174d"},
+    }
+    c = colors.get(track, {"bg": "#f8fafc", "accent": "#6366f1", "text": "#1e293b"})
+    preview = html.escape(scene[:80])
+    title_esc = html.escape(title[:60])
+    seed_hash = hashlib.md5(f"{title}{scene}{idx}".encode()).hexdigest()[:8]
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="720" height="480" viewBox="0 0 720 480">
+  <rect width="720" height="480" fill="{c["bg"]}"/>
+  <rect x="40" y="40" width="640" height="400" rx="20" fill="{c["accent"]}" opacity="0.15"/>
+  <text x="360" y="120" text-anchor="middle" font-family="sans-serif" font-size="28" fill="{c["text"]}" font-weight="bold">{title_esc}</text>
+  <text x="360" y="180" text-anchor="middle" font-family="sans-serif" font-size="16" fill="{c["text"]}" opacity="0.7">配图 #{idx + 1}</text>
+  <line x1="200" y1="210" x2="520" y2="210" stroke="{c["accent"]}" stroke-width="2" opacity="0.3"/>
+  <text x="360" y="260" text-anchor="middle" font-family="sans-serif" font-size="14" fill="{c["text"]}">{preview}</text>
+</svg>'''
 
 
 def _svg_escape(text: str) -> str:
@@ -2395,30 +2418,37 @@ def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, 
     if not media_cfg.get("enabled", False) or not image_cfg.get("enabled", False):
         return {"status": "disabled"}
     provider = str(image_cfg.get("provider", "replicate")).lower().strip()
-    if provider not in {"replicate", "dashscope"}:
-        raise ValueError(f"Unsupported cloud image provider: {provider}")
 
     queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
     item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
     count = max(1, int(image_cfg.get("images_per_item", 3)))
+    track = str(item.get("track", ""))
+    title = str(item.get("title", ""))
     prompts = build_cloud_image_prompts(item, count=count)
     media_dir = PREVIEW_DIR / "media" / item_date / "illustrations"
     urls: list[str] = []
     files: list[str] = []
     used_model = ""
-    image_models = dashscope_model_candidates(
-        image_cfg,
-        defaults=["wanx-v1", "wan2.5-t2i-preview", "wan2.2-t2i-flash", "wan2.2-t2i-plus"],
-    )
+    use_svg_fallback = bool(image_cfg.get("svg_fallback", True))
+
     for idx, prompt in enumerate(prompts, start=1):
+        out_urls: list[str] = []
+        last_error: Exception | None = None
+
+        if use_svg_fallback or provider not in {"replicate", "dashscope"}:
+            svg_content = generate_svg_illustration(track, title, prompt, idx)
+            svg_file = media_dir / f"{queue_id}_{idx}.svg"
+            svg_file.parent.mkdir(parents=True, exist_ok=True)
+            svg_file.write_text(svg_content, encoding="utf-8")
+            files.append(str(svg_file))
+            urls.append(build_preview_url(config, svg_file))
+            print(f"[OK] SVG illustration {queue_id}_{idx} generated")
+            used_model = "svg"
+            continue
+
         if provider == "replicate":
             input_candidates = [
-                {
-                    "prompt": prompt,
-                    "aspect_ratio": str(image_cfg.get("aspect_ratio", "9:16")),
-                    "output_format": str(image_cfg.get("output_format", "jpg")),
-                    "num_outputs": 1,
-                },
+                {"prompt": prompt, "aspect_ratio": "9:16", "output_format": "jpg", "num_outputs": 1},
                 {"prompt": prompt, "num_outputs": 1},
                 {"prompt": prompt},
             ]
@@ -2429,7 +2459,10 @@ def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, 
             done = replicate_poll_prediction(image_cfg, prediction_id)
             out_urls = normalize_prediction_urls(done.get("output"))
         else:
-            last_error: Exception | None = None
+            image_models = dashscope_model_candidates(
+                image_cfg,
+                defaults=["wanx-v1", "wan2.5-t2i-preview", "wan2.2-t2i-flash", "wan2.2-t2i-plus"],
+            )
             created: dict[str, Any] | None = None
             for candidate_model in image_models:
                 payload = {
@@ -2447,22 +2480,31 @@ def render_cloud_illustrations_for_item(config: dict[str, Any], item: dict[str, 
                     )
                     used_model = candidate_model
                     break
-                except Exception as exc:  # pylint: disable=broad-except
+                except Exception as exc:
                     last_error = exc
                     if is_dashscope_model_retryable_error(exc):
                         continue
-                    raise
+                    break
             if created is None:
-                raise RuntimeError(f"DashScope image models unavailable: {last_error}")
+                if use_svg_fallback:
+                    svg_content = generate_svg_illustration(track, title, prompt, idx)
+                    svg_file = media_dir / f"{queue_id}_{idx}.svg"
+                    svg_file.parent.mkdir(parents=True, exist_ok=True)
+                    svg_file.write_text(svg_content, encoding="utf-8")
+                    files.append(str(svg_file))
+                    urls.append(build_preview_url(config, svg_file))
+                    print(f"[WARN] DashScope unavailable, SVG fallback for {queue_id}_{idx}")
+                    used_model = "svg_fallback"
+                    continue
+                raise RuntimeError(f"DashScope models unavailable: {last_error}")
             task_id = dashscope_extract_task_id(created)
             if not task_id:
-                raise RuntimeError(f"DashScope image task create failed: {created}")
+                raise RuntimeError(f"DashScope task create failed: {created}")
             done = dashscope_poll_task(image_cfg, task_id)
             out_urls = normalize_prediction_urls(done)
+
         if not out_urls:
-            raise RuntimeError(
-                f"No image URL returned from cloud provider. raw={json.dumps(done, ensure_ascii=False)[:1200]}"
-            )
+            raise RuntimeError(f"No image URL from provider. raw={json.dumps(done, ensure_ascii=False)[:1200]}")
         source_url = out_urls[0]
         ext = ".jpg" if image_cfg.get("output_format", "jpg") == "jpg" else f".{image_cfg.get('output_format')}"
         local_file = media_dir / f"{queue_id}_{idx}{ext}"
@@ -3715,90 +3757,564 @@ def list_preview_dates() -> list[str]:
 
 
 def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
-    dates = list_preview_dates()
-    if not dates:
-        return {"portal_file": "", "portal_url": ""}
+    """Build a comprehensive single-page web dashboard for all accounts."""
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
 
-    links: list[str] = []
-    for date in dates:
-        date_index = PREVIEW_DIR / date / "index.html"
-        account_index = PREVIEW_DIR / date / "accounts.html"
-        version = str(int(date_index.stat().st_mtime)) if date_index.exists() else "0"
-        account_version = str(int(account_index.stat().st_mtime)) if account_index.exists() else version
-        links.append(
-            (
-                f"<a class='date-link' href='{date}/index.html?v={version}' target='date-content-frame' "
-                f"onclick=\"document.getElementById('current-date').innerText='{date}';\">{date}</a>"
-                f"<a class='account-link' href='{date}/accounts.html?v={account_version}' target='date-content-frame' "
-                f"onclick=\"document.getElementById('current-date').innerText='{date} 按账号';\">按账号查看</a>"
-            )
+    queue = load_queue()
+    platforms = list(config.get("platforms", []))
+
+    TRACK_EMOJI = {
+        "football": "⚽",
+        "child_education": "🌱",
+        "travel": "🗺️",
+        "ai_funny": "🤖",
+    }
+    TRACK_COLORS = {
+        "football": ("#1e40af", "#3b82f6"),
+        "child_education": ("#065f46", "#10b981"),
+        "travel": ("#7c2d12", "#ea580c"),
+        "ai_funny": ("#581c87", "#a855f7"),
+    }
+
+    account_cards_html: list[str] = []
+    sidebar_links: list[str] = []
+
+    for p_idx, p_cfg in enumerate(platforms):
+        account_name = str(p_cfg.get("account_name", "未知账号"))
+        platform_name = str(p_cfg.get("platform", ""))
+        track = str(p_cfg.get("track", ""))
+        publish_time = str(p_cfg.get("publish_time", ""))
+        post_format = str(p_cfg.get("post_format", ""))
+        account_id = f"acc-{p_idx}"
+
+        emoji = TRACK_EMOJI.get(track, "📄")
+        grad_start, grad_end = TRACK_COLORS.get(track, ("#4f46e5", "#818cf8"))
+
+        account_items = [
+            item for item in queue
+            if str(item.get("account_name", "")).strip() == account_name
+        ]
+        account_items.sort(
+            key=lambda x: str(x.get("updated_at") or x.get("created_at", "")),
+            reverse=True,
         )
 
-    default_date = dates[0]
-    dashboard_index = PREVIEW_DIR / "dashboard.html"
-    default_index = dashboard_index if dashboard_index.exists() else PREVIEW_DIR / default_date / "accounts.html"
-    if not default_index.exists():
-        default_index = PREVIEW_DIR / default_date / "index.html"
-    default_version = str(int(default_index.stat().st_mtime)) if default_index.exists() else "0"
+        total = len(account_items)
+        pending = sum(1 for it in account_items if it.get("status") == "pending_review")
+        approved = sum(1 for it in account_items if it.get("status") in {"approved", "ready_to_post"})
+        posted = sum(1 for it in account_items if it.get("status") == "posted")
+
+        sidebar_links.append(
+            f"""<a class="sidebar-link" href="#{account_id}" onclick="selectAccount('{account_id}')">
+            <span class="sidebar-emoji">{emoji}</span>
+            <span class="sidebar-name">{html.escape(account_name)}</span>
+            <span class="sidebar-count {'has-pending' if pending > 0 else ''}">{total}</span>
+            </a>"""
+        )
+
+        item_rows: list[str] = []
+        if not account_items:
+            item_rows.append(
+                '<tr><td colspan="7" class="empty-msg">暂无内容，点击上方"生成内容"按钮创建。</td></tr>'
+            )
+        for item in account_items:
+            item_id = html.escape(str(item.get("id", "")))
+            item_title = html.escape(str(item.get("title", ""))[:50])
+            item_status = str(item.get("status", ""))
+            status_cn = status_label(item_status)
+            score = safe_int(item.get("total_score", 0), default=0)
+            badge = str(item.get("quality_badge", ""))
+            updated = html.escape(display_datetime(item.get("updated_at") or item.get("created_at")) or "-")
+            preview_url = html.escape(str(item.get("preview_url", "") or ""))
+            preview_link = (
+                f'<a class="btn-sm btn-preview" href="{preview_url}" target="_blank" rel="noreferrer">查看预览</a>'
+                if preview_url else '<span class="no-link">无预览</span>'
+            )
+            status_cls = item_status.replace("_", "-")
+            item_rows.append(
+                f"""<tr class="item-row status-{status_cls}" data-item-id="{item_id}">
+                <td class="item-title">{item_title}</td>
+                <td><span class="badge badge-{status_cls}">{status_cn}</span></td>
+                <td class="item-score">{badge}{score}</td>
+                <td class="item-time">{updated}</td>
+                <td class="item-actions">
+                {preview_link}
+                <button class="btn-sm btn-images" onclick="reImage('{item_id}')">重新配图</button>
+                <button class="btn-sm btn-approve" onclick="setStatus('{item_id}','approved')">已采用</button>
+                <button class="btn-sm btn-reject" onclick="setStatus('{item_id}','rejected')">驳回</button>
+                </td>
+                </tr>"""
+            )
+
+        is_football = track == "football"
+        football_section = ""
+        if is_football:
+            football_section = f"""
+            <div class="football-section">
+            <textarea id="football-knowledge-{p_idx}" class="football-textarea" placeholder="输入比赛/选题知识，例如：明晚8点皇马vs巴萨，国家德比，本泽马伤愈复出...（可选，留空则使用RSS选题）"></textarea>
+            <button class="btn btn-football" onclick="generateFootball({p_idx})">
+            <span class="btn-icon">⚡</span> 生成足球分析
+            </button>
+            <div id="football-log-{p_idx}" class="job-log"></div>
+            </div>
+            """
+
+        plt_label = platform_label(platform_name)
+        fmt_label = post_format_label(post_format)
+
+        account_cards_html.append(
+            f"""<div class="account-card" id="{account_id}" data-track="{track}">
+            <div class="card-header" style="background:linear-gradient(135deg,{grad_start},{grad_end})">
+            <div class="card-header-top">
+            <span class="card-emoji">{emoji}</span>
+            <h2 class="card-name">{html.escape(account_name)}</h2>
+            </div>
+            <div class="card-meta">
+            <span class="platform-badge">{plt_label}</span>
+            <span class="meta-item">🕐 {html.escape(publish_time or '未设置')}</span>
+            <span class="meta-item">📋 {fmt_label}</span>
+            </div>
+            </div>
+            <div class="card-body">
+            <div class="card-actions">
+            <button class="btn btn-generate" onclick="generateContent({p_idx})">
+            <span class="btn-icon">✨</span> 生成内容
+            </button>
+            {football_section}
+            </div>
+            <div id="generate-log-{p_idx}" class="job-log"></div>
+            <div class="queue-section">
+            <h3 class="queue-title">📋 队列内容 <span class="queue-count">{len(account_items)} 条</span></h3>
+            <div class="table-wrap">
+            <table class="queue-table">
+            <thead>
+            <tr><th>标题</th><th>状态</th><th>评分</th><th>更新时间</th><th>操作</th></tr>
+            </thead>
+            <tbody>
+            {''.join(item_rows)}
+            </tbody>
+            </table>
+            </div>
+            </div>
+            </div>
+            </div>"""
+        )
+
+    total_all = len(queue)
+    pending_all = sum(1 for it in queue if it.get("status") == "pending_review")
+    approved_all = sum(1 for it in queue if it.get("status") in {"approved", "ready_to_post"})
+    posted_all = sum(1 for it in queue if it.get("status") == "posted")
+    rejected_all = sum(1 for it in queue if it.get("status") == "rejected")
+
     portal_html = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>内容预览门户</title>
-  <style>
-    body {{
-      margin: 0; background: #f3f5f9; color: #1f2937;
-      font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
-    }}
-    .layout {{
-      display: grid; grid-template-columns: 260px 1fr; min-height: 100vh;
-    }}
-    .sidebar {{
-      border-right: 1px solid #e5e7eb; background: #fff; padding: 16px; overflow: auto;
-    }}
-    .sidebar h2 {{ margin: 0 0 12px; font-size: 18px; }}
-    .sidebar .hint {{ font-size: 12px; color: #6b7280; margin-bottom: 10px; }}
-    .date-link {{
-      display: block; padding: 10px 12px; border-radius: 8px; color: #111827; text-decoration: none;
-      margin-bottom: 6px; background: #f8fafc;
-    }}
-    .date-link:hover {{ background: #e8f1ff; color: #1d4ed8; }}
-    .account-link {{
-      display: block; padding: 7px 12px; border-radius: 8px; color: #1d4ed8; text-decoration: none;
-      margin: -2px 0 10px 10px; background: #eff6ff; font-size: 13px;
-    }}
-    .account-link:hover {{ background: #dbeafe; }}
-    .content {{
-      padding: 16px;
-    }}
-    .header {{
-      background: #fff; border-radius: 12px; padding: 12px 14px; margin-bottom: 12px;
-      box-shadow: 0 3px 12px rgba(0,0,0,.06);
-    }}
-    .header h1 {{ margin: 0; font-size: 18px; }}
-    iframe {{
-      width: 100%; height: calc(100vh - 120px); border: 0; border-radius: 12px; background: #fff;
-      box-shadow: 0 4px 16px rgba(0,0,0,.08);
-    }}
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>内容生产控制台</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+background: #f0f2f5;
+color: #1e293b;
+font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', sans-serif;
+min-height: 100vh;
+}}
+.app-layout {{
+display: grid;
+grid-template-columns: 220px 1fr;
+min-height: 100vh;
+}}
+.side {{
+background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+color: #cbd5e1;
+padding: 20px 12px;
+overflow-y: auto;
+position: sticky;
+top: 0;
+height: 100vh;
+}}
+.side-brand {{
+font-size: 20px;
+font-weight: 700;
+color: #f1f5f9;
+padding: 0 8px 16px;
+border-bottom: 1px solid #334155;
+margin-bottom: 16px;
+display: flex;
+align-items: center;
+gap: 8px;
+}}
+.side-brand small {{ font-size: 12px; font-weight: 400; color: #64748b; display: block; margin-top: 2px; }}
+.sidebar-link {{
+display: flex;
+align-items: center;
+gap: 10px;
+padding: 10px 12px;
+border-radius: 10px;
+color: #94a3b8;
+text-decoration: none;
+cursor: pointer;
+transition: all .15s ease;
+margin-bottom: 4px;
+}}
+.sidebar-link:hover {{ background: rgba(255,255,255,.08); color: #e2e8f0; }}
+.sidebar-link.active {{ background: rgba(59,130,246,.2); color: #60a5fa; }}
+.sidebar-emoji {{ font-size: 18px; width: 24px; text-align: center; }}
+.sidebar-name {{ flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.sidebar-count {{
+font-size: 12px;
+background: #334155;
+color: #94a3b8;
+border-radius: 999px;
+padding: 2px 8px;
+min-width: 20px;
+text-align: center;
+}}
+.sidebar-count.has-pending {{ background: #f59e0b; color: #0f172a; font-weight: 600; }}
+.main {{ padding: 24px; max-width: 1400px; overflow-y: auto; }}
+.hero-header {{
+background: linear-gradient(135deg, #0f172a 0%, #1d4ed8 50%, #0f766e 100%);
+border-radius: 16px;
+padding: 28px 32px;
+margin-bottom: 24px;
+color: #fff;
+position: relative;
+overflow: hidden;
+}}
+.hero-header::after {{
+content: '';
+position: absolute;
+top: -50%; right: -20%;
+width: 400px; height: 400px;
+background: radial-gradient(circle, rgba(255,255,255,.06) 0%, transparent 70%);
+border-radius: 50%;
+}}
+.hero-header h1 {{ font-size: 26px; font-weight: 700; margin-bottom: 6px; position: relative; z-index: 1; }}
+.hero-header p {{ font-size: 14px; color: rgba(255,255,255,.75); position: relative; z-index: 1; }}
+.stat-bar {{ display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; position: relative; z-index: 1; }}
+.stat-pill {{
+background: rgba(255,255,255,.12);
+backdrop-filter: blur(4px);
+border-radius: 999px;
+padding: 6px 14px;
+font-size: 13px;
+display: flex;
+align-items: center;
+gap: 6px;
+}}
+.stat-pill b {{ font-size: 16px; }}
+.stat-pill.pending {{ background: rgba(245,158,11,.25); }}
+.stat-pill.approved {{ background: rgba(16,185,129,.2); }}
+.stat-pill.posted {{ background: rgba(59,130,246,.25); }}
+.stat-pill.rejected {{ background: rgba(239,68,68,.2); }}
+.stat-pill.total {{ background: rgba(255,255,255,.15); }}
+.accounts-grid {{
+display: grid;
+grid-template-columns: repeat(auto-fill, minmax(560px, 1fr));
+gap: 20px;
+}}
+@media (max-width: 640px) {{
+.accounts-grid {{ grid-template-columns: 1fr; }}
+.app-layout {{ grid-template-columns: 1fr; }}
+.side {{ display: none; }}
+}}
+.account-card {{
+background: #fff;
+border-radius: 14px;
+box-shadow: 0 4px 20px rgba(15,23,42,.08);
+overflow: hidden;
+transition: box-shadow .2s, transform .2s;
+}}
+.account-card:hover {{ box-shadow: 0 8px 30px rgba(15,23,42,.12); transform: translateY(-2px); }}
+.card-header {{ padding: 18px 20px; color: #fff; }}
+.card-header-top {{ display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }}
+.card-emoji {{ font-size: 28px; }}
+.card-name {{ font-size: 18px; font-weight: 700; }}
+.card-meta {{ display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; opacity: .85; }}
+.platform-badge {{ background: rgba(255,255,255,.2); border-radius: 999px; padding: 2px 10px; font-weight: 600; }}
+.meta-item {{ opacity: .9; }}
+.card-body {{ padding: 16px 20px 20px; }}
+.btn {{
+border: 0;
+border-radius: 10px;
+padding: 10px 18px;
+font-size: 14px;
+font-weight: 600;
+cursor: pointer;
+display: inline-flex;
+align-items: center;
+gap: 6px;
+transition: all .15s;
+}}
+.btn-generate {{ background: linear-gradient(135deg, #2563eb, #3b82f6); color: #fff; }}
+.btn-generate:hover {{ box-shadow: 0 4px 14px rgba(37,99,235,.4); transform: translateY(-1px); }}
+.btn-generate:disabled {{ opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }}
+.btn-football {{ background: linear-gradient(135deg, #1e40af, #2563eb); color: #fff; }}
+.btn-football:hover {{ box-shadow: 0 4px 14px rgba(30,64,175,.4); transform: translateY(-1px); }}
+.btn-football:disabled {{ opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }}
+.btn-icon {{ font-size: 16px; }}
+.btn-sm {{
+border: 0;
+border-radius: 6px;
+padding: 4px 10px;
+font-size: 12px;
+cursor: pointer;
+transition: all .12s;
+text-decoration: none;
+display: inline-block;
+}}
+.btn-preview {{ background: #eff6ff; color: #1d4ed8; }}
+.btn-preview:hover {{ background: #dbeafe; }}
+.btn-images {{ background: #fef3c7; color: #92400e; }}
+.btn-images:hover {{ background: #fde68a; }}
+.btn-approve {{ background: #d1fae5; color: #065f46; }}
+.btn-approve:hover {{ background: #a7f3d0; }}
+.btn-reject {{ background: #fee2e2; color: #991b1b; }}
+.btn-reject:hover {{ background: #fecaca; }}
+.no-link {{ color: #94a3b8; font-size: 12px; }}
+.football-section {{ margin-top: 12px; padding-top: 14px; border-top: 1px dashed #e2e8f0; }}
+.football-textarea {{
+width: 100%;
+box-sizing: border-box;
+border: 1px solid #cbd5e1;
+border-radius: 10px;
+padding: 10px 12px;
+font-size: 13px;
+font-family: inherit;
+line-height: 1.6;
+min-height: 70px;
+resize: vertical;
+transition: border-color .15s;
+}}
+.football-textarea:focus {{ outline: 0; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,.15); }}
+.job-log {{
+display: none;
+margin-top: 10px;
+background: #0f172a;
+color: #93c5fd;
+border-radius: 10px;
+padding: 12px 14px;
+font-size: 12px;
+font-family: 'SF Mono', 'Fira Code', 'Courier New', monospace;
+line-height: 1.7;
+max-height: 200px;
+overflow-y: auto;
+white-space: pre-wrap;
+word-break: break-all;
+}}
+.queue-section {{ margin-top: 16px; }}
+.queue-title {{ font-size: 15px; font-weight: 600; margin-bottom: 10px; color: #334155; display: flex; align-items: center; gap: 8px; }}
+.queue-count {{ font-size: 12px; font-weight: 400; color: #64748b; }}
+.table-wrap {{ overflow-x: auto; border-radius: 10px; border: 1px solid #e2e8f0; }}
+.queue-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+.queue-table th {{ background: #f8fafc; padding: 8px 10px; text-align: left; font-weight: 600; color: #475569; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }}
+.queue-table td {{ padding: 8px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }}
+.queue-table tr:last-child td {{ border-bottom: 0; }}
+.queue-table tr:hover {{ background: #f8fafc; }}
+.item-title {{ max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.item-score {{ font-family: monospace; }}
+.item-time {{ font-size: 12px; color: #64748b; white-space: nowrap; }}
+.item-actions {{ white-space: nowrap; display: flex; gap: 4px; flex-wrap: wrap; }}
+.empty-msg {{ color: #94a3b8; text-align: center; padding: 20px !important; font-style: italic; }}
+.badge {{ display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 600; }}
+.badge-pending-review {{ background: #fef3c7; color: #92400e; }}
+.badge-approved {{ background: #d1fae5; color: #065f46; }}
+.badge-ready-to-post {{ background: #dbeafe; color: #1e40af; }}
+.badge-posted {{ background: #e0e7ff; color: #3730a3; }}
+.badge-rejected {{ background: #fee2e2; color: #991b1b; }}
+.badge-auto-blocked {{ background: #fce7f3; color: #9d174d; }}
+.badge-draft {{ background: #f3f4f6; color: #4b5563; }}
+.status-rejected td {{ opacity: .5; }}
+.status-rejected .item-actions .btn-approve,
+.status-rejected .item-actions .btn-images,
+.status-rejected .item-actions .btn-preview {{ display: none; }}
+.status-posted td {{ opacity: .7; }}
+.status-posted .item-actions .btn-approve,
+.status-posted .item-actions .btn-reject,
+.status-posted .item-actions .btn-images {{ display: none; }}
+@keyframes fadeSlideIn {{
+from {{ opacity: 0; transform: translateY(10px); }}
+to {{ opacity: 1; transform: translateY(0); }}
+}}
+.account-card {{ animation: fadeSlideIn .3s ease both; }}
+.account-card:nth-child(1) {{ animation-delay: 0s; }}
+.account-card:nth-child(2) {{ animation-delay: .05s; }}
+.account-card:nth-child(3) {{ animation-delay: .1s; }}
+.account-card:nth-child(4) {{ animation-delay: .15s; }}
+.account-card:nth-child(5) {{ animation-delay: .2s; }}
+.account-card:nth-child(6) {{ animation-delay: .25s; }}
+.toast {{
+position: fixed;
+bottom: 24px;
+right: 24px;
+background: #1e293b;
+color: #f1f5f9;
+padding: 12px 20px;
+border-radius: 12px;
+font-size: 14px;
+box-shadow: 0 8px 30px rgba(0,0,0,.2);
+z-index: 9999;
+opacity: 0;
+transform: translateY(20px);
+transition: all .3s ease;
+pointer-events: none;
+}}
+.toast.show {{ opacity: 1; transform: translateY(0); }}
+</style>
 </head>
 <body>
-  <div class="layout">
-    <aside class="sidebar">
-      <h2>日期列表</h2>
-      <div class="hint">点击左侧日期，在右侧查看当天内容预览</div>
-      {''.join(links)}
-    </aside>
-    <main class="content">
-      <div class="header">
-        <h1>当前日期：<span id="current-date">{default_date}</span></h1>
-      </div>
-      <iframe name="date-content-frame" src="{default_index.relative_to(PREVIEW_DIR).as_posix()}?v={default_version}"></iframe>
-    </main>
-  </div>
+<div class="app-layout">
+<aside class="side">
+<div class="side-brand">🎛️ 控制台 <small>内容生产 Dashboard</small></div>
+<nav>{''.join(sidebar_links)}</nav>
+</aside>
+<main class="main">
+<div class="hero-header">
+<h1>🎯 内容生产控制台</h1>
+<p>选择账号，生成内容，审核配图，管理发布队列 — 一站式完成。</p>
+<div class="stat-bar">
+<span class="stat-pill total">📦 总计 <b>{total_all}</b></span>
+<span class="stat-pill pending">⏳ 待审核 <b>{pending_all}</b></span>
+<span class="stat-pill approved">✅ 已采用 <b>{approved_all}</b></span>
+<span class="stat-pill posted">🚀 已发布 <b>{posted_all}</b></span>
+<span class="stat-pill rejected">🗑️ 已驳回 <b>{rejected_all}</b></span>
+</div>
+</div>
+<div class="accounts-grid">{''.join(account_cards_html)}</div>
+</main>
+</div>
+<div id="toast" class="toast"></div>
+<script>
+function showToast(msg, isError) {{
+var t = document.getElementById('toast');
+t.textContent = msg;
+t.style.background = isError ? '#dc2626' : '#1e293b';
+t.classList.add('show');
+setTimeout(function() {{ t.classList.remove('show'); }}, 3500);
+}}
+function selectAccount(id) {{
+document.querySelectorAll('.sidebar-link').forEach(function(el) {{ el.classList.remove('active'); }});
+var link = document.querySelector('.sidebar-link[href="#' + id + '"]');
+if (link) link.classList.add('active');
+var card = document.getElementById(id);
+if (card) card.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+}}
+async function parseJsonResponse(resp) {{
+const text = await resp.text();
+try {{ return JSON.parse(text); }}
+catch (err) {{ throw new Error('API 响应异常：' + text.slice(0, 200)); }}
+}}
+async function pollJob(jobId, logEl) {{
+while (true) {{
+const resp = await fetch('/job-status?id=' + encodeURIComponent(jobId));
+const payload = await parseJsonResponse(resp);
+logEl.textContent = (payload.lines || []).join('\\n');
+if (payload.status === 'done') {{
+logEl.textContent += '\\n\\n✅ 生成完成！页面即将刷新...';
+setTimeout(function() {{ location.reload(); }}, 2000);
+return;
+}}
+if (payload.status === 'failed') {{
+logEl.textContent += '\\n\\n❌ 生成失败，请看上方错误信息。';
+return;
+}}
+await new Promise(function(resolve) {{ setTimeout(resolve, 1500); }});
+}}
+}}
+var generating = {{}};
+async function generateContent(idx) {{
+if (generating[idx]) return;
+generating[idx] = true;
+var btn = document.querySelectorAll('.btn-generate')[idx];
+var log = document.getElementById('generate-log-' + idx);
+if (!btn || !log) {{ generating[idx] = false; return; }}
+btn.disabled = true;
+btn.innerHTML = '<span class="btn-icon">⏳</span> 生成中...';
+log.style.display = 'block';
+log.textContent = '正在创建生成任务...';
+var params = new URLSearchParams({{ async: '1' }});
+var card = document.querySelectorAll('.account-card')[idx];
+var nameEl = card ? card.querySelector('.card-name') : null;
+var accountName = nameEl ? nameEl.textContent.trim() : '';
+if (accountName) params.set('account', accountName);
+try {{
+var resp = await fetch('/generate?' + params.toString());
+var payload = await parseJsonResponse(resp);
+if (!resp.ok) throw new Error(payload.error || '创建任务失败');
+await pollJob(payload.job_id, log);
+}} catch (err) {{
+log.textContent = '生成失败：' + err.message;
+showToast('生成失败：' + err.message, true);
+}} finally {{
+btn.disabled = false;
+btn.innerHTML = '<span class="btn-icon">✨</span> 生成内容';
+generating[idx] = false;
+}}
+}}
+var footballGenerating = {{}};
+async function generateFootball(idx) {{
+if (footballGenerating[idx]) return;
+footballGenerating[idx] = true;
+var btn = document.querySelectorAll('.btn-football')[idx];
+var textarea = document.getElementById('football-knowledge-' + idx);
+var log = document.getElementById('football-log-' + idx);
+if (!btn || !log) {{ footballGenerating[idx] = false; return; }}
+var knowledge = textarea ? textarea.value.trim() : '';
+btn.disabled = true;
+btn.innerHTML = '<span class="btn-icon">⏳</span> 生成中...';
+log.style.display = 'block';
+log.textContent = '正在创建足球分析任务...';
+var card = document.querySelectorAll('.account-card')[idx];
+var nameEl = card ? card.querySelector('.card-name') : null;
+var accountName = nameEl ? nameEl.textContent.trim() : '';
+var params = new URLSearchParams({{ account: accountName, async: '1' }});
+if (knowledge) params.set('knowledge', knowledge);
+try {{
+var resp = await fetch('/generate-football?' + params.toString());
+var payload = await parseJsonResponse(resp);
+if (!resp.ok) throw new Error(payload.error || '创建足球分析任务失败');
+await pollJob(payload.job_id, log);
+}} catch (err) {{
+log.textContent = '生成足球分析失败：' + err.message;
+showToast('生成足球分析失败：' + err.message, true);
+}} finally {{
+btn.disabled = false;
+btn.innerHTML = '<span class="btn-icon">⚡</span> 生成足球分析';
+footballGenerating[idx] = false;
+}}
+}}
+async function setStatus(itemId, newStatus) {{
+var statusNames = {{ approved: '已采用', rejected: '已驳回' }};
+try {{
+var resp = await fetch('/status?id=' + encodeURIComponent(itemId) + '&status=' + encodeURIComponent(newStatus));
+var text = await resp.text();
+if (!resp.ok) throw new Error(text);
+showToast(text);
+var row = document.querySelector('tr[data-item-id="' + itemId + '"]');
+if (row) {{
+row.className = row.className.replace(/status-\\S+/g, '') + ' status-' + newStatus;
+var badge = row.querySelector('.badge');
+if (badge) {{
+badge.className = 'badge badge-' + newStatus;
+badge.textContent = statusNames[newStatus] || newStatus;
+}}
+}}
+}} catch (err) {{ showToast('操作失败：' + err.message, true); }}
+}}
+async function reImage(itemId) {{
+try {{
+var resp = await fetch('/action?id=' + encodeURIComponent(itemId) + '&action=images');
+var text = await resp.text();
+if (!resp.ok) throw new Error(text);
+showToast('✅ ' + text);
+}} catch (err) {{ showToast('配图失败：' + err.message, true); }}
+}}
+setTimeout(function() {{ location.reload(); }}, 60000);
+</script>
 </body>
 </html>"""
+
     portal_file = PREVIEW_DIR / "index.html"
     portal_file.write_text(portal_html, encoding="utf-8")
     portal_url = build_preview_url(config, portal_file)
@@ -5225,6 +5741,89 @@ def command_serve_review(args: argparse.Namespace) -> None:
         threading.Thread(target=runner, daemon=True).start()
         return job_id
 
+    def start_football_generation_job(account: str, knowledge: str, date: str = "") -> str:
+        """Start an async football match analysis generation job."""
+        job_id = uuid.uuid4().hex[:10]
+        with jobs_lock:
+            jobs[job_id] = {
+                "status": "running",
+                "lines": [
+                    f"[START] 足球分析 账号={account}",
+                    f"[KNOWLEDGE] {knowledge[:200]}" if knowledge else "[INFO] 未提供比赛信息",
+                ],
+                "created_at": now_local().isoformat(),
+            }
+
+        def runner() -> None:
+            writer = JobLogWriter(job_id)
+            try:
+                with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+                    config = load_config(Path(config_path))
+                    queue = load_queue()
+                    actual_date = date or now_local().strftime("%Y-%m-%d")
+                    platform_cfgs = find_platform_configs(config, account=account)
+                    for platform_cfg in platform_cfgs:
+                        if platform_cfg.get("track") != "football":
+                            continue
+                        track_cfg = config.get("tracks", {}).get("football", {})
+                        per_track_limit = int(
+                            config.get("generation", {}).get("topics_per_track", 6)
+                        )
+                        topics = collect_track_topics("football", track_cfg, per_track_limit)
+                        match_knowledge = knowledge.strip()
+                        selected_topics = topics[:1] if topics else []
+                        if not selected_topics and match_knowledge:
+                            placeholder = {
+                                "title": f"足球赛前分析 - {actual_date}",
+                                "link": "",
+                                "description": match_knowledge,
+                                "track": "football",
+                                "source": "user_provided",
+                                "score": 50.0,
+                            }
+                            selected_topics = [placeholder]
+                        for topic in selected_topics:
+                            item = build_queue_item(
+                                config, actual_date, platform_cfg, track_cfg, "football", topic,
+                                match_knowledge=match_knowledge,
+                            )
+                            queue.append(item)
+                            print(
+                                f"[OK] generated {item['account_name']} -> {item['id']} "
+                                f"{item['quality_badge']}{item['total_score']} {item['title'][:60]}"
+                            )
+                        cloud_cfg = config.get("cloud_media", {})
+                        image_cfg = cloud_cfg.get("image", {})
+                        if cloud_cfg.get("enabled", False) and image_cfg.get("enabled", False):
+                            recent_items = [
+                                it for it in queue
+                                if it.get("date") == actual_date and it.get("track") == "football"
+                            ][-len(selected_topics):]
+                            render_cloud_illustrations_for_items(config, recent_items)
+                        for item in queue:
+                            if item.get("date") == actual_date and item.get("track") == "football":
+                                generate_preview_for_item(config, item)
+                        date_items = [it for it in queue if it.get("date") == actual_date]
+                        build_preview_index(config, date_items, actual_date)
+                        build_accounts_index(config, queue, actual_date)
+                        build_dashboard_index(config, queue, actual_date)
+                        build_preview_portal(config)
+                        save_queue(queue)
+                        print(f"[DONE] 足球分析生成完成")
+                        break
+                writer.flush()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "done"
+                    jobs[job_id].setdefault("lines", []).append("[DONE] 足球分析生成完成")
+            except Exception as exc:  # pylint: disable=broad-except
+                writer.flush()
+                with jobs_lock:
+                    jobs[job_id]["status"] = "failed"
+                    jobs[job_id].setdefault("lines", []).append(f"[ERROR] {exc}")
+
+        threading.Thread(target=runner, daemon=True).start()
+        return job_id
+
     class ReviewHandler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *handler_args: Any, **handler_kwargs: Any) -> None:
             super().__init__(*handler_args, directory=str(PREVIEW_DIR), **handler_kwargs)
@@ -5390,6 +5989,87 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(message.encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/generate-football":
+                params = urllib.parse.parse_qs(parsed.query)
+                account = (params.get("account") or [""])[0]
+                knowledge = (params.get("knowledge") or [""])[0]
+                date = (params.get("date") or [""])[0]
+                async_mode = (params.get("async") or ["1"])[0] in {"1", "true", "True"}
+                if not account:
+                    account = next(
+                        (p.get("account_name", "") for p in config.get("platforms", [])
+                         if p.get("track") == "football"),
+                        "涛哥儿聊个球"
+                    )
+                if async_mode:
+                    try:
+                        job_id = start_football_generation_job(account, knowledge, date)
+                        payload = {"job_id": job_id, "status": "running"}
+                        self.send_response(200)
+                    except Exception as exc:
+                        payload = {"error": str(exc)}
+                        self.send_response(500)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+                    return
+                buffer = io.StringIO()
+                status_code = 200
+                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                    try:
+                        command_generate_football(
+                            argparse.Namespace(
+                                config=config_path,
+                                date=date or None,
+                                knowledge=knowledge,
+                                no_illustrations=False,
+                                sync_feishu=False,
+                            )
+                        )
+                    except Exception as exc:
+                        status_code = 500
+                        print(f"[ERROR] {exc}")
+                self.send_response(status_code)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(buffer.getvalue().encode("utf-8", errors="replace"))
+                return
+            if parsed.path == "/regenerate-images":
+                params = urllib.parse.parse_qs(parsed.query)
+                item_id = (params.get("id") or [""])[0]
+                if not item_id:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write("参数错误：缺少 id".encode("utf-8"))
+                    return
+                buffer = io.StringIO()
+                status_code = 200
+                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                    try:
+                        config = load_config(Path(config_path))
+                        queue = load_queue()
+                        item = next((entry for entry in queue if entry.get("id") == item_id), None)
+                        if item is None:
+                            raise ValueError(f"Queue item not found: {item_id}")
+                        render_cloud_illustrations_for_items(config, [item])
+                        generate_preview_for_item(config, item)
+                        item_date = str(item.get("date", now_local().strftime("%Y-%m-%d")))
+                        build_preview_index(config, [entry for entry in queue if entry.get("date") == item_date], item_date)
+                        build_accounts_index(config, queue, item_date)
+                        build_dashboard_index(config, queue, item_date)
+                        build_preview_portal(config)
+                        save_queue(queue)
+                        print(f"[OK] Images regenerated for {item_id}")
+                    except Exception as exc:
+                        status_code = 500
+                        print(f"[ERROR] {exc}")
+                payload = buffer.getvalue()
+                self.send_response(status_code)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(payload.encode("utf-8", errors="replace"))
                 return
             if parsed.path == "/export-selected":
                 params = urllib.parse.parse_qs(parsed.query)
