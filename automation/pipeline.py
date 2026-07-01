@@ -2177,7 +2177,7 @@ def _render_track_svg(track: str, title_esc: str, scene_esc: str, scene_raw: str
     return _svg_generic(title_esc, scene_esc, scene_raw, seed, idx)
 
 
-def _svg_football(title: str, scene: str, _raw: str, seed: str, _idx: int) -> str:
+def _svg_football(title: str, scene: str, _raw: str, seed: str, idx: int) -> str:
     """Football illustration: dynamic match scene with stadium, pitch, and action."""
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
@@ -2239,7 +2239,7 @@ def _svg_football(title: str, scene: str, _raw: str, seed: str, _idx: int) -> st
 </svg>'''
 
 
-def _svg_travel(title: str, scene: str, _raw: str, seed: str, _idx: int) -> str:
+def _svg_travel(title: str, scene: str, _raw: str, seed: str, idx: int) -> str:
     """Travel illustration: scenic landscape with mountains, sun, route markers."""
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
@@ -2301,7 +2301,7 @@ def _svg_travel(title: str, scene: str, _raw: str, seed: str, _idx: int) -> str:
 </svg>'''
 
 
-def _svg_education(title: str, scene: str, _raw: str, seed: str, _idx: int) -> str:
+def _svg_education(title: str, scene: str, _raw: str, seed: str, idx: int) -> str:
     """Education illustration: warm study scene with books, lamp, and plants."""
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
@@ -2381,7 +2381,7 @@ def _svg_education(title: str, scene: str, _raw: str, seed: str, _idx: int) -> s
 </svg>'''
 
 
-def _svg_comedy(title: str, scene: str, _raw: str, seed: str, _idx: int) -> str:
+def _svg_comedy(title: str, scene: str, _raw: str, seed: str, idx: int) -> str:
     """Comedy illustration: stage performance with audience, mic, and spotlights."""
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
@@ -2450,7 +2450,7 @@ def _svg_comedy(title: str, scene: str, _raw: str, seed: str, _idx: int) -> str:
 </svg>'''
 
 
-def _svg_generic(title: str, scene: str, _raw: str, seed: str, _idx: int) -> str:
+def _svg_generic(title: str, scene: str, _raw: str, seed: str, idx: int) -> str:
     """Generic illustration: abstract artistic composition."""
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
