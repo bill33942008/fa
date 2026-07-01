@@ -5531,6 +5531,15 @@ def command_plan_day(args: argparse.Namespace) -> None:
     if not tracks or not platforms:
         raise ValueError("Config missing tracks/platforms.")
 
+    track_filter = (args.track or "").strip()
+    if track_filter:
+        if track_filter not in tracks:
+            raise ValueError(f"Unknown track: {track_filter}")
+        platforms = [p for p in platforms if p.get("track") == track_filter]
+        if not platforms:
+            print(f"[WARN] No platforms found for track={track_filter}, nothing to do.")
+            return
+
     track_topics: dict[str, list[dict[str, Any]]] = {}
     for track_name, track_cfg in tracks.items():
         topics = collect_track_topics(track_name, track_cfg, per_track_limit)
@@ -6994,6 +7003,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_plan.add_argument(
         "--notify", action="store_true", help="Send reminder after queue generation"
+    )
+    p_plan.add_argument(
+        "--track", default="", help="Only generate for this track (e.g. football)"
     )
     p_plan.set_defaults(func=command_plan_day)
 
