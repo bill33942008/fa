@@ -526,12 +526,22 @@ def topic_contains_any(topic: dict[str, Any], keywords: list[str]) -> bool:
     return any(str(keyword).lower() in text for keyword in keywords if str(keyword).strip())
 
 
+def topic_age_hours(topic: dict[str, Any]) -> float | None:
+    raw = topic.get("pub_date_raw")
+    pub_dt = parse_datetime(raw)
+    if pub_dt is None:
+        return None
+    return (now_local() - pub_dt.astimezone()).total_seconds() / 3600.0
+
+
 def collect_track_topics(
     track_name: str, track_cfg: dict[str, Any], per_track_limit: int
 ) -> list[dict[str, Any]]:
     keywords = track_cfg.get("keywords", [])
     boost_keywords = [str(x) for x in track_cfg.get("topic_boost_keywords", [])]
     exclude_keywords = [str(x) for x in track_cfg.get("topic_exclude_keywords", [])]
+    max_age_hours = float(track_cfg.get("max_topic_age_hours", 72))
+    require_pub_date = bool(track_cfg.get("require_pub_date", False))
     all_items: list[dict[str, Any]] = []
     seen_titles: set[str] = set()
 
@@ -539,6 +549,11 @@ def collect_track_topics(
         for item in fetch_rss(source):
             title = item.get("title", "").strip()
             if not title:
+                continue
+            age_hours = topic_age_hours(item)
+            if require_pub_date and age_hours is None:
+                continue
+            if age_hours is not None and age_hours > max_age_hours:
                 continue
             if exclude_keywords and topic_contains_any(item, exclude_keywords):
                 continue
@@ -759,6 +774,8 @@ def generate_draft(
         - 严禁编造来源没有明确给出的事实，包括人名、比分、进球人、伤停、首发、赔率、时间地点。
         - 足球内容优先做赛前/今日赛程/伤停/阵容/盘口分析；不要拿旧赛果或历史回放当今日热点。
         - 如果选题看起来是赛后战报/旧比赛复盘，必须转成“风险提示/信息核实”角度，不能编造进球过程。
+        - 当前日期是 {now_local().strftime('%Y-%m-%d')}，不得写与当前日期冲突的时效表述。
+        - 已知事实：托马斯·图赫尔已于 2025-01-01 正式执教英格兰队；不得写“还没上任”“即将上任”“首秀未开始”等错误表述，除非来源明确是当时历史材料。
 
         内容形式专项要求：
         {format_requirements}
@@ -810,6 +827,18 @@ def sanitize_draft_for_accuracy(
         return draft
 
     body = str(draft.get("body_markdown", ""))
+    title = str(draft.get("title", ""))
+    for bad, good in [
+        ("图赫尔还没上任", "图赫尔执教周期中的"),
+        ("图赫尔尚未上任", "图赫尔执教周期中的"),
+        ("图赫尔即将上任", "图赫尔执教周期中的"),
+        ("图赫尔首秀", "图赫尔带队"),
+        ("还没上任", "当前执教阶段"),
+        ("即将上任", "当前执教阶段"),
+    ]:
+        title = title.replace(bad, good)
+        body = body.replace(bad, good)
+    draft["title"] = title
     source_text = f"{topic.get('title', '')} {topic.get('description', '')}".strip()
     source_plain = strip_markdown(source_text)
     if len(source_plain) < 260:

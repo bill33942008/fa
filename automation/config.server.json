@@ -224,6 +224,8 @@
         "巴西2-1日本",
         "巴西 2-1 日本"
       ],
+      "require_pub_date": true,
+      "max_topic_age_hours": 24,
       "rss_sources": [
         "https://www.skysports.com/rss/12040",
         "https://www.espn.com/espn/rss/soccer/news",
