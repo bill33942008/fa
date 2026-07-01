@@ -579,7 +579,101 @@ FOOTBALL_POST_MATCH_MARKERS = [
     "赛后",
     "录像",
     "集锦",
+    "oust",
+    "storm into",
+    "breeze past",
+    "advances",
+    "advance to",
+    "advance ",
+    "books ",
+    "book potential",
+    "blank ",
+    "sets record to lead",
+    "sets up ",
 ]
+
+
+FOOTBALL_RELEVANCE_MARKERS = [
+    "football",
+    "soccer",
+    "premier league",
+    "la liga",
+    "serie a",
+    "bundesliga",
+    "ligue 1",
+    "champions league",
+    "europa league",
+    "world cup",
+    "mls",
+    "usmnt",
+    "qualifier",
+    "group stage",
+    "last 16",
+    "last-16",
+    "knockout",
+    "足球",
+    "英超",
+    "西甲",
+    "德甲",
+    "意甲",
+    "法甲",
+    "欧冠",
+    "世界杯",
+    "国家队",
+    "england",
+    "germany",
+    "spain",
+    "italy",
+    "brazil",
+    "mexico",
+    "france",
+    "norway",
+    "sweden",
+    "usa",
+    "u.s.",
+    "netherlands",
+    "portugal",
+    "argentina",
+    "tuchel",
+    "haaland",
+    "mbappe",
+    " vs ",
+    " v ",
+]
+
+
+NON_FOOTBALL_MARKERS = [
+    "wimbledon",
+    "tennis",
+    "formula 1",
+    "formula one",
+    " f1 ",
+    "grand prix",
+    "golf",
+    " nba ",
+    "lakers",
+    "lebron",
+    "ryder cup",
+    "boxing",
+    "heavyweight",
+    " ufc",
+    "cricket",
+    "horse racing",
+    "magic weekend",
+    "super league",
+    "sky sports racing",
+    "open championship",
+    "final qualifying",
+]
+
+
+def is_football_relevant_topic(topic: dict[str, Any], source: str = "") -> bool:
+    if topic_contains_any(topic, NON_FOOTBALL_MARKERS):
+        return False
+    source_lower = str(source).lower()
+    if "soccer" in source_lower or "/football/" in source_lower:
+        return True
+    return topic_contains_any(topic, FOOTBALL_RELEVANCE_MARKERS)
 
 
 def normalize_topic_key(topic: dict[str, Any]) -> str:
@@ -670,6 +764,10 @@ def collect_track_topics(
         )
         if str(x).strip()
     ]
+    football_only = bool(track_cfg.get("topic_football_only", track_name == "football"))
+    non_football_exclude = [
+        str(x) for x in track_cfg.get("topic_non_football_exclude_keywords", NON_FOOTBALL_MARKERS)
+    ]
     max_age_hours = float(track_cfg.get("max_topic_age_hours", 72))
     require_pub_date = bool(track_cfg.get("require_pub_date", False))
     filter_post_match = bool(track_cfg.get("filter_post_match_topics", track_name == "football"))
@@ -693,6 +791,10 @@ def collect_track_topics(
             ):
                 continue
             if filter_post_match and is_football_post_match_topic(item, track_cfg):
+                continue
+            if football_only and not is_football_relevant_topic(item, source):
+                continue
+            if non_football_exclude and topic_contains_any(item, non_football_exclude):
                 continue
             title_key = re.sub(r"\s+", " ", title.lower())
             if title_key in seen_titles:
