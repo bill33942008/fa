@@ -1684,10 +1684,9 @@ def sanitize_filename_part(text: str, max_len: int = 36) -> str:
 def image_card_html(url: str, label: str) -> str:
     safe_url = html.escape(str(url))
     return (
-        f"<p class='image-marker'>【插入{html.escape(label)}】</p>"
-        "<figure class='inline-image'>"
-        f"<img src='{safe_url}' loading='lazy' />"
-        f"<figcaption>{html.escape(label)}</figcaption>"
+        "<figure style='margin:12px 0;text-align:center;'>"
+        f"<img src='{safe_url}' style='max-width:100%;height:auto;border-radius:8px;display:block;margin:0 auto;' loading='lazy' />"
+        f"<figcaption style='color:#64748b;font-size:12px;margin-top:4px;'>{html.escape(label)}</figcaption>"
         "</figure>"
     )
 
@@ -1695,8 +1694,7 @@ def image_card_html(url: str, label: str) -> str:
 def clean_image_html(url: str, label: str) -> str:
     safe_url = html.escape(str(url))
     return (
-        f"<p class='image-marker'>【插入{html.escape(label)}】</p>"
-        f"<p><img src='{safe_url}' alt='{html.escape(label)}' style='max-width:100%;height:auto;' /></p>"
+        f"<p><img src='{safe_url}' alt='{html.escape(label)}' style='max-width:100%;height:auto;border-radius:8px;display:block;margin:8px auto;' /></p>"
     )
 
 
@@ -1732,6 +1730,7 @@ def markdown_to_html_with_inline_images(markdown_text: str, image_urls: list[str
 
 
 def markdown_to_clean_rich_html(markdown_text: str, image_urls: list[str]) -> str:
+    """Convert markdown to HTML with inline styles, optimized for pasting into WeChat Official Account editor."""
     lines = markdown_text.splitlines()
     blocks: list[list[str]] = []
     current: list[str] = []
@@ -1745,7 +1744,7 @@ def markdown_to_clean_rich_html(markdown_text: str, image_urls: list[str]) -> st
     if current:
         blocks.append(current)
     if not blocks:
-        return markdown_to_simple_html(markdown_text)
+        return _rich_simple_html(markdown_text)
     image_after: dict[int, list[str]] = {}
     for idx, url in enumerate(image_urls):
         block_idx = min(len(blocks) - 1, int((idx + 1) * len(blocks) / (len(image_urls) + 1)))
@@ -1753,11 +1752,64 @@ def markdown_to_clean_rich_html(markdown_text: str, image_urls: list[str]) -> st
     html_parts: list[str] = []
     rendered_image_idx = 0
     for block_idx, block in enumerate(blocks):
-        html_parts.append(markdown_to_simple_html("\n".join(block)))
+        html_parts.append(_rich_simple_html("\n".join(block)))
         for url in image_after.get(block_idx, []):
             rendered_image_idx += 1
-            html_parts.append(clean_image_html(url, f"配图{rendered_image_idx:02d}：对应上方段落"))
+            html_parts.append(_inline_image_html(url, f"配图{rendered_image_idx}"))
     return "\n".join(html_parts)
+
+
+def _rich_simple_html(markdown_text: str) -> str:
+    """Convert markdown to HTML with inline styles for WeChat/Xiaohongshu paste compatibility."""
+    lines = markdown_text.splitlines()
+    html_lines: list[str] = []
+    in_ul = False
+    for raw in lines:
+        line = raw.rstrip()
+        if not line.strip():
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            continue
+        if line.startswith("### "):
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<h3 style='font-size:16px;font-weight:700;margin:16px 0 8px;line-height:1.5;'>{html.escape(line[4:])}</h3>")
+        elif line.startswith("## "):
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<h2 style='font-size:18px;font-weight:700;margin:18px 0 10px;line-height:1.5;'>{html.escape(line[3:])}</h2>")
+        elif line.startswith("# "):
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<h1 style='font-size:20px;font-weight:700;margin:20px 0 12px;line-height:1.4;'>{html.escape(line[2:])}</h1>")
+        elif line.lstrip().startswith("- ") or line.lstrip().startswith("* "):
+            if not in_ul:
+                html_lines.append("<ul style='padding-left:20px;margin:8px 0;'>")
+                in_ul = True
+            item = line.lstrip()[2:]
+            html_lines.append(f"<li style='font-size:15px;line-height:1.8;margin:4px 0;color:#333;'>{html.escape(item)}</li>")
+        else:
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            html_lines.append(f"<p style='font-size:15px;line-height:1.8;margin:8px 0;color:#333;'>{html.escape(line)}</p>")
+    if in_ul:
+        html_lines.append("</ul>")
+    return "\n".join(html_lines)
+
+
+def _inline_image_html(url: str, label: str) -> str:
+    """Image HTML with inline styles for WeChat paste compatibility."""
+    safe_url = html.escape(str(url))
+    return (
+        f"<p style='text-align:center;margin:12px 0;font-size:13px;color:#999;'>"
+        f"<img src='{safe_url}' alt='{html.escape(label)}' "
+        f"style='max-width:100%;height:auto;border-radius:8px;display:block;margin:0 auto;' /></p>"
+    )
 
 
 def markdown_with_image_markers(markdown_text: str, image_count: int) -> str:
@@ -1787,7 +1839,7 @@ def markdown_with_image_markers(markdown_text: str, image_count: int) -> str:
     for block_idx, block in enumerate(blocks):
         parts.append("\n".join(block))
         for image_idx in markers_after.get(block_idx, []):
-            parts.append(f"【插入配图{image_idx:02d}：对应上方段落】")
+            parts.append(f"【配图{image_idx}】")
     return "\n\n".join(parts)
 
 
@@ -3258,6 +3310,47 @@ def synthesize_tts_segment(
     )
 
 
+def _build_xiaohongshu_text(
+    title: str, hook: str, body: str, image_urls: list[str], cover: str, hashtags: str
+) -> str:
+    """Build Xiaohongshu-friendly plain text (strips markdown, simple format)."""
+    parts: list[str] = [title]
+    if hook:
+        parts.append(strip_markdown(hook))
+    body_clean = strip_markdown(body)
+    # Insert image markers in body
+    if image_urls:
+        body_lines = body_clean.split("\n")
+        blocks: list[list[str]] = []
+        current: list[str] = []
+        for line in body_lines:
+            if line.strip():
+                current.append(line)
+                continue
+            if current:
+                blocks.append(current)
+                current = []
+        if current:
+            blocks.append(current)
+        if blocks:
+            markers: dict[int, list[int]] = {}
+            for idx in range(len(image_urls)):
+                block_idx = min(len(blocks) - 1, int((idx + 1) * len(blocks) / (len(image_urls) + 1)))
+                markers.setdefault(block_idx, []).append(idx + 1)
+            final_lines: list[str] = []
+            for bi, blk in enumerate(blocks):
+                final_lines.append("\n".join(blk))
+                for mi in markers.get(bi, []):
+                    final_lines.append(f"[配图{mi}]")
+            body_clean = "\n\n".join(final_lines)
+    parts.append(body_clean)
+    if cover:
+        parts.append(f"封面：{cover}")
+    if hashtags:
+        parts.append(hashtags)
+    return "\n\n".join(parts)
+
+
 def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: dict[str, str]) -> str:
     queue_id = str(item.get("id", uuid.uuid4().hex[:12]))
     raw_title = str(item.get("title", "")).strip() or "未命名草稿"
@@ -3317,6 +3410,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         illustration_urls = []
     body_html = markdown_to_html_with_inline_images(content.get("body_markdown", ""), illustration_urls)
     clean_body_html = markdown_to_clean_rich_html(content.get("body_markdown", ""), illustration_urls)
+    xiaohongshu_text = _build_xiaohongshu_text(raw_title, raw_hook, raw_body, illustration_urls, cover_text, hashtag_line)
     marker_publish_text = "\n\n".join(
         [
             part
@@ -3331,24 +3425,24 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         ]
     )
     rich_publish_html = (
-        "<article class='rich-article'>"
-        f"<h1>{title}</h1>"
-        f"<p class='rich-hook'>{hook_text}</p>"
+        "<article>"
+        f"<h1 style='font-size:22px;line-height:1.45;margin:0 0 12px;'>{title}</h1>"
+        f"<p style='background:#eff6ff;border-left:3px solid #3b82f6;padding:8px 10px;border-radius:6px;font-size:15px;line-height:1.8;margin:8px 0;color:#333;'>{hook_text}</p>"
         f"{clean_body_html}"
-        f"<p class='rich-cover'>封面文案：{cover_text}</p>"
-        f"<p class='rich-tags'>{html.escape(hashtag_line)}</p>"
+        f"<p style='color:#64748b;font-size:14px;margin-top:16px;'>封面文案：{cover_text}</p>"
+        f"<p style='color:#64748b;font-size:13px;'>{html.escape(hashtag_line)}</p>"
         "</article>"
     )
     copy_panel = (
         "<div class='copy-panel'>"
         "<h3>发布素材复制区</h3>"
-        "<p class='copy-hint'>提示：公众号/小红书建议优先用“复制带图片位置文案”，再按标记上传图片；剪映用“复制剪映口播稿”+素材包图片。</p>"
+        '<p class="copy-hint">提示：公众号直接点\u201c复制公众号图文\u201d粘贴到编辑器；小红书用\u201c复制小红书文案\u201d粘贴后手动上传图片；剪映用\u201c复制剪映口播稿\u201d+素材包图片。</p>'
         "<div class='copy-actions'>"
         f"<button type='button' data-copy-target='copy-title-{queue_id}' onclick='copyTarget(this)'>复制标题</button>"
         f"<button type='button' data-copy-target='copy-body-{queue_id}' onclick='copyTarget(this)'>复制正文</button>"
-        f"<button type='button' data-copy-target='copy-full-{queue_id}' onclick='copyTarget(this)'>复制完整发布文案</button>"
+        f"<button type='button' data-rich-target='rich-copy-{queue_id}' onclick='copyRichTarget(this)'>复制公众号图文</button>"
+        f"<button type='button' data-copy-target='copy-xiaohongshu-{queue_id}' onclick='copyTarget(this)'>复制小红书文案</button>"
         f"<button type='button' data-copy-target='copy-marker-{queue_id}' onclick='copyTarget(this)'>复制带图片位置文案</button>"
-        f"<button type='button' data-rich-target='rich-copy-{queue_id}' onclick='copyRichTarget(this)'>复制公众号图文（含图片）</button>"
         f"<button type='button' data-copy-target='copy-capcut-{queue_id}' onclick='copyTarget(this)'>复制剪映口播稿</button>"
         f"<a class='download-pack' href='{html.escape(asset_pack_url)}' target='_blank' rel='noreferrer'>下载素材包</a>"
         "</div>"
@@ -3365,11 +3459,11 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         f"<div class='next-step'>运营提示：{next_step}</div>"
         f"<textarea id='copy-title-{queue_id}'>{html.escape(raw_title)}</textarea>"
         f"<textarea id='copy-body-{queue_id}'>{html.escape(raw_body)}</textarea>"
-        f"<textarea id='copy-full-{queue_id}'>{html.escape(publish_text)}</textarea>"
+        f"<textarea id='copy-xiaohongshu-{queue_id}'>{html.escape(xiaohongshu_text)}</textarea>"
         f"<textarea id='copy-marker-{queue_id}'>{html.escape(marker_publish_text)}</textarea>"
         f"<textarea id='copy-capcut-{queue_id}'>{html.escape(capcut_text)}</textarea>"
         "<details class='rich-copy-details'>"
-        "<summary>公众号富文本复制区（按钮失败时，展开后框选整块 Ctrl+C）</summary>"
+        "<summary>公众号富文本复制区（按钮失败时手动框选）</summary>"
         f"<div id='rich-copy-{queue_id}' class='rich-copy-area' contenteditable='true'>{rich_publish_html}</div>"
         "</details>"
         "</div>"
@@ -3475,8 +3569,6 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .rich-copy-area h1 {{ font-size:22px; line-height:1.45; }}
     .rich-copy-area p, .rich-copy-area li {{ font-size:15px; line-height:1.8; }}
     .rich-copy-area img {{ max-width:100%; border-radius:8px; margin:8px 0; }}
-    .rich-hook {{ background:#eff6ff; border-left:3px solid #3b82f6; padding:8px 10px; }}
-    .rich-cover, .rich-tags {{ color:#64748b; }}
     .article h1 {{ font-size: 21px; line-height: 1.4; margin: 0 0 12px; }}
     .updated-time {{ color:#64748b; font-size:12px; margin: -4px 0 10px; }}
     .hook {{ background: #eff6ff; border-left: 3px solid #3b82f6; padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; font-size: 14px; }}
@@ -3505,11 +3597,6 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .ill-gallery h3 {{ margin: 0 0 8px; font-size: 14px; color: #374151; }}
     .ill-grid {{ display: grid; gap: 8px; grid-template-columns: 1fr; }}
     .ill-card img {{ width: 100%; border-radius: 10px; border: 1px solid #e5e7eb; }}
-    .inline-image {{ margin: 12px 0; }}
-    .inline-image img {{ width: 100%; border-radius: 10px; border: 1px solid #e5e7eb; }}
-    .inline-image figcaption {{ color:#64748b; font-size:12px; margin-top:5px; }}
-    .image-marker {{ background:#fef3c7; border:1px solid #f59e0b; color:#92400e; border-radius:8px; padding:7px 9px; font-size:13px; font-weight:600; }}
-    .rich-copy-area .image-marker {{ background:#fff7ed; color:#9a3412; }}
   </style>
   <script>
     async function copyToClipboard(text) {{
@@ -4718,14 +4805,20 @@ if (!resp.ok) throw new Error(text);
 showToast('✅ ' + text);
 }} catch (err) {{ showToast('配图失败：' + err.message, true); }}
 }}
-// Smart auto-refresh: skip if any job log is visible (job running)
+// Smart auto-refresh: skip if any job log is visible or user interacted recently
+var lastActivity = Date.now();
+document.addEventListener('mousedown', function() {{ lastActivity = Date.now(); }});
+document.addEventListener('keydown', function() {{ lastActivity = Date.now(); }});
 setInterval(function() {{
   var activeLogs = document.querySelectorAll('.job-log');
   var hasActiveJob = false;
   for (var i = 0; i < activeLogs.length; i++) {{
     if (activeLogs[i].style.display === 'block') {{ hasActiveJob = true; break; }}
   }}
-  if (!hasActiveJob) {{ location.reload(); }}
+  if (hasActiveJob) return;
+  // Don't reload if user interacted within last 30 seconds
+  if (Date.now() - lastActivity < 30000) return;
+  location.reload();
 }}, 120000);
 </script>
 </body>
