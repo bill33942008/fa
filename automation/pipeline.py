@@ -2054,7 +2054,6 @@ def build_asset_pack_for_item(config: dict[str, Any], item: dict[str, Any]) -> d
         )
     item["asset_pack_file"] = str(pack_file)
     item["asset_pack_url"] = build_preview_url(config, pack_file)
-    item["updated_at"] = now_local().isoformat()
     return {"asset_pack_file": str(pack_file), "asset_pack_url": item["asset_pack_url"]}
 
 
@@ -3025,7 +3024,8 @@ def build_accounts_index(
         image_ready = sum(1 for item in items if len(item.get("illustration_urls") or item.get("illustration_files") or []) > 0)
         best_score = max([safe_int(item.get("total_score", 0), default=0) for item in items] or [0])
         item_rows: list[str] = []
-        for item in items[:8]:
+        display_limit = 20
+        for item in items[:display_limit]:
             preview_file = Path(str(item.get("preview_file", "")).strip() or "#")
             href = html.escape(preview_file.name) if preview_file != Path("#") else "#"
             title = html.escape(str(item.get("title", "")).strip()[:64] or "未命名草稿")
@@ -3035,7 +3035,7 @@ def build_accounts_index(
             material = f"{ill_count} 张图" if ill_count else "待配图"
             raw_status = str(item.get("status", "pending_review"))
             status = html.escape(status_label(raw_status))
-            updated = html.escape(display_datetime(item.get("updated_at") or item.get("created_at")) or "-")
+            updated = html.escape(display_datetime(item.get("created_at") or item.get("updated_at")) or "-")
             item_rows.append(
                 f"<li data-status='{html.escape(raw_status)}'>"
                 f"<a href='{href}' target='_blank' rel='noreferrer'>{title}</a>"
@@ -3051,7 +3051,7 @@ def build_accounts_index(
             f"<div class='stats'><span>候选 {ready_count}</span><span>已配图 {image_ready}</span><span>最高分 {best_score}</span></div>"
             "<div class='generate-row'>"
             "<input type='number' min='1' max='10' value='3' title='生成条数' />"
-            f"<button type='button' onclick=\"runGenerate(this)\" data-account=\"{html.escape(account_name)}\">点击生成</button>"
+            f"<button type='button' onclick=\"runGenerate(this)\" data-account=\"{html.escape(account_name)}\" data-date=\"{html.escape(latest_date)}\">点击生成</button>"
             "</div>"
             "<pre class='run-log'></pre>"
             "<ul class='items'>"
@@ -3104,7 +3104,8 @@ async function runGenerate(btn){{
   log.style.display='block'; log.textContent='正在创建生成任务...';
   btn.disabled=true;
   try {{
-    const resp = await fetch('/generate?async=1&sync_feishu=0&count=' + encodeURIComponent(count) + '&account=' + encodeURIComponent(btn.dataset.account || ''));
+    const date = btn.dataset.date || '';
+    const resp = await fetch('/generate?async=1&sync_feishu=0&count=' + encodeURIComponent(count) + '&account=' + encodeURIComponent(btn.dataset.account || '') + '&date=' + encodeURIComponent(date));
     const payload = await parseJsonResponse(resp);
     if (!resp.ok) throw new Error(payload.error || '创建任务失败');
     await pollJob(payload.job_id, log);
@@ -3120,7 +3121,8 @@ async function pollJob(jobId, log){{
     const payload = await parseJsonResponse(resp);
     log.textContent = (payload.lines || []).join('\\n');
     if (payload.status === 'done') {{
-      log.textContent += '\\n\\n生成完成，刷新页面即可看到新候选内容。';
+      log.textContent += '\\n\\n生成完成，正在刷新列表...';
+      setTimeout(() => location.reload(), 800);
       return;
     }}
     if (payload.status === 'failed') {{
@@ -3272,14 +3274,14 @@ def build_dashboard_index(config: dict[str, Any], queue: list[dict[str, Any]], d
     bulk_all_url = ""
     bulk_selected_url = ""
     try:
-        bulk_all_url = build_bulk_asset_pack(config, queue, date=dashboard_date, status="all").get(
-            "bulk_pack_url", ""
-        )
+        bulk_all_url = build_bulk_asset_pack(
+            config, queue, date=dashboard_date, status="all", rebuild_items=False
+        ).get("bulk_pack_url", "")
     except Exception as exc:  # pylint: disable=broad-except
         print(f"[WARN] build all bulk pack failed: {exc}")
     try:
         bulk_selected_url = build_bulk_asset_pack(
-            config, queue, date=dashboard_date, status="selected"
+            config, queue, date=dashboard_date, status="selected", rebuild_items=False
         ).get("bulk_pack_url", "")
     except Exception:
         bulk_selected_url = f"/download-packs?date={dashboard_date}&status=selected"
@@ -3345,7 +3347,7 @@ table{{width:100%;border-collapse:collapse;font-size:14px;}} th,td{{border-botto
 </div></body></html>"""
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        build_bulk_asset_pack(config, queue, date=dashboard_date, status="all")
+        build_bulk_asset_pack(config, queue, date=dashboard_date, status="all", rebuild_items=False)
     except Exception as exc:  # pylint: disable=broad-except
         print(f"[WARN] build bulk asset pack failed: {exc}")
     build_free_content_page(config)
@@ -4710,7 +4712,7 @@ def command_generate_account(args: argparse.Namespace) -> None:
         print("[DONE] No content generated.")
         return
 
-    guard_result = apply_quality_guard(config, queue)
+    guard_result = apply_quality_guard(config, created_items)
     if guard_result["changed"]:
         print(f"[INFO] Quality guard auto-blocked {len(guard_result['blocked_items'])} item(s).")
 
@@ -4768,13 +4770,13 @@ def command_serve_review(args: argparse.Namespace) -> None:
                     jobs[self.job_id].setdefault("lines", []).append(self._buffer.strip())
             self._buffer = ""
 
-    def start_generation_job(account: str, platform: str, count: int, sync_feishu: bool) -> str:
+    def start_generation_job(account: str, platform: str, count: int, sync_feishu: bool, date: str = "") -> str:
         job_id = uuid.uuid4().hex[:10]
         with jobs_lock:
             jobs[job_id] = {
                 "status": "running",
                 "lines": [
-                    f"[START] 账号={account or '全部'} 平台={platform or '全部'} 数量={count}",
+                    f"[START] 账号={account or '全部'} 平台={platform or '全部'} 日期={date or '今天'} 数量={count}",
                     "[STEP] 收集选题 -> 生成文案 -> DashScope配图 -> 重建预览/素材包",
                 ],
                 "created_at": now_local().isoformat(),
@@ -4789,7 +4791,7 @@ def command_serve_review(args: argparse.Namespace) -> None:
                             config=config_path,
                             account=account,
                             platform=platform,
-                            date=None,
+                            date=date or None,
                             count=count,
                             render_images=True,
                             sync_feishu=sync_feishu,
@@ -4870,12 +4872,13 @@ def command_serve_review(args: argparse.Namespace) -> None:
                 params = urllib.parse.parse_qs(parsed.query)
                 account = (params.get("account") or [""])[0]
                 platform = (params.get("platform") or [""])[0]
+                date = (params.get("date") or [""])[0]
                 count = safe_int((params.get("count") or ["3"])[0], default=3)
                 sync_feishu = (params.get("sync_feishu") or ["1"])[0] not in {"0", "false", "False"}
                 async_mode = (params.get("async") or ["0"])[0] in {"1", "true", "True"}
                 if async_mode:
                     try:
-                        job_id = start_generation_job(account, platform, count, sync_feishu)
+                        job_id = start_generation_job(account, platform, count, sync_feishu, date)
                         payload = {"job_id": job_id, "status": "running"}
                         self.send_response(200)
                     except Exception as exc:  # pylint: disable=broad-except
@@ -4894,7 +4897,7 @@ def command_serve_review(args: argparse.Namespace) -> None:
                                 config=config_path,
                                 account=account,
                                 platform=platform,
-                                date=None,
+                                date=date or None,
                                 count=count,
                                 render_images=True,
                                 sync_feishu=sync_feishu,
