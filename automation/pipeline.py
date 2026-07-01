@@ -534,14 +534,145 @@ def topic_age_hours(topic: dict[str, Any]) -> float | None:
     return (now_local() - pub_dt.astimezone()).total_seconds() / 3600.0
 
 
+FOOTBALL_POST_MATCH_MARKERS = [
+    "full time",
+    "full-time",
+    "match report",
+    "match recap",
+    "post-match",
+    "postmatch",
+    "highlights",
+    "scoreline",
+    "final score",
+    " beats ",
+    " beat ",
+    " defeats ",
+    " defeat ",
+    " wins ",
+    " win ",
+    "victory",
+    "thrashed",
+    "hammered",
+    "held to a draw",
+    "held to",
+    "round-up",
+    "round up",
+    "recap",
+    "result",
+    "post match",
+    "赛果",
+    "战报",
+    "完场",
+    "全场比赛",
+    "进球",
+    "破门",
+    "扳平",
+    "绝杀",
+    "险胜",
+    "不敌",
+    "大胜",
+    "惨败",
+    "逆转",
+    "淘汰",
+    "出局",
+    "夺冠",
+    "赛后",
+    "录像",
+    "集锦",
+]
+
+
+def normalize_topic_key(topic: dict[str, Any]) -> str:
+    link = str(topic.get("link", "")).strip().lower()
+    if link:
+        return link.split("#", 1)[0]
+    title = re.sub(r"\s+", " ", str(topic.get("title", "")).strip().lower())
+    return title
+
+
+def is_football_post_match_topic(topic: dict[str, Any], track_cfg: dict[str, Any]) -> bool:
+    title = str(topic.get("title", "")).strip()
+    preview_markers = [str(x) for x in track_cfg.get("topic_boost_keywords", [])]
+    has_preview_signal = bool(preview_markers) and topic_contains_any(topic, preview_markers)
+    has_post_match_signal = topic_contains_any(topic, FOOTBALL_POST_MATCH_MARKERS)
+    has_score_title = bool(re.search(r"\b\d+\s*[-–]\s*\d+\b", title))
+    if has_preview_signal and not has_post_match_signal:
+        return False
+    if has_post_match_signal:
+        return True
+    return has_score_title and not has_preview_signal
+
+
+def used_topic_keys(
+    queue: list[dict[str, Any]], *, track_name: str = "", days: int = 14
+) -> set[str]:
+    cutoff = now_local() - dt.timedelta(days=max(1, days))
+    keys: set[str] = set()
+    for item in queue:
+        if track_name and str(item.get("track", "")).strip() != track_name:
+            continue
+        created_raw = str(item.get("created_at", "")).strip()
+        created_dt = None
+        if created_raw:
+            try:
+                created_dt = dt.datetime.fromisoformat(created_raw)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=now_local().tzinfo)
+            except ValueError:
+                created_dt = None
+        if created_dt is not None and created_dt.astimezone() < cutoff.astimezone():
+            continue
+        link = str(item.get("source_link", "")).strip().lower()
+        if link:
+            keys.add(link.split("#", 1)[0])
+        title = re.sub(r"\s+", " ", str(item.get("source_topic", "")).strip().lower())
+        if title:
+            keys.add(title)
+    return keys
+
+
+def select_topics_for_generation(
+    topics: list[dict[str, Any]],
+    queue: list[dict[str, Any]],
+    *,
+    track_name: str,
+    count: int,
+) -> list[dict[str, Any]]:
+    if not topics or count <= 0:
+        return []
+    used = used_topic_keys(queue, track_name=track_name)
+    fresh = [topic for topic in topics if normalize_topic_key(topic) not in used]
+    pool = list(fresh or topics)
+    if not fresh:
+        print(
+            f"[WARN] {track_name}: all {len(topics)} candidate topics were used recently; "
+            "reusing ranked list"
+        )
+    selected: list[dict[str, Any]] = []
+    for _ in range(count):
+        if not pool:
+            pool = list(topics)
+        selected.append(pool.pop(0))
+    return selected
+
+
 def collect_track_topics(
     track_name: str, track_cfg: dict[str, Any], per_track_limit: int
 ) -> list[dict[str, Any]]:
     keywords = track_cfg.get("keywords", [])
     boost_keywords = [str(x) for x in track_cfg.get("topic_boost_keywords", [])]
     exclude_keywords = [str(x) for x in track_cfg.get("topic_exclude_keywords", [])]
+    require_any_keywords = bool(track_cfg.get("topic_require_any_keywords", False))
+    require_keywords = [
+        str(x)
+        for x in track_cfg.get(
+            "topic_require_keywords", track_cfg.get("topic_boost_keywords", [])
+        )
+        if str(x).strip()
+    ]
     max_age_hours = float(track_cfg.get("max_topic_age_hours", 72))
     require_pub_date = bool(track_cfg.get("require_pub_date", False))
+    filter_post_match = bool(track_cfg.get("filter_post_match_topics", track_name == "football"))
     all_items: list[dict[str, Any]] = []
     seen_titles: set[str] = set()
 
@@ -557,6 +688,12 @@ def collect_track_topics(
                 continue
             if exclude_keywords and topic_contains_any(item, exclude_keywords):
                 continue
+            if require_any_keywords and require_keywords and not topic_contains_any(
+                item, require_keywords
+            ):
+                continue
+            if filter_post_match and is_football_post_match_topic(item, track_cfg):
+                continue
             title_key = re.sub(r"\s+", " ", title.lower())
             if title_key in seen_titles:
                 continue
@@ -566,6 +703,11 @@ def collect_track_topics(
             item["score"] = score_topic(item, keywords)
             if boost_keywords and topic_contains_any(item, boost_keywords):
                 item["score"] = round(float(item["score"]) + 8.0, 3)
+            if track_name == "football" and "when:1d" not in source and "when%3A1d" not in source:
+                item["score"] = round(float(item["score"]) - 4.0, 3)
+            if age_hours is not None:
+                freshness_bonus = max(0.0, (max_age_hours - age_hours) / max(max_age_hours, 1.0))
+                item["score"] = round(float(item["score"]) + freshness_bonus * 6.0, 3)
             all_items.append(item)
 
     all_items.sort(
@@ -4343,10 +4485,10 @@ def command_plan_day(args: argparse.Namespace) -> None:
         save_json(DATA_DIR / date / f"topics_{track_name}.json", topics)
         print(f"[INFO] {track_name}: collected {len(topics)} topics")
 
-    selection_index: dict[str, int] = {}
     queue = load_queue()
     new_items = 0
     newly_created_items: list[dict[str, Any]] = []
+    track_topic_pools: dict[str, list[dict[str, Any]]] = {}
 
     for platform_cfg in platforms:
         track_name = platform_cfg["track"]
@@ -4355,9 +4497,15 @@ def command_plan_day(args: argparse.Namespace) -> None:
             print(f"[WARN] No topics for track={track_name}, skip {platform_cfg['platform']}")
             continue
 
-        idx = selection_index.get(track_name, 0) % len(topics)
-        selection_index[track_name] = idx + 1
-        topic = topics[idx]
+        if track_name not in track_topic_pools:
+            need = sum(1 for cfg in platforms if cfg.get("track") == track_name)
+            track_topic_pools[track_name] = select_topics_for_generation(
+                topics, queue, track_name=track_name, count=max(1, need)
+            )
+        if not track_topic_pools[track_name]:
+            print(f"[WARN] No fresh topics left for track={track_name}, skip {platform_cfg['platform']}")
+            continue
+        topic = track_topic_pools[track_name].pop(0)
 
         queue_item = build_queue_item(
             config, date, platform_cfg, tracks[track_name], track_name, topic
@@ -4698,8 +4846,10 @@ def command_generate_account(args: argparse.Namespace) -> None:
         if not topics:
             print(f"[WARN] no topics for {platform_cfg.get('account_name')} ({track_name})")
             continue
-        for idx in range(count):
-            topic = topics[idx % len(topics)]
+        picked_topics = select_topics_for_generation(
+            topics, queue, track_name=track_name, count=count
+        )
+        for topic in picked_topics:
             item = build_queue_item(config, date, platform_cfg, track_cfg, track_name, topic)
             queue.append(item)
             created_items.append(item)
