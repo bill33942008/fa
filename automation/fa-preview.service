@@ -8,7 +8,7 @@ WorkingDirectory=/opt/fa
 Environment=FA_ROOT=/opt/fa
 # profile.d uses "export KEY=..." which systemd EnvironmentFile cannot parse.
 # serve_preview.sh sources that file correctly before starting Python.
-ExecStart=/opt/fa/automation/serve_preview.sh
+ExecStart=/bin/bash /opt/fa/automation/serve_preview.sh
 Restart=on-failure
 RestartSec=5
 
