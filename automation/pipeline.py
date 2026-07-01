@@ -1028,7 +1028,7 @@ def generate_draft(
             - 至少包含 4 个小标题，结构清楚。
             - 给出路线/清单/预算/避坑/步骤等可执行信息（按赛道选择）。
             - 文末要有收藏、评论或提问引导。
-            - 明确写出 3 张配图应该放在哪些段落附近。
+            - 配图位置：用「【配图1】」「【配图2】」「【配图3】」简单标注即可，不要额外写配图说明。
             """
         ).strip()
     elif post_format == "long_article":
@@ -1040,7 +1040,8 @@ def generate_draft(
             - 结构：开头冲突/背景 -> 3-5个小标题分论点 -> 总结/互动。
             - 每个分论点要有具体事实、判断和读者价值。
             - 如果涉及足球竞彩，必须理性分析，不承诺收益，不诱导下注。
-            - 明确写出 3 张配图应该放在哪些段落附近。
+            - 配图位置：用「【配图1】」「【配图2】」「【配图3】」标记在正文中即可，不要写额外的配图描述或建议文字。
+            - 禁止出现"配图建议"、"配图0"、"image-marker"等字样的说明文字。
             """
         ).strip()
     else:
@@ -1165,8 +1166,71 @@ def sanitize_draft_for_accuracy(
     }
     if not title.strip() or title.strip() in generic_titles:
         draft["title"] = f"{topic_title}：赛前深度分析" if topic_title else title
+
+    # Clean up illustration suggestions and consolidate disclaimers
+    body = _clean_article_body(body)
     draft["body_markdown"] = body
     return draft
+
+
+def _clean_article_body(body: str) -> str:
+    """Remove illustration suggestions and consolidate disclaimers to the end."""
+    lines = body.split("\n")
+    cleaned: list[str] = []
+    disclaimers: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Remove illustration suggestion blocks: "> **配图建议X：** ..."
+        if re.match(r"^>\s*\*\*配图建议\d*[:：]", stripped):
+            continue
+        # Remove standalone "配图建议X：..." (no blockquote)
+        if re.match(r"^配图建议\d*[:：]", stripped):
+            continue
+
+        # Extract standalone disclaimers (not part of a paragraph)
+        disclaimer_match = re.match(
+            r"^[（(【]?\*?(?:此为分析推演|此为推演|分析推演|建议发布前核实|建议核实|请核实.*?首发名单|请核实.*?伤停|此为.*?推演)\*?[）)】]?",
+            stripped,
+        )
+        if disclaimer_match:
+            text = disclaimer_match.group(0).strip("*（）()【】")
+            if text not in disclaimers:
+                disclaimers.append(text)
+            continue
+
+        # Remove inline "【此为分析推演，建议发布前核实具体伤停名单】" and similar
+        line = re.sub(
+            r"[（(【]?\*?此为分析推演[，,]\s*建议发布前核实具体伤停名单\*?[）)】]?",
+            "",
+            line,
+        )
+        line = re.sub(
+            r"[（(【]?\*?此为分析推演\*?[）)】]?",
+            "",
+            line,
+        )
+
+        if line.strip():
+            cleaned.append(line)
+        else:
+            # keep blank lines for structure
+            if cleaned and cleaned[-1] != "":
+                cleaned.append("")
+
+    # Remove trailing blank lines
+    while cleaned and cleaned[-1] == "":
+        cleaned.pop()
+
+    # Append consolidated disclaimers after signature/end
+    if disclaimers:
+        cleaned.append("")
+        cleaned.append("---")
+        for d in disclaimers:
+            cleaned.append(f"*{d}*")
+
+    return "\n".join(cleaned)
 
 
 def clamp_score(value: Any, minimum: int = 0, maximum: int = 20) -> int:
