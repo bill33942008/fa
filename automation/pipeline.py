@@ -4310,7 +4310,15 @@ if (!resp.ok) throw new Error(text);
 showToast('✅ ' + text);
 }} catch (err) {{ showToast('配图失败：' + err.message, true); }}
 }}
-setTimeout(function() {{ location.reload(); }}, 60000);
+// Smart auto-refresh: skip if any job log is visible (job running)
+setInterval(function() {{
+  var activeLogs = document.querySelectorAll('.job-log');
+  var hasActiveJob = false;
+  for (var i = 0; i < activeLogs.length; i++) {{
+    if (activeLogs[i].style.display === 'block') {{ hasActiveJob = true; break; }}
+  }}
+  if (!hasActiveJob) {{ location.reload(); }}
+}}, 120000);
 </script>
 </body>
 </html>"""
@@ -5772,16 +5780,23 @@ def command_serve_review(args: argparse.Namespace) -> None:
                         topics = collect_track_topics("football", track_cfg, per_track_limit)
                         match_knowledge = knowledge.strip()
                         selected_topics = topics[:1] if topics else []
-                        if not selected_topics and match_knowledge:
+                        if not selected_topics:
+                            if match_knowledge:
+                                desc = match_knowledge
+                                title = f"足球赛前分析 - {actual_date}"
+                            else:
+                                desc = "今日足球赛事汇总，包括关键对战分析、伤停信息和战术看点。"
+                                title = f"今日足球赛前热点分析 - {actual_date}"
                             placeholder = {
-                                "title": f"足球赛前分析 - {actual_date}",
+                                "title": title,
                                 "link": "",
-                                "description": match_knowledge,
+                                "description": desc,
                                 "track": "football",
-                                "source": "user_provided",
+                                "source": "user_provided" if match_knowledge else "auto_fallback",
                                 "score": 50.0,
                             }
                             selected_topics = [placeholder]
+                            print(f"[INFO] 未找到RSS选题，使用占位主题: {title}")
                         for topic in selected_topics:
                             item = build_queue_item(
                                 config, actual_date, platform_cfg, track_cfg, "football", topic,
@@ -6239,6 +6254,13 @@ def command_serve_review(args: argparse.Namespace) -> None:
             if parsed.path == "/":
                 self.path = "/index.html"
             return super().do_GET()
+
+    try:
+        preview_portal = build_preview_portal(load_config(Path(config_path)))
+        if preview_portal.get("portal_url"):
+            print(f"[OK] preview portal: {preview_portal['portal_url']}")
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] Could not build preview portal: {exc}")
 
     server = http.server.ThreadingHTTPServer((host, port), ReviewHandler)
     print(f"[OK] Review server running: http://{host}:{port}")
