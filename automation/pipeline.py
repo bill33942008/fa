@@ -4350,27 +4350,29 @@ def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
             </a>"""
         )
 
-        item_rows: list[str] = []
+        MAX_VISIBLE = 3
+        visible_rows: list[str] = []
+        hidden_rows: list[str] = []
         if not account_items:
-            item_rows.append(
+            visible_rows.append(
                 '<tr><td colspan="7" class="empty-msg">暂无内容，点击上方"生成内容"按钮创建。</td></tr>'
             )
-        for item in account_items:
-            item_id = html.escape(str(item.get("id", "")))
-            item_title = html.escape(str(item.get("title", ""))[:50])
-            item_status = str(item.get("status", ""))
-            status_cn = status_label(item_status)
-            score = safe_int(item.get("total_score", 0), default=0)
-            badge = str(item.get("quality_badge", ""))
-            updated = html.escape(display_datetime(item.get("updated_at") or item.get("created_at")) or "-")
-            preview_url = html.escape(str(item.get("preview_url", "") or ""))
-            preview_link = (
-                f'<a class="btn-sm btn-preview" href="{preview_url}" target="_blank" rel="noreferrer">查看预览</a>'
-                if preview_url else '<span class="no-link">无预览</span>'
-            )
-            status_cls = item_status.replace("_", "-")
-            item_rows.append(
-                f"""<tr class="item-row status-{status_cls}" data-item-id="{item_id}">
+        else:
+            for idx, item in enumerate(account_items):
+                item_id = html.escape(str(item.get("id", "")))
+                item_title = html.escape(str(item.get("title", ""))[:50])
+                item_status = str(item.get("status", ""))
+                status_cn = status_label(item_status)
+                score = safe_int(item.get("total_score", 0), default=0)
+                badge = str(item.get("quality_badge", ""))
+                updated = html.escape(display_datetime(item.get("updated_at") or item.get("created_at")) or "-")
+                preview_url = html.escape(str(item.get("preview_url", "") or ""))
+                preview_link = (
+                    f'<a class="btn-sm btn-preview" href="{preview_url}" target="_blank" rel="noreferrer">查看预览</a>'
+                    if preview_url else '<span class="no-link">无预览</span>'
+                )
+                status_cls = item_status.replace("_", "-")
+                row = f"""<tr class="item-row status-{status_cls}" data-item-id="{item_id}">
                 <td class="item-title">{item_title}</td>
                 <td><span class="badge badge-{status_cls}">{status_cn}</span></td>
                 <td class="item-score">{badge}{score}</td>
@@ -4382,7 +4384,14 @@ def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
                 <button class="btn-sm btn-reject" onclick="setStatus('{item_id}','rejected')">驳回</button>
                 </td>
                 </tr>"""
-            )
+                if idx < MAX_VISIBLE:
+                    visible_rows.append(row)
+                else:
+                    hidden_rows.append(row)
+        hidden_id = f"hidden-{account_id}"
+        toggle_btn = ""
+        if hidden_rows:
+            toggle_btn = f'<div class="toggle-wrap"><button class="btn-toggle" onclick="toggleRows(\'{hidden_id}\',this)">展开全部 {len(account_items)} 条 ▾</button></div>'
 
         is_football = track == "football"
         football_section = ""
@@ -4429,9 +4438,13 @@ def build_preview_portal(config: dict[str, Any]) -> dict[str, str]:
             <tr><th>标题</th><th>状态</th><th>评分</th><th>更新时间</th><th>操作</th></tr>
             </thead>
             <tbody>
-            {''.join(item_rows)}
+            {''.join(visible_rows)}
+            </tbody>
+            <tbody id="{hidden_id}" class="rows-hidden">
+            {''.join(hidden_rows)}
             </tbody>
             </table>
+            {toggle_btn}
             </div>
             </div>
             </div>
@@ -4699,6 +4712,22 @@ transition: all .3s ease;
 pointer-events: none;
 }}
 .toast.show {{ opacity: 1; transform: translateY(0); }}
+.rows-hidden {{ display: none; }}
+.rows-hidden.open {{ display: table-row-group; }}
+.toggle-wrap {{ text-align: center; padding: 8px 0; }}
+.btn-toggle {{
+background: 0;
+border: 0;
+color: #3b82f6;
+font-size: 13px;
+font-weight: 600;
+cursor: pointer;
+padding: 6px 16px;
+border-radius: 8px;
+transition: background .15s;
+}}
+.btn-toggle:hover {{ background: #eff6ff; }}
+.row-more {{ text-align: center; color: #94a3b8; font-size: 12px; padding: 10px !important; background: #fafafa; }}
 </style>
 </head>
 <body>
@@ -4737,6 +4766,13 @@ t.textContent = msg;
 t.style.background = isError ? '#dc2626' : '#1e293b';
 t.classList.add('show');
 setTimeout(function() {{ t.classList.remove('show'); }}, 3500);
+}}
+function toggleRows(id, btn) {{
+var tbody = document.getElementById(id);
+if (!tbody) return;
+var isOpen = tbody.classList.toggle('open');
+var total = parseInt(btn.textContent.match(/\\d+/)) || 0;
+btn.textContent = isOpen ? ('收起 ▴') : ('展开全部 ' + total + ' 条 ▾');
 }}
 function selectAccount(id) {{
 document.querySelectorAll('.sidebar-link').forEach(function(el) {{ el.classList.remove('active'); }});
