@@ -181,11 +181,11 @@
       "topic_require_any_keywords": true,
       "max_topic_age_hours": 72,
       "rss_sources": [
-        "https://news.google.com/rss/search?q=%E5%AE%B6%E5%BA%AD%E6%95%99%E8%82%B2+%E8%82%B2%E5%84%BF+%E6%96%B9%E6%B3%95&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=%E5%B0%8F%E5%AD%A6%E7%94%9F+%E5%AD%A6%E4%B9%A0%E4%B9%A0%E6%83%AF+%E4%B8%93%E6%B3%A8%E5%8A%9B&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=%E4%BA%B2%E5%AD%90%E6%B2%9F%E9%80%9A+%E6%83%85%E7%BB%AA%E7%AE%A1%E7%90%86+%E6%AD%A3%E9%9D%A2%E7%AE%A1%E6%95%99&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=%E9%9D%92%E6%98%A5%E6%9C%9F+%E5%84%BF%E7%AB%A5%E5%BF%83%E7%90%86+%E7%88%B6%E6%AF%8D+%E6%95%99%E8%82%B2&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=child+parenting+education+tips+psychology&hl=en&gl=US&ceid=US:en"
+        "https://www.bing.com/news/search?q=%E5%AE%B6%E5%BA%AD%E6%95%99%E8%82%B2+%E8%82%B2%E5%84%BF+%E6%96%B9%E6%B3%95&format=rss",
+        "https://www.bing.com/news/search?q=%E5%B0%8F%E5%AD%A6%E7%94%9F+%E5%AD%A6%E4%B9%A0%E4%B9%A0%E6%83%AF+%E4%B8%93%E6%B3%A8%E5%8A%9B&format=rss",
+        "https://www.bing.com/news/search?q=%E4%BA%B2%E5%AD%90%E6%B2%9F%E9%80%9A+%E6%83%85%E7%BB%AA%E7%AE%A1%E7%90%86+%E6%AD%A3%E9%9D%A2%E7%AE%A1%E6%95%99&format=rss",
+        "https://www.bing.com/news/search?q=%E9%9D%92%E6%98%A5%E6%9C%9F+%E5%84%BF%E7%AB%A5%E5%BF%83%E7%90%86+%E7%88%B6%E6%AF%8D+%E6%95%99%E8%82%B2&format=rss",
+        "https://www.bing.com/news/search?q=%E5%84%BF%E7%AB%A5%E6%95%99%E8%82%B2+%E6%97%A9%E6%95%99+%E5%90%AF%E8%92%99&format=rss"
       ],
       "system_prompt": "你是「育见成长研究所」的主编，专注为中国父母提供科学、实用、可操作的育儿和家庭教育内容。\n\n内容风格：温暖理性、循证依据、拒绝焦虑贩卖。每篇文章要让家长读完就有「今天就能试试」的具体行动。\n\n每篇文章必须包含：1）一个具体的育儿场景或痛点（如：孩子写作业拖拉、沉迷手机、不愿沟通），让家长产生「这不就是我家孩子吗」的共鸣；2）基于儿童心理学或教育学的科学解释（为什么孩子会这样，不要只给结论要讲原理）；3）2-3个具体可执行的解决方法（步骤清晰，家长能照着做）；4）适龄范围说明（这个方法适合几岁到几岁的孩子）。\n\n禁止内容：贩卖焦虑（「千万别错过关键期」「再不XX就晚了」）、夸大承诺（「三天见效」）、替代专业医疗建议、推荐具体药物或保健品。\n\n保持客观、有温度、真正对家长有帮助。"
     },
@@ -197,11 +197,11 @@
       "topic_require_any_keywords": true,
       "max_topic_age_hours": 120,
       "rss_sources": [
-        "https://news.google.com/rss/search?q=%E5%91%A8%E6%9C%AB+%E6%97%85%E6%B8%B8+%E6%94%BB%E7%95%A5+%E9%81%BF%E5%9D%91&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=%E8%87%AA%E9%A9%BE%E6%B8%B8+%E5%91%A8%E8%BE%B9%E6%B8%B8+%E5%B0%8F%E4%BC%97%E6%99%AF%E7%82%B9&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=%E6%B0%91%E5%AE%BF+%E6%89%93%E5%8D%A1+%E6%8B%8D%E7%85%A7+%E6%97%85%E6%B8%B8&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=%E9%9C%B2%E8%90%A5+%E6%88%B7%E5%A4%96+%E5%BE%92%E6%AD%A5+%E8%A1%8C%E7%A8%8B&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=weekend+getaway+travel+guide+itinerary+budget&hl=en&gl=US&ceid=US:en"
+        "https://www.bing.com/news/search?q=%E5%91%A8%E6%9C%AB+%E6%97%85%E6%B8%B8+%E6%94%BB%E7%95%A5+%E9%81%BF%E5%9D%91&format=rss",
+        "https://www.bing.com/news/search?q=%E8%87%AA%E9%A9%BE%E6%B8%B8+%E5%91%A8%E8%BE%B9%E6%B8%B8+%E5%B0%8F%E4%BC%97%E6%99%AF%E7%82%B9&format=rss",
+        "https://www.bing.com/news/search?q=%E6%B0%91%E5%AE%BF+%E6%89%93%E5%8D%A1+%E6%8B%8D%E7%85%A7+%E6%97%85%E6%B8%B8&format=rss",
+        "https://www.bing.com/news/search?q=%E9%9C%B2%E8%90%A5+%E6%88%B7%E5%A4%96+%E5%BE%92%E6%AD%A5+%E8%A1%8C%E7%A8%8B&format=rss",
+        "https://www.bing.com/news/search?q=%E6%97%85%E8%A1%8C%E6%94%BB%E7%95%A5+%E9%A2%84%E7%AE%97+%E5%85%8D%E8%B4%B9%E6%99%AF%E7%82%B9&format=rss"
       ],
       "system_prompt": "你是「周末出走研究所」的内容策划，专门为小红书用户提供高质量、真实可用的周末旅行攻略。\n\n内容定位：只做国内周末/短途旅行（1-3天），注重真实体验和实操性，不做「照骗」攻略。\n\n每篇文章必须包含：1）明确的行程路线（从哪里出发、怎么去、每天的具体安排），可按DAY1/DAY2分段呈现；2）真实预算明细（交通、住宿、餐饮、门票等分项费用，给出人均参考价）；3）至少2个避坑提醒（容易被坑的地方、不值得去的网红点、旺季排队技巧等，必须是真实经验）；4）拍照/打卡点位推荐（具体位置、最佳拍摄时间、构图建议）。\n\n风格要求：语言简洁明了、信息密度高、小红书图文友好。善用emoji做信息分层，段落短小精悍，重点信息加粗或标出。\n\n禁止内容：虚假滤镜照、夸大描述、旅行社/酒店付费推广、未核实的美食推荐。\n\n保持真实、实用、让读者看了就能直接出发。"
     },
@@ -213,11 +213,11 @@
       "topic_require_any_keywords": true,
       "max_topic_age_hours": 48,
       "rss_sources": [
-        "https://news.google.com/rss/search?q=%E7%83%AD%E6%A2%97+%E6%90%9E%E7%AC%91+%E8%A7%86%E9%A2%91+%E7%9F%AD%E8%A7%86%E9%A2%91&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=%E8%84%B1%E5%8F%A3%E7%A7%80+%E6%AE%B5%E5%AD%90+%E5%B9%BD%E9%BB%98+%E5%8F%8D%E8%BD%AC&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=%E7%BD%91%E7%BB%9C%E6%B5%81%E8%A1%8C%E8%AF%AD+%E8%99%9A%E6%9E%84+%E6%90%9E%E7%AC%91&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=%E8%81%8C%E5%9C%BA%E5%90%90%E6%A7%BD+%E7%94%9F%E6%B4%BB%E6%AE%B5%E5%AD%90+%E5%B9%BD%E9%BB%98&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        "https://news.google.com/rss/search?q=viral+comedy+sketch+funny+meme+trending&hl=en&gl=US&ceid=US:en"
+        "https://www.bing.com/news/search?q=%E7%83%AD%E6%A2%97+%E6%90%9E%E7%AC%91+%E8%A7%86%E9%A2%91+%E7%9F%AD%E8%A7%86%E9%A2%91&format=rss",
+        "https://www.bing.com/news/search?q=%E8%84%B1%E5%8F%A3%E7%A7%80+%E6%AE%B5%E5%AD%90+%E5%B9%BD%E9%BB%98+%E5%8F%8D%E8%BD%AC&format=rss",
+        "https://www.bing.com/news/search?q=%E7%BD%91%E7%BB%9C%E6%B5%81%E8%A1%8C%E8%AF%AD+%E8%99%9A%E6%9E%84+%E6%90%9E%E7%AC%91&format=rss",
+        "https://www.bing.com/news/search?q=%E8%81%8C%E5%9C%BA%E5%90%90%E6%A7%BD+%E7%94%9F%E6%B4%BB%E6%AE%B5%E5%AD%90+%E5%B9%BD%E9%BB%98&format=rss",
+        "https://www.bing.com/news/search?q=%E7%83%AD%E9%97%A8%E8%AF%9D%E9%A2%98+%E7%BD%91%E7%BB%9C%E6%A2%97+%E8%B6%A3%E9%97%BB&format=rss"
       ],
       "system_prompt": "你是「AI笑点工厂」的首席喜剧编剧，为快手平台创作AI生成的爆笑短剧脚本。目标受众是18-35岁年轻网民，熟悉网络热梗、喜欢出其不意的反转和犀利的社会观察。\n\n每篇脚本必须遵循以下结构：1）前3秒钩子（hook）——用一个反常识的画面、对话或自白开场，瞬间抓住注意力；2）15-25秒内必须有第一个反转——剧情朝意想不到的方向发展，打破观众的预期；3）30-40秒内达到笑点/包袱——可以是双关、callback、夸张的误会或犀利的讽刺；4）结尾余味——最好有一个「细思极笑」的结尾。\n\n热门题材方向：职场荒诞日常、AI与人类的尴尬互动、社交媒体的魔幻现象、情侣/朋友间的神操作、生活中那些离谱但真实的小事。\n\n节奏要求：每句台词不超过15字，对话密集、信息密度高。善用网络流行语和热梗，但不要堆砌。\n\n禁止内容：政治敏感、人身攻击、低俗色情、暴力血腥、恶意嘲讽弱势群体。\n\n保持幽默、犀利、紧跟热梗，让观众笑着看完后忍不住转发。"
     }
