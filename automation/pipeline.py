@@ -3464,6 +3464,16 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         f"<a class='download-pack' href='{html.escape(asset_pack_url)}' target='_blank' rel='noreferrer'>下载素材包</a>"
         "</div>"
         "<div class='status-actions'>"
+        "<div class='provider-row'>"
+        f"<label class='provider-label' for='provider-select-{queue_id}'>配图模型：</label>"
+        f"<select id='provider-select-{queue_id}' class='provider-select'>"
+        "<option value='auto'>自动（dashscope→replicate→svg）</option>"
+        "<option value='dashscope'>DashScope 通义万相</option>"
+        "<option value='replicate'>Replicate SDXL</option>"
+        "<option value='svg'>SVG 插图（免费）</option>"
+        "</select>"
+        "</div>"
+        "<div class='action-btns'>"
         f"<button type='button' onclick=\"setStatus('{queue_id}','approved',this)\">选用</button>"
         f"<button type='button' onclick=\"setStatus('{queue_id}','posted',this)\">已发布</button>"
         f"<button type='button' class='danger' onclick=\"setStatus('{queue_id}','rejected',this)\">丢弃</button>"
@@ -3471,6 +3481,7 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
         f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','draft_images',this)\">重写文案+配图</button>"
         f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','images',this)\">重新配图</button>"
         f"<button type='button' class='secondary' onclick=\"runAction('{queue_id}','pack',this)\">重建素材包</button>"
+        "</div>"
         "<span class='status-result'></span>"
         "</div>"
         f"<div class='next-step'>运营提示：{next_step}</div>"
@@ -3574,7 +3585,15 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     .copy-actions {{ display:flex; flex-wrap:wrap; gap:8px; }}
     .copy-actions button {{ border:0; background:#2563eb; color:#fff; border-radius:8px; padding:7px 10px; cursor:pointer; font-size:12px; }}
     .download-pack {{ display:inline-flex; align-items:center; background:#059669; color:#fff; border-radius:8px; padding:7px 10px; text-decoration:none; font-size:12px; }}
-    .status-actions {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; }}
+    .provider-row {{ display:flex; align-items:center; gap:6px; padding:8px 0 4px; }}
+    .provider-label {{ font-size:12px; color:#64748b; white-space:nowrap; }}
+    .provider-select {{ border:1px solid #cbd5e1; border-radius:6px; padding:4px 6px; font-size:12px; background:#fff; color:#1e293b; cursor:pointer; }}
+    .provider-select:focus {{ outline:0; border-color:#3b82f6; box-shadow:0 0 0 2px rgba(59,130,246,.15); }}
+    .action-btns {{ display:flex; gap:6px; flex-wrap:wrap; }}
+    .action-btns button {{ border:0; background:#0f766e; color:#fff; border-radius:8px; padding:7px 10px; cursor:pointer; font-size:12px; }}
+    .action-btns button.danger {{ background:#dc2626; }}
+    .action-btns button.secondary {{ background:#475569; }}
+    .status-actions {{ margin-top:10px; }}
     .status-actions button {{ border:0; background:#0f766e; color:#fff; border-radius:8px; padding:7px 10px; cursor:pointer; font-size:12px; }}
     .status-actions button.danger {{ background:#dc2626; }}
     .status-actions button.secondary {{ background:#475569; }}
@@ -3708,10 +3727,12 @@ def build_preview_html(config: dict[str, Any], item: dict[str, Any], content: di
     }}
     async function runAction(id, action, btn) {{
       const box = btn.closest('.status-actions').querySelector('.status-result');
+      const sel = document.getElementById('provider-select-' + id);
+      const provider = sel ? sel.value : 'auto';
       box.innerText = '处理中...';
       btn.disabled = true;
       try {{
-        const resp = await fetch('/action?id=' + encodeURIComponent(id) + '&action=' + encodeURIComponent(action));
+        const resp = await fetch('/action?id=' + encodeURIComponent(id) + '&action=' + encodeURIComponent(action) + '&provider=' + encodeURIComponent(provider));
         box.innerText = await resp.text();
       }} finally {{
         btn.disabled = false;
@@ -6590,6 +6611,12 @@ def command_serve_review(args: argparse.Namespace) -> None:
                     return
                 try:
                     config = load_config(Path(config_path))
+                    provider = (params.get("provider") or [""])[0].strip().lower()
+                    if provider in {"dashscope", "replicate", "svg"}:
+                        cfg_image = config.setdefault("cloud_media", {}).setdefault("image", {})
+                        cfg_image["provider"] = provider
+                        if provider == "svg":
+                            cfg_image["svg_fallback"] = True
                     queue = load_queue()
                     item = next((entry for entry in queue if entry.get("id") == item_id), None)
                     if item is None:
