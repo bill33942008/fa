@@ -2270,6 +2270,21 @@ def build_cloud_image_prompts(item: dict[str, Any], count: int = 3) -> list[str]
     return prompts
 
 
+def normalize_image_markers(item: dict[str, Any]) -> None:
+    """Remove excess 【配图N】 markers from item body fields to match actual image count."""
+    images = item.get("illustration_urls", []) or item.get("illustration_files", [])
+    count = max(1, len(images) if isinstance(images, list) else 1)
+    for field in ("body_markdown", "body_preview", "content_markdown"):
+        text = item.get(field, "")
+        if not text:
+            continue
+        for n in range(count + 1, 20):
+            text = text.replace(f"\u3010\u914d\u56fe{n}\u3011", "")
+        if count >= 1:
+            text = text.replace(f"\u3010\u914d\u56fe1\u3011", "【配图1】")
+        item[field] = text
+
+
 def generate_svg_illustration(track: str, title: str, scene: str, idx: int) -> str:
     """Generate a rich scene-based SVG illustration for content articles."""
     import hashlib
@@ -3087,6 +3102,7 @@ def render_cloud_illustrations_for_items(
             results.append({"id": item.get("id"), **result})
             if result.get("status") == "ok":
                 print(f"[OK] illustrations rendered {item.get('id')} -> {result.get('count', 0)} image(s)")
+                normalize_image_markers(item)
         except Exception as exc:  # pylint: disable=broad-except
             if bool(image_cfg.get("allow_placeholder_fallback", True)):
                 fallback = create_placeholder_illustrations_for_item(
@@ -3101,6 +3117,7 @@ def render_cloud_illustrations_for_items(
                     f"[OK] illustrations fallback {item.get('id')} -> "
                     f"{fallback.get('count', 0)} image(s)"
                 )
+                normalize_image_markers(item)
             else:
                 item["notes"] = (str(item.get("notes", "")).strip() + f" | 云插图失败: {exc}").strip(" |")
                 item["updated_at"] = now_local().isoformat()
@@ -6585,6 +6602,7 @@ def command_serve_review(args: argparse.Namespace) -> None:
                         message = f"文案和配图已重写：{result.get('score')}分"
                     elif action == "images":
                         render_cloud_illustrations_for_items(config, [item])
+                        normalize_image_markers(item)
                         message = "已重新配图"
                     else:
                         build_asset_pack_for_item(config, item)
