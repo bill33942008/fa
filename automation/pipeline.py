@@ -5747,6 +5747,7 @@ def command_plan_day(args: argparse.Namespace) -> None:
     dashboard_index = build_dashboard_index(config, queue, date)
     if dashboard_index["index_file"]:
         print(f"[OK] Dashboard index: {dashboard_index['index_file']}")
+    save_queue(queue)
     preview_portal = build_preview_portal(config)
     if preview_portal["portal_file"]:
         print(f"[OK] Preview portal: {preview_portal['portal_file']}")
@@ -6086,8 +6087,8 @@ def command_generate_account(args: argparse.Namespace) -> None:
     preview_index = build_preview_index(config, date_items, date)
     accounts_index = build_accounts_index(config, queue, date)
     build_dashboard_index(config, queue, date)
-    preview_portal = build_preview_portal(config)
     save_queue(queue)
+    preview_portal = build_preview_portal(config)
 
     print(f"[OK] preview index: {preview_index.get('index_url') or preview_index.get('index_file')}")
     print(f"[OK] accounts page: {accounts_index.get('index_url') or accounts_index.get('index_file')}")
@@ -6180,8 +6181,8 @@ def command_generate_football(args: argparse.Namespace) -> None:
         preview_index = build_preview_index(config, date_items, date)
         accounts_index = build_accounts_index(config, queue, date)
         build_dashboard_index(config, queue, date)
-        preview_portal = build_preview_portal(config)
         save_queue(queue)
+        preview_portal = build_preview_portal(config)
 
         print(f"[OK] preview index: {preview_index.get('index_url') or preview_index.get('index_file')}")
         print(f"[OK] accounts page: {accounts_index.get('index_url') or accounts_index.get('index_file')}")
@@ -6292,8 +6293,8 @@ def command_serve_review(args: argparse.Namespace) -> None:
                     build_preview_index(config, [entry for entry in queue if entry.get("date") == date], date)
                     build_accounts_index(config, queue, date)
                     build_dashboard_index(config, queue, date)
-                    build_preview_portal(config)
                     save_queue(queue)
+                    build_preview_portal(config)
                     print(f"[OK] 自由内容已生成 -> {item.get('id')} {item.get('title')}")
                     print(f"[OK] 预览链接: {item.get('preview_url')}")
                     print(f"[OK] 素材包: {item.get('asset_pack_url')}")
@@ -6383,8 +6384,8 @@ def command_serve_review(args: argparse.Namespace) -> None:
                         build_preview_index(config, date_items, actual_date)
                         build_accounts_index(config, queue, actual_date)
                         build_dashboard_index(config, queue, actual_date)
-                        build_preview_portal(config)
                         save_queue(queue)
+                        build_preview_portal(config)
                         print(f"[DONE] 足球分析生成完成")
                         break
                 writer.flush()
@@ -6509,6 +6510,7 @@ def command_serve_review(args: argparse.Namespace) -> None:
                         build_preview_index(config, [entry for entry in queue if entry.get("date") == item_date], item_date)
                         build_accounts_index(config, queue, item_date)
                         build_dashboard_index(config, queue, item_date)
+                        save_queue(queue)
                         build_preview_portal(config)
                         break
                     if not found:
@@ -6556,8 +6558,8 @@ def command_serve_review(args: argparse.Namespace) -> None:
                     build_preview_index(config, [entry for entry in queue if entry.get("date") == item_date], item_date)
                     build_accounts_index(config, queue, item_date)
                     build_dashboard_index(config, queue, item_date)
-                    build_preview_portal(config)
                     save_queue(queue)
+                    build_preview_portal(config)
                     self.send_response(200)
                 except Exception as exc:  # pylint: disable=broad-except
                     message = f"操作失败：{exc}"
@@ -6635,8 +6637,8 @@ def command_serve_review(args: argparse.Namespace) -> None:
                         build_preview_index(config, [entry for entry in queue if entry.get("date") == item_date], item_date)
                         build_accounts_index(config, queue, item_date)
                         build_dashboard_index(config, queue, item_date)
-                        build_preview_portal(config)
                         save_queue(queue)
+                        build_preview_portal(config)
                         print(f"[OK] Images regenerated for {item_id}")
                     except Exception as exc:
                         status_code = 500
@@ -6984,13 +6986,13 @@ def command_preview(args: argparse.Namespace) -> None:
         dashboard_index = build_dashboard_index(config, queue, item_date)
         print(f"[OK] dashboard index ({item_date}): {dashboard_index['index_file']}")
 
+    save_queue(queue)
     preview_portal = build_preview_portal(config)
     if preview_portal["portal_file"]:
         print(f"[OK] preview portal: {preview_portal['portal_file']}")
         if preview_portal["portal_url"]:
             print(f"[OK] preview portal url: {preview_portal['portal_url']}")
 
-    save_queue(queue)
     if args.sync_feishu:
         sync_queue_to_feishu_bitable(config, queue)
 
@@ -7059,8 +7061,8 @@ def command_render_illustrations(args: argparse.Namespace) -> None:
     for item_date, items in grouped_by_date.items():
         build_preview_index(config, [item for item in queue if item.get("date") == item_date], item_date)
         build_accounts_index(config, queue, item_date)
-    build_preview_portal(config)
     save_queue(queue)
+    build_preview_portal(config)
     ok_count = len([x for x in results if x.get("status") == "ok"])
     print(f"[DONE] Cloud illustration render complete. success={ok_count}")
     if args.sync_feishu:
