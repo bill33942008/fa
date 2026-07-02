@@ -1093,6 +1093,8 @@ def generate_draft(
             - 如果涉及足球竞彩，必须理性分析，不承诺收益，不诱导下注。
             - 足球内容只写【尚未发生】的赛前分析，如果比赛已结束请拒绝生成。
             - 不要编造比赛阶段（小组赛/淘汰赛/1/4决赛等）、比分、进球人等具体细节。
+            - 必须包含竞彩推荐：如胜平负、让球、总进球数、比分参考等，基于双方实力对比给出建议。
+            - 必须有赔率分析：对比两队近期状态、主客场、伤病影响，给出理性判断。
             - 文末「---」后必须加上：以上均为个人观点，仅供参考。本文章信息内容部分来源于网络，不构成任何购买建议。购彩请到正规平台。
             - 配图位置：用「【配图1】」标记在正文中即可，不要写额外的配图描述或建议文字。
             - 禁止出现"配图建议"、"配图0"、"image-marker"等字样的说明文字。
@@ -2341,7 +2343,7 @@ def normalize_image_markers(item: dict[str, Any]) -> None:
                 text = text.replace(fmt.format(sn), "")
         # Unify any remaining marker references to 【配图1】
         import re
-        text = re.sub(r'配图\s*1', '【配图1】', text)
+        text = re.sub(r'(?<!【)配图\s*1(?!】)', '【配图1】', text)
         # Final cleanup: any stray 【配图N】 where N > count gets removed
         for n in range(20, count, -1):
             text = text.replace(f"【配图{n}】", "")
