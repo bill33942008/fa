@@ -1093,7 +1093,7 @@ def generate_draft(
             - 如果涉及足球竞彩，必须理性分析，不承诺收益，不诱导下注。
             - 足球内容只写【尚未发生】的赛前分析，如果比赛已结束请拒绝生成。
             - 不要编造比赛阶段（小组赛/淘汰赛/1/4决赛等）、比分、进球人等具体细节。
-            - 必须包含竞彩推荐：如胜平负、让球、总进球数、比分参考等，基于双方实力对比给出建议。
+            - 必须包含竞彩推荐：如胜平负、让球、总进球数、比分参考等，基于双方实力对比给出建议。格式示例：「竞彩推荐：主胜 ⭐⭐⭐」「让球推荐：主队-0.5 胜」「总进球：2-3球」。即使文章是综述类，也要为涉及的关键对局给出推荐。
             - 必须有赔率分析：对比两队近期状态、主客场、伤病影响，给出理性判断。
             - 文末「---」后必须加上：以上均为个人观点，仅供参考。本文章信息内容部分来源于网络，不构成任何购买建议。购彩请到正规平台。
             - 配图位置：用「【配图1】」标记在正文中即可，不要写额外的配图描述或建议文字。
@@ -1189,12 +1189,131 @@ def replace_markdown_sections_by_keywords(markdown_text: str, keywords: list[str
     return "\n".join(result)
 
 
+# ── 敏感词过滤映射表（公众号/小红书/抖音敏感词 → 安全替代表达） ──
+SENSITIVE_WORD_MAP = {
+    # === 金融/博彩夸大 ===
+    "稳赚": "值得关注",
+    "包赢": "胜率较高",
+    "必胜": "胜算较大",
+    "必中": "值得关注",
+    "必涨": "走势向好",
+    "稳胆": "信心推荐",
+    "杀庄": "",
+    "暴击": "高回报",
+    "回血": "调整策略",
+    "带你上岸": "",
+    "连红": "状态良好",
+    "100%命中": "较高命中率",
+    "100%准确": "较准",
+    "保证收益": "预期收益",
+    "翻倍": "显著增长",
+    "内幕消息": "深度分析",
+    "内幕": "深度",
+    "涨停": "强劲表现",
+    "涨停板": "表现亮眼",
+    "抄底": "低位布局",
+    "牛股": "潜力标的",
+    "金股": "优质标的",
+    "出货": "调整",
+    "庄家": "主力资金",
+    "洗盘": "震荡整理",
+    "建仓": "布局",
+    "拉升": "上涨",
+    "暴富": "财富积累",
+
+    # === 医疗/健康夸大 ===
+    "治愈": "改善",
+    "特效": "有效",
+    "根治": "显著缓解",
+    "秘方": "传统方法",
+    "神药": "良药",
+    "100%有效": "有助改善",
+    "不反弹": "效果持续",
+
+    # === 绝对化/夸大用语（广告法相关） ===
+    "全网第一": "领先",
+    "销量第一": "热销",
+    "全国第一": "全国领先",
+    "第一品牌": "领先品牌",
+    "最佳": "优秀",
+    "最好": "很好",
+    "最棒": "出色",
+    "最便宜": "高性价比",
+    "全网最低": "优惠价格",
+    "最低价": "优惠价",
+    "顶级": "高端",
+    "极致": "出色",
+    "完美": "理想",
+    "100%": "绝大部分",
+    "绝对": "相当",
+    "保证": "建议",
+    "首选": "推荐",
+    "唯一": "稀缺",
+    "首个": "率先",
+    "独家": "特定",
+    "国家级": "行业级",
+    "最高级": "高级",
+    "全网首发": "全新发布",
+
+    # === 赌博/博彩敏感（竞彩合规） ===
+    "赌博": "博彩",
+    "赌球": "竞彩",
+    "下注": "投注",
+    "大赌": "大注",
+
+    # === 诱导/承诺性用语 ===
+    "免费领取": "限量领取",
+    "不花一分钱": "低成本",
+    "无风险": "低风险",
+    "稳赚不赔": "值得关注",
+}
+
+# 用于正则匹配的敏感词模式（独立成词/短语，不只是子串匹配）
+SENSITIVE_WORD_REGEX_PATTERNS: list[tuple[str, str]] = [
+    # 纯替换的可以直接在dict中处理，这里放需要正则的复杂模式
+]
+
+
+def sanitize_sensitive_words(text: str, track: str = "") -> str:
+    """Replace WeChat/公众号 sensitive words with safe alternatives."""
+    if not text:
+        return text
+
+    # 逐词替换
+    for bad, good in SENSITIVE_WORD_MAP.items():
+        if not good:
+            # empty replacement = remove the bad word entirely
+            text = text.replace(bad, "")
+        else:
+            text = text.replace(bad, good)
+
+    # 清理多余空格（由删除操作导致）
+    import re
+    text = re.sub(r" {2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
+
+
 def sanitize_draft_for_accuracy(
     draft: dict[str, Any],
     platform_cfg: dict[str, Any],
     track_cfg: dict[str, Any],
     topic: dict[str, Any],
 ) -> dict[str, Any]:
+    # 1. Apply sensitive word filtering to ALL text fields (all tracks)
+    track_desc = str(track_cfg.get("description", "")).lower()
+    track_name = track_desc  # rough heuristic
+    for field in ("title", "hook", "body_markdown", "cover_text"):
+        val = draft.get(field, "")
+        if isinstance(val, str) and val.strip():
+            draft[field] = sanitize_sensitive_words(val, track_desc)
+    # Hashtags list
+    hashtags = draft.get("hashtags", [])
+    if isinstance(hashtags, list):
+        draft["hashtags"] = [sanitize_sensitive_words(str(h), track_desc) for h in hashtags]
+
+    # 2. Football-specific accuracy fixes (only for football)
     description = str(track_cfg.get("description", "")).lower()
     system_prompt = str(track_cfg.get("system_prompt", ""))
     if "football" not in description and "足球" not in system_prompt:
@@ -2248,6 +2367,15 @@ def rewrite_queue_item_draft(
         item["illustration_urls"] = []
         render_cloud_illustrations_for_items(config, [item])
     normalize_image_markers(item)
+    # Final safety pass: sensitive word filter on all text fields
+    track_name_lower = track_name.lower()
+    for field in ("title", "hook_text", "body_markdown", "cover_text", "body_preview", "content_markdown"):
+        val = item.get(field, "")
+        if isinstance(val, str) and val.strip():
+            item[field] = sanitize_sensitive_words(val, track_name_lower)
+    hashtags = item.get("hashtags", [])
+    if isinstance(hashtags, list):
+        item["hashtags"] = [sanitize_sensitive_words(str(h), track_name_lower) for h in hashtags]
     generate_preview_for_item(config, item)
     return {"status": "ok", "id": queue_id, "title": item.get("title", ""), "score": item.get("total_score", 0)}
 
