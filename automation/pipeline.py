@@ -972,9 +972,8 @@ def fallback_draft(
             3. 最后给读者可执行建议：去哪看、怎么选、怎么避坑、怎么行动。
 
             ## 发布建议
-            - 配图 1：开头场景图
-            - 配图 2：核心观点图
-            - 配图 3：总结/清单图
+            - 配图 1：文章配图（仅一张）
+            - 配图位置：正文中用「【配图1】」标记即可
 
             ## 参考来源
             - 标题：{title}
@@ -2191,6 +2190,7 @@ def rewrite_queue_item_draft(
         item["illustration_files"] = []
         item["illustration_urls"] = []
         render_cloud_illustrations_for_items(config, [item])
+    normalize_image_markers(item)
     generate_preview_for_item(config, item)
     return {"status": "ok", "id": queue_id, "title": item.get("title", ""), "score": item.get("total_score", 0)}
 
@@ -2271,18 +2271,26 @@ def build_cloud_image_prompts(item: dict[str, Any], count: int = 3) -> list[str]
 
 
 def normalize_image_markers(item: dict[str, Any]) -> None:
-    """Remove excess 【配图N】 markers from item body fields to match actual image count."""
+    """Remove excess image markers from body fields to match actual image count.
+    Handles: 【配图N】, 配图N, 插图N, 图片N, 配图建议N, 配图 N, 插图 N etc."""
     images = item.get("illustration_urls", []) or item.get("illustration_files", [])
     count = max(1, len(images) if isinstance(images, list) else 1)
     for field in ("body_markdown", "body_preview", "content_markdown"):
         text = item.get(field, "")
         if not text:
             continue
-        for n in range(count + 1, 20):
-            text = text.replace(f"\u3010\u914d\u56fe{n}\u3011", "")
-        if count >= 1:
-            text = text.replace(f"\u3010\u914d\u56fe1\u3011", "【配图1】")
-        item[field] = text
+        # Replace excess numbered markers (N > count) with empty
+        for n in range(20, count, -1):
+            sn = str(n)
+            for fmt in ("【配图{}】", "配图{}", "插图{}", "图片{}", "配图建议{}", "配图 {}", "插图 {}"):
+                text = text.replace(fmt.format(sn), "")
+        # Unify any remaining marker references to 【配图1】
+        import re
+        text = re.sub(r'配图\s*1', '【配图1】', text)
+        # Final cleanup: any stray 【配图N】 where N > count gets removed
+        for n in range(20, count, -1):
+            text = text.replace(f"【配图{n}】", "")
+        item[field] = text.strip()
 
 
 def generate_svg_illustration(track: str, title: str, scene: str, idx: int) -> str:
